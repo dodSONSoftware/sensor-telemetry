@@ -1,0 +1,20 @@
+# Sensor Telemetry Service configuration
+
+# Logging (debug, error, warn, info)
+log-level: debug
+
+# Prometheus metrics server port
+prometheus-port: 3301
+
+# MQTT broker connection
+mqtt-broker-ip-address: "10.10.10.64"
+mqtt-topic-telemetry: "iot/telemetry"
+mqtt-topic-command: "iot/v2/command"
+mqtt-topic-command-response: "iot/v2/command-response"
+
+# Optional: Prometheus source label sanitization
+sensor-source-max-length: 30
+sensor-source-valid-chars-regex: "a-zA-Z0-9._-"
+
+# Optional: silence timeout for command responses (default: 1500ms)
+command-silence-timeout-ms: 5000
