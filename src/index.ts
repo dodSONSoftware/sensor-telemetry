@@ -29,8 +29,10 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     let configResult = read_file_yaml<z.infer<typeof configSchema>>(
         "/app/configs/config.yml"
     );
+    let configSource = "/app/configs/config.yml";
     if (configResult.data === null) {
         configResult = read_file_yaml<z.infer<typeof configSchema>>("./dist/config.yml");
+        configSource = "./dist/config.yml";
     }
     if (configResult.data === null) {
         // eslint-disable-next-line no-console
@@ -46,7 +48,8 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     // createLogger(config) above guarantees logger() returns a defined Logger
     const appLogger = logger() as Logger;
 
-    // display configuration
+    // display configuration source and contents
+    appLogger.write_info("index.ts", `Configuration loaded from: ${configSource}`);
     appLogger.write_info("index.ts", `CONFIGURATION:\n${JSON.stringify(config, null, 2)}`);
 
     // log it

@@ -69,6 +69,10 @@ export class PrometheusWriter {
             if (req.url === "/metrics") {
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
+            } else if (req.url === "/health") {
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(200);
+                res.end(JSON.stringify({ status: "healthy", timestamp: new Date().toISOString() }));
             } else {
                 res.statusCode = 404;
                 res.end("Not Found");

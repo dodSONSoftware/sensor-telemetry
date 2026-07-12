@@ -53,19 +53,19 @@ export class Logger implements ILogger {
         return this.global_log_level_name;
     }
 
-    write_info(originator: string, message: string, _start_date?: Date, _requestId?: string): void {
+    write_info(originator: string, message: string): void {
         this.logger.info(`[${originator}] ${message}`);
     }
 
-    write_warn(originator: string, message: string, _start_date?: Date, _requestId?: string): void {
+    write_warn(originator: string, message: string): void {
         this.logger.warn(`[${originator}] ${message}`);
     }
 
-    write_error(originator: string, message: string, _start_date?: Date, _requestId?: string): void {
+    write_error(originator: string, message: string): void {
         this.logger.error(`[${originator}] ${message}`);
     }
 
-    write_debug(originator: string, message: string, _start_date?: Date, _requestId?: string): void {
+    write_debug(originator: string, message: string): void {
         this.logger.debug(`[${originator}] ${message}`);
     }
 }

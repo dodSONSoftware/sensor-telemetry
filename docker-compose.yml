@@ -1,15 +1,13 @@
-version: "3.8"
-
 services:
   sensor-telemetry:
-    image: node:22-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: sensor-telemetry
-    working_dir: /app
     ports:
       - "3301:3301"
     volumes:
       - /mnt/sensor-telemetry/config.yml:/app/configs/config.yml:ro
-    command: sh -c "npm install && npm run build && node ./dist/index.js"
     restart: unless-stopped
     environment:
       - NODE_ENV=production

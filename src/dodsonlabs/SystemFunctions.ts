@@ -220,29 +220,3 @@ export function formatElapsedTime(ms: number): string {
 }
 
 // **** process functions
-
-/**
- * @deprecated DO NOT USE. This function executes arbitrary shell commands and
- * is vulnerable to command injection if the input is ever derived from user data.
- * It has no callers and will be removed in a future release.
- */
-// export async function executeBashCommand(cmd: string): Promise<string> {
-//   return new Promise<string>((resolve, reject) => {
-//     childProc.exec(cmd, (error, stdout, stderr) => {
-//       if (error) {
-//         const msg = `Error executing script: ${error.message}`;
-//         reject(new Error(msg));
-//       }
-//       if (stderr) {
-//         const msg = `Script error output: ${stderr}`;
-//         reject(new Error(msg));
-//       }
-//       resolve(stdout); // Resolve with the standard output
-//     });
-//   });
-//}
-// test change
-// test change
-// another test
-// final test
-// test

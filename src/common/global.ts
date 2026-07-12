@@ -4,7 +4,7 @@
  */
 
 import os from "os";
-import { AsyncLocalStorage } from "async_hooks";
+import path from "path";
 import type { IAbout } from "../dodsonlabs/Interfaces";
 import { Logger } from "../dodsonlabs/Logger";
 import type { configSchema } from "../schemas/config";
@@ -13,7 +13,10 @@ import type { z } from "zod";
 // Load version from package.json at module load time
 import { createRequire } from "module";
 const pkgRequire = createRequire(__filename);
-const { version } = pkgRequire("./package.json") as { version: string };
+// Resolve path relative to __dirname for reliability across environments
+// __dirname is /app/dist/common when loaded from dist, so go up two levels
+const packageJsonPath = path.join(__dirname, "../..", "package.json");
+const { version } = pkgRequire(packageJsonPath) as { version: string };
 
 // **** public functions
 
@@ -26,17 +29,6 @@ export const createLogger = (config: z.infer<typeof configSchema>) => {
     setLogger(new Logger(config));
 };
 
-// ---- Request ID propagation via AsyncLocalStorage
-
-export const _reqIdStore = new AsyncLocalStorage<string>();
-
-/**
- * Return the current request's ID, or "none" if outside a request context.
- * Use this in Logger methods so every log line is traceable.
- */
-export const reqId = () => _reqIdStore.getStore() ?? "none";
-
-// --------------------------------
 
 let _aboutDudeInfo: IAbout | null = null;
 
@@ -60,8 +52,7 @@ export function aboutDude(): IAbout {
                 copyright: "Copyright (c) 2025-2026 dodson Software ( dodson labs )",
                 license: "Licensed under the MIT License with Patent Grant and NOTICE preservation."
             },
-            system_info: sys_info,
-            commands: []
+            system_info: sys_info
         };
     }
 

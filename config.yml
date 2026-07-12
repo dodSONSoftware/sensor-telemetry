@@ -13,4 +13,3 @@ mqtt-topic-telemetry: "iot/telemetry"
 # Optional: Prometheus source label sanitization
 sensor-source-max-length: 30
 sensor-source-valid-chars-regex: "a-zA-Z0-9._-"
-

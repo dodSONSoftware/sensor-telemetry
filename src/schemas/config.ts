@@ -23,12 +23,6 @@ export const configSchema = z.object({
     "mqtt-topic-telemetry": z.string({
         error: "mqtt-topic-telemetry must be a string",
     }).min(1, "mqtt-topic-telemetry must not be empty"),
-    "mqtt-topic-command": z.string({
-        error: "mqtt-topic-command must be a string",
-    }).min(1, "mqtt-topic-command must not be empty"),
-    "mqtt-topic-command-response": z.string({
-        error: "mqtt-topic-command-response must be a string",
-    }).min(1, "mqtt-topic-command-response must not be empty"),
     "sensor-source-max-length": z.number({
         error: "sensor-source-max-length must be a number",
     }).int("sensor-source-max-length must be an integer")
@@ -39,11 +33,6 @@ export const configSchema = z.object({
     "forward-sensor-logs-level": z.enum(["error", "warn", "info", "debug"], {
         error: "forward-sensor-logs-level must be one of: error, warn, info, debug",
     }).optional(),
-    "command-silence-timeout-ms": z.number({
-        error: "command-silence-timeout-ms must be a number",
-    }).int("command-silence-timeout-ms must be an integer")
-        .positive("command-silence-timeout-ms must be greater than 0")
-        .optional(),
 });
 
 /**

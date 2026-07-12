@@ -7,11 +7,9 @@ import mqtt from "mqtt";
 import * as sysFunc from "./SystemFunctions";
 import { PrometheusWriter } from "./PrometheusWriter";
 import { LogLevel } from "./Interfaces";
-import type { ILogger, IMqttCommandControl, IMqttNetworking } from "./Interfaces";
-import { MqttCommandControl } from "./MqttCommandControl";
+import type { ILogger, IMqttNetworking } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
-import { Histogram } from "prom-client";
 
 
 
@@ -33,8 +31,6 @@ export class MqttNetworking implements IMqttNetworking {
         this.configuration = config;
         this.mqtt_server_ip_address = config["mqtt-broker-ip-address"];
         this.mqtt_topic_telemetry = config["mqtt-topic-telemetry"];
-        this.mqtt_topic_command = config["mqtt-topic-command"];
-        this.mqtt_topic_command_response = config["mqtt-topic-command-response"];
         // ----
         this.logger = logger;
         this.originator = "networking";
@@ -46,17 +42,6 @@ export class MqttNetworking implements IMqttNetworking {
             : LogLevel.Debug;
         // ----
         this.promWriter = new PrometheusWriter(this.configuration, this.logger);
-
-        // create command latency histogram
-        this.prometheus_command_latency_histogram = new Histogram({
-            name: "mqtt_command_latency_seconds",
-            help: "Round-trip latency for MQTT commands in seconds.",
-            labelNames: ["command"] as const,
-            buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
-        });
-
-        // ---- command silence timeout (default 1500ms for backward compatibility)
-        this.__command_silence_timeout_ms = config["command-silence-timeout-ms"] ?? 1500;
 
         // create mqtt client and connect to mqtt server
         this.mqtt_client = this.connect_to_mqtt_broker();
@@ -112,70 +97,14 @@ export class MqttNetworking implements IMqttNetworking {
     // ----
     private readonly mqtt_server_ip_address: string;
     public readonly mqtt_topic_telemetry: string;
-    public readonly mqtt_topic_command: string;
-    private readonly mqtt_topic_command_response: string;
     // ----
     private readonly originator: string;
     // ----
     private readonly forward_sensor_logs: boolean;
     private readonly forward_sensor_logs_level: LogLevel;
 
-    // ---- command deduplication
-    private readonly seen_command_ids: Map<string, number> = new Map();
-    private readonly __dedup_ttl_ms = 60_000; // 1 minute TTL for command IDs
-    private readonly __dedup_max_size = 10_000; // cap to prevent unbounded growth
-
-    // ---- command latency tracking
-    private readonly __command_publish_times: Map<string, number> = new Map();
-    private readonly __latency_max_size = 10_000; // cap to prevent unbounded growth
-    private prometheus_command_latency_histogram: Histogram<string> | undefined;
-
-    // ---- command silence timeout
-    private readonly __command_silence_timeout_ms: number;
-
     // ********
     // ******** PRIVATE FUNCTIONS
-
-    // ---- command deduplication
-
-    /**
-   * Register a command ID for deduplication tracking.
-   * Returns true if this is a new (non-duplicate) command ID.
-   * Uses a bounded map: when full, evicts the oldest entry (O(1)).
-   */
-    register_command_id(command_id: string): boolean {
-        if (this.seen_command_ids.has(command_id)) {
-            return false;
-        }
-
-        // Evict oldest entry when at capacity to prevent unbounded growth
-        if (this.seen_command_ids.size >= this.__dedup_max_size) {
-            const firstKey = this.seen_command_ids.keys().next().value;
-            if (firstKey !== undefined) {
-                this.seen_command_ids.delete(firstKey);
-            }
-        }
-
-        this.seen_command_ids.set(command_id, Date.now());
-        return true;
-    }
-
-    /**
-   * Check if a command ID has already been seen (duplicate).
-   * Expired entries are cleaned up lazily at lookup time.
-   */
-    private is_duplicate_command(command_id: string): boolean {
-        const timestamp = this.seen_command_ids.get(command_id);
-        if (timestamp === undefined) {
-            return false;
-        }
-        // Expired — evict and treat as new
-        if (Date.now() - timestamp > this.__dedup_ttl_ms) {
-            this.seen_command_ids.delete(command_id);
-            return false;
-        }
-        return true;
-    }
 
     private connect_to_mqtt_broker(): mqtt.MqttClient {
         const client = mqtt.connect(`mqtt://${this.mqtt_server_ip_address}`, {
@@ -242,53 +171,6 @@ export class MqttNetworking implements IMqttNetworking {
         await Promise.race([closePromise, timeoutPromise]);
     }
 
-    public publish_mqtt_message(topic: string, message: Record<string, any>): void {
-        const now = Date.now();
-
-        // Outbound command deduplication: reject duplicate command IDs before publishing.
-        const command_id = message["command-id"];
-        if (command_id !== undefined) {
-            const cid = String(command_id);
-            if (this.is_duplicate_command(cid)) {
-                this.logger.write_debug(
-                    this.originator,
-                    `<publish_mqtt_message> => Duplicate command-id '${command_id}', skipping publish`
-                );
-                return;
-            }
-            // Register for future dedup checks (bounded map, O(1) eviction).
-            this.register_command_id(cid);
-        }
-
-        // Record publish timestamp for latency tracking (bounded map, O(1) eviction).
-        if (command_id !== undefined) {
-            const latencyKey = String(command_id);
-            if (this.__command_publish_times.size >= this.__latency_max_size) {
-                const firstKey = this.__command_publish_times.keys().next().value;
-                if (firstKey !== undefined) {
-                    this.__command_publish_times.delete(firstKey);
-                }
-            }
-            this.__command_publish_times.set(latencyKey, now);
-        }
-
-        // Log the message being published (for debugging)
-        this.logger.write_debug(
-            this.originator,
-            `<publish_mqtt_message> => Publishing to topic '${topic}': ${JSON.stringify(message)}`
-        );
-
-        try {
-            this.mqtt_client.publish(topic, JSON.stringify(message));
-        } catch (error) {
-            const errMessage = `<publish_message> => ${sysFunc.ensureError(error).message}`;
-            this.logger.write_error(this.originator, errMessage);
-            throw new Error(errMessage);
-        }
-    }
-
-
-
     // ****************************************************************
     // ****************************************************************
     // ******** MQTT HANDLER FUNCTIONS
@@ -300,10 +182,6 @@ export class MqttNetworking implements IMqttNetworking {
         // subscribe to topic
         this.logger.write_debug(this.originator, `<on_connect> => Subscribing to Topic: ${this.mqtt_topic_telemetry}`);
         this.mqtt_client.subscribe(this.mqtt_topic_telemetry);
-
-        // subscribe to topic
-        this.logger.write_debug(this.originator, `<on_connect> => Subscribing to Topic: ${this.mqtt_topic_command_response}`);
-        this.mqtt_client.subscribe(this.mqtt_topic_command_response);
     }
 
     private on_disconnect(): void {
@@ -368,10 +246,6 @@ export class MqttNetworking implements IMqttNetworking {
             if (this.forward_sensor_logs) {
                 this.handle_mqtt_message_log(json_doc);
             }
-            break;
-
-        case "command-response":
-            this.handle_mqtt_message_command_response(json_doc);
             break;
 
         default:
@@ -453,11 +327,8 @@ export class MqttNetworking implements IMqttNetworking {
             return;
         }
 
-        // Deep copy system-info to avoid mutating the original json_doc
-        const systemInfo = payload?.["system-info"] ? structuredClone(payload["system-info"]) : undefined;
-        if (systemInfo) {
-            payload["system-info"] = systemInfo;
-        }
+        // Get system-info for timestamp handling
+        const systemInfo = payload?.["system-info"];
 
         // init
         const boot_date_ok = !(
@@ -469,7 +340,7 @@ export class MqttNetworking implements IMqttNetworking {
       systemInfo?.["restart-date-utc"] === ""
         );
 
-        // check-it
+        // Add missing timestamps to system-info if needed
         if (!boot_date_ok || !restart_date_ok) {
             // get the time_stamp from the time service
             const time_stamp = sysFunc.get_timestamp_iso();
@@ -589,197 +460,5 @@ export class MqttNetworking implements IMqttNetworking {
         if (this.is_telemetry_valid(lightning, ["lightning-count"], source)) {
             this.promWriter.publish_lightning(payload, source);
         }
-    }
-
-
-
-    // ****************************************************************
-    // ****************************************************************
-    // ******** HANDLE MQTT COMMAND RESPONSE MESSAGES
-
-    // Known command-response types — only these are allowed in cr_dude_dict.
-    // Keeping this as a constant prevents unbounded growth if an unknown
-    // msg_type slips through the if/else chain in handle_mqtt_message_command_response.
-    private readonly known_command_types: Set<string> = new Set([
-        "identify",
-        "get-details",
-        "read-config",
-        "write-config",
-        "update-config",
-        "reboot",
-    ]);
-
-    private cr_dude_dict: Record<string, IMqttCommandControl> = {};
-
-    /**
-     * Get (or lazily create) the MqttCommandControl for a command type.
-     * Only known command types are accepted — unknown types trigger a
-     * warning and return null, preventing unbounded map growth.
-     */
-    public get_cr_dude(key: string): IMqttCommandControl | null {
-        if (!(key in this.cr_dude_dict)) {
-            if (!this.known_command_types.has(key)) {
-                this.logger.write_warn(
-                    this.originator,
-                    `<get_cr_dude> => Unknown command type '${key}', ignoring`
-                );
-                return null;
-            }
-            this.cr_dude_dict[key] = new MqttCommandControl(this.__command_silence_timeout_ms);
-        }
-        return this.cr_dude_dict[key];
-    }
-
-    // --------------------------------
-
-    private handle_mqtt_message_command_response(
-        json_doc: Record<string, any>
-    ): void {
-
-        // init
-        const type_raw = json_doc["type"];
-        if (type_raw === undefined) {
-            this.logger.write_error(this.originator, "<handle_mqtt_message_command_response> => Missing 'type' key, dropping message");
-            return;
-        }
-        const msg_type = String(type_raw).toLowerCase();
-
-        const source_raw = json_doc["source"];
-        if (source_raw === undefined) {
-            this.logger.write_error(this.originator, "<handle_mqtt_message_command_response> => Missing 'source' key, dropping message");
-            return;
-        }
-        const source = String(source_raw);
-
-        const payload = json_doc["payload"];
-
-        // log-it
-        this.logger.write_debug(this.originator, `<handle_mqtt_message_command_response>: \n${JSON.stringify(json_doc)}`);
-
-        // ---- record command latency (before dedup check so duplicates still
-        //      contribute latency data and publish timestamps get evicted)
-        const command_id = json_doc["command-id"];
-        if (command_id !== undefined) {
-            const publish_time = this.__command_publish_times.get(String(command_id));
-            if (publish_time !== undefined) {
-                const latency_seconds = (Date.now() - publish_time) / 1000;
-                this.prometheus_command_latency_histogram?.labels({ command: msg_type }).observe(latency_seconds);
-                this.__command_publish_times.delete(String(command_id));
-            }
-        }
-
-        // ---- command deduplication check (skip adding results for duplicates)
-        if (command_id !== undefined && this.is_duplicate_command(String(command_id))) {
-            this.logger.write_debug(
-                this.originator,
-                `<handle_mqtt_message_command_response> => Duplicate command-id '${command_id}' for type '${msg_type}', skipping`
-            );
-            return;
-        }
-
-        // ----
-        if (msg_type === "identify") {
-            this.handle_mqtt_command_response_message(this.get_cr_dude("identify")!, source, payload);
-            // ----
-        } else if (msg_type === "get-details") {
-            this.handle_mqtt_command_response_message(this.get_cr_dude("get-details")!, source, payload);
-            // ----
-        } else if (msg_type === "read-config") {
-            this.handle_mqtt_command_response_message(this.get_cr_dude("read-config")!, source, payload);
-            // ----
-        } else if (msg_type === "write-config") {
-            this.handle_mqtt_command_response_message(this.get_cr_dude("write-config")!, source, payload);
-            // ----
-        } else if (msg_type === "update-config") {
-            this.handle_mqtt_command_response_message(this.get_cr_dude("update-config")!, source, payload);
-            // ----
-        } else if (msg_type === "reboot") {
-            this.handle_mqtt_command_response_reboot(this.get_cr_dude("reboot")!, source, payload);
-
-        } else {
-            this.logger.write_warn(
-                this.originator,
-                `<handle_mqtt_message_command_response> => Unknown command-response type '${msg_type}' from source '${source}', dropping`
-            );
-        }
-    }
-
-    // ********
-    // ******** HANDLE RESPONSE MESSAGE
-
-    private handle_mqtt_command_response_message(
-        dude: IMqttCommandControl,
-        source: string,
-        payload: Record<string, any>
-    ) {
-        // Add calculated feels-like temperature to air telemetry if not already present
-        const enrichedPayload = this.enrichAirTelemetryWithFeelsLike(payload);
-
-        // add response to collection
-        dude.results.push({
-            source: source,
-            payload: enrichedPayload,
-        });
-
-        // start a new timer
-        dude.restart_clock();
-    }
-
-    // ********
-    // ******** HELPER METHODS
-
-    /**
-     * Enrich air telemetry with calculated feels-like temperature.
-     * Adds 'feels-like-c' field if both temperature-c and humidity-percent are present
-     * and the temperature is above the heat index threshold.
-     * @param payload The original payload
-     * @returns A new payload with enriched air telemetry
-     */
-    private enrichAirTelemetryWithFeelsLike(payload: Record<string, any>): Record<string, any> {
-        // Deep clone to avoid mutating the original payload
-        const enrichedPayload = structuredClone(payload);
-
-        const air = enrichedPayload?.["air"];
-        if (!air) {
-            return enrichedPayload;
-        }
-
-        // If feels-like is already present, don't recalculate
-        if (air["feels-like-c"] !== undefined) {
-            return enrichedPayload;
-        }
-
-        const tempC = Number(air["temperature-c"]);
-        const humidity = Number(air["humidity-percent"]);
-
-        // Only calculate if we have valid numeric values
-        if (!Number.isFinite(tempC) || !Number.isFinite(humidity)) {
-            return enrichedPayload;
-        }
-
-        // Calculate feels-like temperature
-        const feelsLikeC = this.calculateHeatIndex(tempC, humidity);
-
-        if (feelsLikeC !== undefined) {
-            // Round to 4 decimal places for consistency
-            air["feels-like-c"] = Math.round(feelsLikeC * 10000) / 10000;
-        }
-
-        return enrichedPayload;
-    }
-
-    // ********
-    // ******** HANDLE REBOOT RESPONSE MESSAGE
-
-    private handle_mqtt_command_response_reboot(
-        dude: IMqttCommandControl,
-        source: string,
-        payload: Record<string, any>
-    ) {
-    // add response to collection
-        dude.results.push({ source, payload });
-
-        // start a new timer
-        dude.restart_clock();
     }
 }
