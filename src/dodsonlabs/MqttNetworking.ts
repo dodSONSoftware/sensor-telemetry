@@ -25,23 +25,23 @@ export class MqttNetworking implements IMqttNetworking {
     // ********
     // ******** CTOR
 
-    constructor(config: z.infer<typeof configSchema>, logger: ILogger) {
+    constructor(config: z.infer<typeof configSchema>, logger: ILogger, configSource: string = "/app/configs/config.yml") {
 
         // save parameters
         this.configuration = config;
-        this.mqtt_server_ip_address = config["mqtt-broker-ip-address"];
-        this.mqtt_topic_telemetry = config["mqtt-topic-telemetry"];
+        this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
+        this.mqtt_topic_telemetry = config.mqttTopicTelemetry;
         // ----
         this.logger = logger;
         this.originator = "networking";
         // ---- sensor log forwarding (default true for backward compatibility)
-        this.forward_sensor_logs = config["forward-sensor-logs"] ?? true;
+        this.forward_sensor_logs = config.forwardSensorLogs ?? true;
         // ---- sensor log level threshold (default debug = forward everything)
-        this.forward_sensor_logs_level = config["forward-sensor-logs-level"]
-            ? sysFunc.convert_from_log_level_string_to_enum(config["forward-sensor-logs-level"])
+        this.forward_sensor_logs_level = config.forwardSensorLogsLevel
+            ? sysFunc.convert_from_log_level_string_to_enum(config.forwardSensorLogsLevel)
             : LogLevel.Debug;
         // ----
-        this.promWriter = new PrometheusWriter(this.configuration, this.logger);
+        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource);
 
         // create mqtt client and connect to mqtt server
         this.mqtt_client = this.connect_to_mqtt_broker();

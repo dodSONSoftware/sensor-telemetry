@@ -17,8 +17,8 @@ export class Logger implements ILogger {
     private readonly global_log_level_name: string;
 
     constructor(config: z.infer<typeof configSchema>) {
-        this.global_log_level_value = convertFromWinstonLevel(config["log-level"]);
-        this.global_log_level_name = config["log-level"];
+        this.global_log_level_value = convertFromWinstonLevel(config.logLevel);
+        this.global_log_level_name = config.logLevel;
 
         // Format log messages
         const customFormat = printf(({ level, message, ...meta }) => {

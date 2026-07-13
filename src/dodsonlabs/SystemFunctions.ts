@@ -114,6 +114,29 @@ export function read_file_yaml<T>(
     }
 }
 
+export function write_file_yaml(
+    filename: string,
+    data: unknown,
+    logger?: ILogger
+): boolean {
+    try {
+        const yamlStr = yaml.dump(data, {
+            indent: 2,
+            lineWidth: -1,
+        });
+        fs.writeFileSync(filename, yamlStr, "utf8");
+        return true;
+    } catch (error) {
+        const msg = `write_file_yaml: failed to write '${filename}': ${(error as Error).message}`;
+        if (logger) {
+            logger.write_error("SystemFunctions.write_file_yaml", msg);
+        } else {
+            console.error(msg);
+        }
+        return false;
+    }
+}
+
 // ******** log level string to enum conversion
 
 export function convert_from_log_level_string_to_enum(

@@ -1,16 +1,19 @@
 # Sensor Telemetry Service configuration
 
 # Logging (debug, error, warn, info)
-log-level: debug
+logLevel: debug
 
-# Prometheus metrics server port
-prometheus-port: 3301
+# API server port
+apiPort: 3301
 
 # MQTT broker connection
-mqtt-broker-ip-address: "10.10.10.64"
-mqtt-topic-telemetry: "iot/telemetry"
+mqttBrokerIpAddress: 10.10.10.64
+mqttTopicTelemetry: iot/telemetry
 
 # Optional: Prometheus source label sanitization
-sensor-source-max-length: 30
-sensor-source-valid-chars-regex: "a-zA-Z0-9._-"
+sensorSourceMaxLength: 30
+sensorSourceValidCharsRegex: a-zA-Z0-9._-
 
+# Forward sensor logs to application logger
+forwardSensorLogs: true
+forwardSensorLogsLevel: info

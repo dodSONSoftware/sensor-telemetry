@@ -7,7 +7,7 @@ services:
     ports:
       - "3301:3301"
     volumes:
-      - /mnt/sensor-telemetry/config.yml:/app/configs/config.yml:ro
+      - /mnt/sensor-telemetry:/app/configs:rw
     restart: unless-stopped
     environment:
       - NODE_ENV=production

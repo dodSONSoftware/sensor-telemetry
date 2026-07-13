@@ -26,6 +26,10 @@ COPY --from=builder /app/package*.json ./
 RUN npm install --only=production --omit=dev && npm cache clean --force
 
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+# Create configs directory with write permissions
+RUN mkdir -p /app/configs && chown -R appuser:appgroup /app/configs
+
 USER appuser
 
 EXPOSE 3301

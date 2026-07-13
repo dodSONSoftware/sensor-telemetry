@@ -5,9 +5,17 @@
 
 import http from "http";
 import { register, Gauge, Counter } from "prom-client";
+import { createRequire } from "module";
 import type { ILogger } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
+import { validateConfig } from "../schemas/config";
+import { ensureError, read_file_yaml, write_file_yaml } from "./SystemFunctions";
+
+// Load version from package.json at module load time
+const pkgRequire = createRequire(__filename);
+const packageJsonPath = pkgRequire.resolve("../../package.json");
+const { version } = pkgRequire(packageJsonPath) as { version: string };
 
 export class PrometheusWriter {
     // ******** private properties
@@ -30,6 +38,11 @@ export class PrometheusWriter {
     private prometheus_Gauge_Lightning: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
+    // ---- config storage for read/write/reload endpoints
+    private config: z.infer<typeof configSchema>;
+    private configSource: string;
+    // ---- system start date
+    private startDate: string;
 
     // ******** constants
     private readonly MAX_SOURCE_LENGTH: number;
@@ -43,12 +56,21 @@ export class PrometheusWriter {
      * - sensor-source-valid-chars-regex: Character whitelist for source names (default: a-zA-Z0-9._-)
      * These prevent unbounded Prometheus cardinality from arbitrary MQTT source names.
      */
-    constructor(config: z.infer<typeof configSchema>, logger: ILogger) {
+    constructor(config: z.infer<typeof configSchema>, logger: ILogger, configSource: string = "/app/configs/config.yml") {
         // read configuration items
-        this.prometheus_port = config["prometheus-port"];
-        this.MAX_SOURCE_LENGTH = config["sensor-source-max-length"] ?? 30;
-        const validChars = config["sensor-source-valid-chars-regex"] ?? "a-zA-Z0-9._-";
-        this.VALID_CHARS = new RegExp(`[^${validChars}]+`);
+        this.prometheus_port = config.apiPort;
+        this.MAX_SOURCE_LENGTH = config.sensorSourceMaxLength ?? 30;
+        const validChars = config.sensorSourceValidCharsRegex ?? "a-zA-Z0-9._-";
+        // Escape regex metacharacters in the valid chars pattern to prevent syntax errors
+        const escapedValidChars = validChars.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+        this.VALID_CHARS = new RegExp(`[^${escapedValidChars}]+`);
+
+        // save config and source for endpoint access
+        this.config = { ...config };
+        this.configSource = configSource;
+
+        // save system start date
+        this.startDate = new Date().toISOString();
 
         // save parameters
         this.logger = logger;
@@ -66,6 +88,13 @@ export class PrometheusWriter {
         // --------------------------------
         // setup http server
         const server = http.createServer(async (req, res) => {
+            // Log endpoint access
+            this.logger.write_info(
+                this.originator + ".http",
+                `HTTP ${req.method || "UNKNOWN"} ${req.url || "/"}`
+
+            );
+
             if (req.url === "/metrics") {
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
@@ -73,6 +102,14 @@ export class PrometheusWriter {
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({ status: "healthy", timestamp: new Date().toISOString() }));
+            } else if (req.url === "/about") {
+                this.handleAbout(req, res);
+            } else if (req.url === "/read-config") {
+                await this.handleReadConfig(req, res);
+            } else if (req.url === "/write-config") {
+                await this.handleWriteConfig(req, res);
+            } else if (req.url === "/reload-config") {
+                await this.handleReloadConfig(req, res);
             } else {
                 res.statusCode = 404;
                 res.end("Not Found");
@@ -105,6 +142,139 @@ export class PrometheusWriter {
         // log-it
         const msg = "PrometheusWriter class initialized.";
         logger.write_info(this.originator + ".ctor", msg);
+    }
+
+    // ******** public methods for config management
+
+    /** Get current config */
+    getConfig(): z.infer<typeof configSchema> {
+        return { ...this.config };
+    }
+
+    /** Set config source path */
+    setConfigSource(source: string): void {
+        this.configSource = source;
+    }
+
+    // ******** private methods for HTTP handlers
+
+    private sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(statusCode);
+        res.end(JSON.stringify(data));
+    }
+
+    private handleAbout(_req: http.IncomingMessage, res: http.ServerResponse): void {
+        const aboutInfo = {
+            about: {
+                name: "Sensor Telemetry Service",
+                version: version ?? "unknown",
+                author: "Randy Dodson (dodsonsoftware@gmail.com)",
+                description: "MQTT-to-Prometheus bridge for IoT sensor telemetry.",
+                copyright: "Copyright (c) 2026 dodson Software ( dodson labs )",
+                license: "MIT License"
+            },
+            system: {
+                startDate: this.startDate
+            },
+            routes: [
+                { route: "/about", description: "Returns service information and available commands." },
+                { route: "/health", description: "Health check endpoint." },
+                { route: "/metrics", description: "Prometheus metrics endpoint." },
+                { route: "/read-config", description: "Reads the current configuration." },
+                { route: "/write-config", description: "Updates the configuration and reloads it." },
+                { route: "/reload-config", description: "Reloads the configuration from disk without changing the payload." }
+            ]
+        };
+        this.sendJson(res, 200, aboutInfo);
+    }
+
+    private async handleReadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
+            if (result.data !== null) {
+                const validatedConfig = validateConfig(result.data);
+                // Update in-memory cache
+                this.config = { ...validatedConfig };
+                this.sendJson(res, 200, {
+                    config: validatedConfig
+                });
+            } else {
+                this.sendJson(res, 500, {
+                    success: false,
+                    message: `Failed to read config file: ${result.error ?? "unknown error"}`
+                });
+            }
+        } catch (error) {
+            const err = ensureError(error);
+            this.sendJson(res, 500, {
+                success: false,
+                message: `Error reading configuration: ${err.message}`
+            });
+        }
+    }
+
+    private async handleWriteConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        let body = "";
+        req.on("data", chunk => { body += chunk; });
+        req.on("end", async () => {
+            try {
+                const newConfigRaw = JSON.parse(body);
+                const validatedConfig = validateConfig(newConfigRaw);
+
+                // Update internal config
+                this.config = { ...validatedConfig };
+
+                // Write to disk
+                const writeSuccess = write_file_yaml(this.configSource, this.config, this.logger);
+                if (!writeSuccess) {
+                    this.sendJson(res, 500, {
+                        success: false,
+                        message: "Configuration updated in memory but failed to write to disk"
+                    });
+                    return;
+                }
+
+                this.sendJson(res, 200, {
+                    success: true,
+                    message: "Configuration updated successfully",
+                    config: this.config
+                });
+            } catch (error) {
+                const err = ensureError(error);
+                this.sendJson(res, 400, {
+                    success: false,
+                    message: `Invalid configuration: ${err.message}`,
+                    error: err.message
+                });
+            }
+        });
+    }
+
+    private async handleReloadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
+            if (result.data !== null) {
+                const validatedConfig = validateConfig(result.data);
+                this.config = { ...validatedConfig };
+                this.sendJson(res, 200, {
+                    success: true,
+                    message: "Configuration reloaded successfully",
+                    config: validatedConfig
+                });
+            } else {
+                this.sendJson(res, 500, {
+                    success: false,
+                    message: `Failed to read config file: ${result.error ?? "unknown error"}`
+                });
+            }
+        } catch (error) {
+            const err = ensureError(error);
+            this.sendJson(res, 500, {
+                success: false,
+                message: `Error reloading configuration: ${err.message}`
+            });
+        }
     }
 
     // ******** private methods

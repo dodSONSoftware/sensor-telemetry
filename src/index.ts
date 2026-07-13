@@ -57,10 +57,10 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     appLogger.write_info("index.ts", `${dude.about.name} v${dude.about.version} starting...`);
 
     // create networking
-    const networking = new MqttNetworking(config, appLogger);
+    const networking = new MqttNetworking(config, appLogger, configSource);
 
-    // get prometheus port (for logging)
-    const promPort = config["prometheus-port"];
+    // get api port (for logging)
+    const apiPort = config.apiPort;
 
     try {
         // Wait for Prometheus server to be ready
@@ -78,8 +78,8 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         }
 
         appLogger.write_info("index.ts", `${dude.about.name} v${dude.about.version} started.`);
-        appLogger.write_info("index.ts", `Prometheus metrics available at http://localhost:${promPort}/metrics`);
-        appLogger.write_info("index.ts", `Listening on MQTT topic: ${config["mqtt-topic-telemetry"]}`);
+        appLogger.write_info("index.ts", `API server available at http://localhost:${apiPort}`);
+        appLogger.write_info("index.ts", `Listening on MQTT topic: ${config.mqttTopicTelemetry}`);
     } catch (err: unknown) {
         // log error
         appLogger.write_error("index.ts", ensureError(err).message);

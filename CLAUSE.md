@@ -53,14 +53,14 @@ npm run lint      # Run ESLint
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `log-level` | Logging verbosity (error, warn, info, debug) | info |
-| `prometheus-port` | Port for Prometheus metrics endpoint | 3301 |
-| `mqtt-broker-ip-address` | MQTT broker hostname/IP | required |
-| `mqtt-topic-telemetry` | MQTT topic for telemetry messages | required |
-| `sensor-source-max-length` | Max length for source labels | 30 |
-| `sensor-source-valid-chars-regex` | Valid characters for source names | a-zA-Z0-9._- |
-| `forward-sensor-logs` | Forward sensor logs to main logger | false |
-| `forward-sensor-logs-level` | Log level for forwarded sensor logs | info |
+| `logLevel` | Logging verbosity (error, warn, info, debug) | info |
+| `prometheusPort` | Port for Prometheus metrics endpoint | 3301 |
+| `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
+| `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
+| `sensorSourceMaxLength` | Max length for source labels | 30 |
+| `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
+| `forwardSensorLogs` | Forward sensor logs to main logger | false |
+| `forwardSensorLogsLevel` | Log level for forwarded sensor logs | info |
 
 ## Prometheus Metrics Endpoint
 

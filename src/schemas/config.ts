@@ -10,28 +10,28 @@ import { z } from "zod";
  * All keys are required and must match their expected types.
  */
 export const configSchema = z.object({
-    "log-level": z.enum(["error", "warn", "info", "debug"], {
-        error: "log-level must be one of: error, warn, info, debug",
+    logLevel: z.enum(["error", "warn", "info", "debug"], {
+        error: "logLevel must be one of: error, warn, info, debug",
     }),
-    "prometheus-port": z.number({
-        error: "prometheus-port must be a number",
-    }).int("prometheus-port must be an integer")
-        .positive("prometheus-port must be greater than 0"),
-    "mqtt-broker-ip-address": z.string({
-        error: "mqtt-broker-ip-address must be a string",
-    }).min(1, "mqtt-broker-ip-address must not be empty"),
-    "mqtt-topic-telemetry": z.string({
-        error: "mqtt-topic-telemetry must be a string",
-    }).min(1, "mqtt-topic-telemetry must not be empty"),
-    "sensor-source-max-length": z.number({
-        error: "sensor-source-max-length must be a number",
-    }).int("sensor-source-max-length must be an integer")
-        .positive("sensor-source-max-length must be greater than 0")
+    apiPort: z.number({
+        error: "apiPort must be a number",
+    }).int("apiPort must be an integer")
+        .positive("apiPort must be greater than 0"),
+    mqttBrokerIpAddress: z.string({
+        error: "mqttBrokerIpAddress must be a string",
+    }).min(1, "mqttBrokerIpAddress must not be empty"),
+    mqttTopicTelemetry: z.string({
+        error: "mqttTopicTelemetry must be a string",
+    }).min(1, "mqttTopicTelemetry must not be empty"),
+    sensorSourceMaxLength: z.number({
+        error: "sensorSourceMaxLength must be a number",
+    }).int("sensorSourceMaxLength must be an integer")
+        .positive("sensorSourceMaxLength must be greater than 0")
         .optional(),
-    "sensor-source-valid-chars-regex": z.string().optional(),
-    "forward-sensor-logs": z.boolean().optional(),
-    "forward-sensor-logs-level": z.enum(["error", "warn", "info", "debug"], {
-        error: "forward-sensor-logs-level must be one of: error, warn, info, debug",
+    sensorSourceValidCharsRegex: z.string().optional(),
+    forwardSensorLogs: z.boolean().optional(),
+    forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug"], {
+        error: "forwardSensorLogsLevel must be one of: error, warn, info, debug",
     }).optional(),
 });
 
