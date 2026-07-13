@@ -59,6 +59,11 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     // create networking
     const networking = new MqttNetworking(config, appLogger, configSource);
 
+    // wire up config change callback to update networking when config changes
+    networking.getPrometheusWriter()?.setConfigChangeCallback((newConfig) => {
+        networking.updateConfig(newConfig);
+    });
+
     // get api port (for logging)
     const apiPort = config.apiPort;
 

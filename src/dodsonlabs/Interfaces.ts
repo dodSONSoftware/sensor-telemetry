@@ -39,6 +39,11 @@ export interface ILogger {
   write_warn(originator: string, message: string): void;
   write_error(originator: string, message: string): void;
   write_debug(originator: string, message: string): void;
+  /**
+   * Update the log level at runtime.
+   * @param level - New log level string ("error", "warn", "info", "debug")
+   */
+  setLogLevel(level: string): void;
 }
 
 export interface IMqttNetworking {

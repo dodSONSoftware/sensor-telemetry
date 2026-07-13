@@ -13,8 +13,8 @@ const { combine, timestamp, printf, colorize, simple } = winston.format;
 
 export class Logger implements ILogger {
     private readonly logger: winston.Logger;
-    private readonly global_log_level_value: LogLevel;
-    private readonly global_log_level_name: string;
+    private global_log_level_value: LogLevel;
+    private global_log_level_name: string;
 
     constructor(config: z.infer<typeof configSchema>) {
         this.global_log_level_value = convertFromWinstonLevel(config.logLevel);
@@ -51,6 +51,16 @@ export class Logger implements ILogger {
 
     global_log_level_string(): string {
         return this.global_log_level_name;
+    }
+
+    /**
+     * Update the log level at runtime.
+     * @param level - New log level string ("error", "warn", "info", "debug")
+     */
+    public setLogLevel(level: string): void {
+        this.global_log_level_value = convertFromWinstonLevel(level);
+        this.global_log_level_name = level;
+        this.logger.level = level;
     }
 
     write_info(originator: string, message: string): void {

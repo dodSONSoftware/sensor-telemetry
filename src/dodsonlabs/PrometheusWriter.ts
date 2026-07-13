@@ -6,7 +6,7 @@
 import http from "http";
 import { register, Gauge, Counter } from "prom-client";
 import { createRequire } from "module";
-import type { ILogger } from "./Interfaces";
+import type { ILogger, IMqttNetworking } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
@@ -43,6 +43,10 @@ export class PrometheusWriter {
     private configSource: string;
     // ---- system start date
     private startDate: string;
+    // ---- MQTT networking reference for health checks
+    private mqttNetworking?: IMqttNetworking;
+    // ---- optional callback for config changes
+    private configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void;
 
     // ******** constants
     private readonly MAX_SOURCE_LENGTH: number;
@@ -89,7 +93,7 @@ export class PrometheusWriter {
         // setup http server
         const server = http.createServer(async (req, res) => {
             // Log endpoint access
-            this.logger.write_info(
+            this.logger.write_debug(
                 this.originator + ".http",
                 `HTTP ${req.method || "UNKNOWN"} ${req.url || "/"}`
 
@@ -99,9 +103,14 @@ export class PrometheusWriter {
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
             } else if (req.url === "/health") {
+                const mqttStatus = this.mqttNetworking?.is_connected() ? "connected" : "disconnected";
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
-                res.end(JSON.stringify({ status: "healthy", timestamp: new Date().toISOString() }));
+                res.end(JSON.stringify({
+                    status: "healthy",
+                    mqtt: mqttStatus,
+                    timestamp: new Date().toISOString()
+                }));
             } else if (req.url === "/about") {
                 this.handleAbout(req, res);
             } else if (req.url === "/read-config") {
@@ -156,6 +165,16 @@ export class PrometheusWriter {
         this.configSource = source;
     }
 
+    /** Set MQTT networking reference for health checks */
+    setMqttNetworking(networking: IMqttNetworking): void {
+        this.mqttNetworking = networking;
+    }
+
+    /** Set callback to invoke when config is updated via /write-config */
+    setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void {
+        this.configChangeCallback = callback;
+    }
+
     // ******** private methods for HTTP handlers
 
     private sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {
@@ -197,6 +216,8 @@ export class PrometheusWriter {
                 // Update in-memory cache
                 this.config = { ...validatedConfig };
                 this.sendJson(res, 200, {
+                    success: true,
+                    message: "Configuration retrieved successfully",
                     config: validatedConfig
                 });
             } else {
@@ -222,6 +243,10 @@ export class PrometheusWriter {
                 const newConfigRaw = JSON.parse(body);
                 const validatedConfig = validateConfig(newConfigRaw);
 
+                // Extract old and new log levels
+                const oldLogLevel = this.config.logLevel;
+                const newLogLevel = validatedConfig.logLevel;
+
                 // Update internal config
                 this.config = { ...validatedConfig };
 
@@ -233,6 +258,24 @@ export class PrometheusWriter {
                         message: "Configuration updated in memory but failed to write to disk"
                     });
                     return;
+                }
+
+                // Apply log level change if it differs
+                if (oldLogLevel !== newLogLevel && this.logger.setLogLevel) {
+                    this.logger.write_info(
+                        this.originator + ".handleWriteConfig",
+                        `Log level changing from "${oldLogLevel}" to "${newLogLevel}"`
+                    );
+                    this.logger.setLogLevel(newLogLevel);
+                    this.logger.write_info(
+                        this.originator + ".handleWriteConfig",
+                        `New log level is now: ${this.logger.global_log_level_string()}`
+                    );
+                }
+
+                // Notify callback of config change
+                if (this.configChangeCallback) {
+                    this.configChangeCallback(validatedConfig);
                 }
 
                 this.sendJson(res, 200, {

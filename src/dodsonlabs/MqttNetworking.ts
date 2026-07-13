@@ -40,11 +40,12 @@ export class MqttNetworking implements IMqttNetworking {
         this.forward_sensor_logs_level = config.forwardSensorLogsLevel
             ? sysFunc.convert_from_log_level_string_to_enum(config.forwardSensorLogsLevel)
             : LogLevel.Debug;
-        // ----
-        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource);
-
-        // create mqtt client and connect to mqtt server
+        // create mqtt client and connect to mqtt broker first
         this.mqtt_client = this.connect_to_mqtt_broker();
+
+        // Now create PrometheusWriter and pass self (MqttNetworking is fully initialized now)
+        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource);
+        this.promWriter.setMqttNetworking(this);
 
         // log-it
         this.logger.write_info("MqttNetworking::ctor()", "MqttNetworking Initialized");
@@ -89,19 +90,19 @@ export class MqttNetworking implements IMqttNetworking {
     // ********
     // ******** PRIVATE PROPERTIES
 
-    private readonly configuration: z.infer<typeof configSchema>;
+    private configuration: z.infer<typeof configSchema>;
     // ----
     private mqtt_client: mqtt.MqttClient;
     private readonly logger: ILogger;
-    private readonly promWriter: PrometheusWriter;
+    private promWriter: PrometheusWriter;
     // ----
     private readonly mqtt_server_ip_address: string;
     public readonly mqtt_topic_telemetry: string;
     // ----
     private readonly originator: string;
     // ----
-    private readonly forward_sensor_logs: boolean;
-    private readonly forward_sensor_logs_level: LogLevel;
+    private forward_sensor_logs: boolean;
+    private forward_sensor_logs_level: LogLevel;
 
     // ********
     // ******** PRIVATE FUNCTIONS
@@ -135,11 +136,18 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** INETWORKLOGGER FUNCTIONS
 
     public is_connected(): boolean {
-        return this.mqtt_client.connected;
+        return this.mqtt_client?.connected ?? false;
     }
 
     public prometheus_server_ready(): boolean {
         return this.promWriter.is_ready();
+    }
+
+    /**
+     * Get the PrometheusWriter instance for config management.
+     */
+    public getPrometheusWriter(): PrometheusWriter | undefined {
+        return this.promWriter;
     }
 
     public async close(timeout_ms: number = 5000): Promise<void> {
@@ -169,6 +177,27 @@ export class MqttNetworking implements IMqttNetworking {
         });
 
         await Promise.race([closePromise, timeoutPromise]);
+    }
+
+    /**
+     * Update configuration at runtime.
+     * @param newConfig - New configuration object
+     */
+    public updateConfig(newConfig: z.infer<typeof configSchema>): void {
+        this.configuration = { ...newConfig };
+
+        // Update forward_sensor_logs settings
+        this.forward_sensor_logs = newConfig.forwardSensorLogs ?? true;
+
+        // Update forward_sensor_logs_level threshold
+        this.forward_sensor_logs_level = newConfig.forwardSensorLogsLevel
+            ? sysFunc.convert_from_log_level_string_to_enum(newConfig.forwardSensorLogsLevel)
+            : LogLevel.Debug;
+
+        this.logger.write_info(
+            this.originator + ".updateConfig",
+            `Configuration updated: logLevel=${newConfig.logLevel}, forwardSensorLogs=${this.forward_sensor_logs}`
+        );
     }
 
     // ****************************************************************
