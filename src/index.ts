@@ -56,13 +56,13 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     const dude = aboutDude();
     appLogger.write_info("index.ts", `${dude.about.name} v${dude.about.version} starting...`);
 
-    // create networking
-    const networking = new MqttNetworking(config, appLogger, configSource);
-
     // wire up config change callback to update networking when config changes
-    networking.getPrometheusWriter()?.setConfigChangeCallback((newConfig) => {
+    const configChangeCallback = (newConfig: z.infer<typeof configSchema>): void => {
         networking.updateConfig(newConfig);
-    });
+    };
+
+    // create networking with callback passed during construction
+    const networking = new MqttNetworking(config, appLogger, configSource, configChangeCallback);
 
     // get api port (for logging)
     const apiPort = config.apiPort;

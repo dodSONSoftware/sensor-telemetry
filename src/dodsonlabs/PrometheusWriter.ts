@@ -60,7 +60,12 @@ export class PrometheusWriter {
      * - sensor-source-valid-chars-regex: Character whitelist for source names (default: a-zA-Z0-9._-)
      * These prevent unbounded Prometheus cardinality from arbitrary MQTT source names.
      */
-    constructor(config: z.infer<typeof configSchema>, logger: ILogger, configSource: string = "/app/configs/config.yml") {
+    constructor(
+        config: z.infer<typeof configSchema>,
+        logger: ILogger,
+        configSource: string = "/app/configs/config.yml",
+        configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void
+    ) {
         // read configuration items
         this.prometheus_port = config.apiPort;
         this.MAX_SOURCE_LENGTH = config.sensorSourceMaxLength ?? 30;
@@ -78,6 +83,9 @@ export class PrometheusWriter {
 
         // save parameters
         this.logger = logger;
+
+        // Set config change callback early (before server starts accepting requests)
+        this.configChangeCallback = configChangeCallback;
 
         // create prometheus gauges
         this.create_prometheus_gauges();
@@ -113,6 +121,8 @@ export class PrometheusWriter {
                 }));
             } else if (req.url === "/about") {
                 this.handleAbout(req, res);
+            } else if (req.url === "/endpoints") {
+                this.handleEndpoints(req, res);
             } else if (req.url === "/read-config") {
                 await this.handleReadConfig(req, res);
             } else if (req.url === "/write-config") {
@@ -198,6 +208,7 @@ export class PrometheusWriter {
             },
             routes: [
                 { route: "/about", description: "Returns service information and available commands." },
+                { route: "/endpoints", description: "Returns detailed information about each API endpoint." },
                 { route: "/health", description: "Health check endpoint." },
                 { route: "/metrics", description: "Prometheus metrics endpoint." },
                 { route: "/read-config", description: "Reads the current configuration." },
@@ -208,29 +219,86 @@ export class PrometheusWriter {
         this.sendJson(res, 200, aboutInfo);
     }
 
+    private handleEndpoints(_req: http.IncomingMessage, res: http.ServerResponse): void {
+        const endpoints = [
+            {
+                name: "About",
+                route: "/about",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "Service information including about, system, and routes sections",
+                description: "Returns service information and available API endpoints."
+            },
+            {
+                name: "Endpoints",
+                route: "/endpoints",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "Object containing an array of endpoint details",
+                description: "Returns detailed information about each API endpoint."
+            },
+            {
+                name: "Health",
+                route: "/health",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "{ status: \"healthy\", mqtt: \"connected|disconnected\", timestamp: \"ISO-date-string\" }",
+                description: "Health check endpoint for container orchestration."
+            },
+            {
+                name: "Metrics",
+                route: "/metrics",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "Prometheus metrics in text format",
+                description: "Returns Prometheus metrics for scraped devices."
+            },
+            {
+                name: "Read Config",
+                route: "/read-config",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "Current YAML configuration loaded from disk",
+                description: "Reads the current configuration."
+            },
+            {
+                name: "Write Config",
+                route: "/write-config",
+                verb: "POST",
+                requestBody: "JSON object with keys: logLevel (string), alwaysLogErrors (boolean), apiPort (positive integer), intervalSecs (positive integer), devices (array of objects with source, ipAddress, deviceType)",
+                responseBody: "{ success: boolean, message: string, config: object }",
+                description: "Updates the configuration and reloads it."
+            },
+            {
+                name: "Reload Config",
+                route: "/reload-config",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "{ success: true, message: \"Configuration reloaded successfully\", config: object }",
+                description: "Reloads the configuration from disk without changing the payload."
+            }
+        ];
+        this.sendJson(res, 200, { endpoints });
+    }
+
     private async handleReadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
             const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
-                // Update in-memory cache
                 this.config = { ...validatedConfig };
-                this.sendJson(res, 200, {
-                    success: true,
-                    message: "Configuration retrieved successfully",
-                    config: validatedConfig
-                });
+                this.sendJson(res, 200, validatedConfig);
             } else {
                 this.sendJson(res, 500, {
                     success: false,
-                    message: `Failed to read config file: ${result.error ?? "unknown error"}`
+                    message: result.error ?? "unknown error"
                 });
             }
         } catch (error) {
             const err = ensureError(error);
             this.sendJson(res, 500, {
                 success: false,
-                message: `Error reading configuration: ${err.message}`
+                message: err.message
             });
         }
     }
@@ -280,15 +348,13 @@ export class PrometheusWriter {
 
                 this.sendJson(res, 200, {
                     success: true,
-                    message: "Configuration updated successfully",
-                    config: this.config
+                    message: "Configuration updated successfully"
                 });
             } catch (error) {
                 const err = ensureError(error);
                 this.sendJson(res, 400, {
                     success: false,
-                    message: `Invalid configuration: ${err.message}`,
-                    error: err.message
+                    message: err.message
                 });
             }
         });
@@ -300,22 +366,27 @@ export class PrometheusWriter {
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
                 this.config = { ...validatedConfig };
+
+                // Notify callback of config change
+                if (this.configChangeCallback) {
+                    this.configChangeCallback(validatedConfig);
+                }
+
                 this.sendJson(res, 200, {
                     success: true,
-                    message: "Configuration reloaded successfully",
-                    config: validatedConfig
+                    message: "Configuration reloaded successfully"
                 });
             } else {
                 this.sendJson(res, 500, {
                     success: false,
-                    message: `Failed to read config file: ${result.error ?? "unknown error"}`
+                    message: result.error ?? "unknown error"
                 });
             }
         } catch (error) {
             const err = ensureError(error);
             this.sendJson(res, 500, {
                 success: false,
-                message: `Error reloading configuration: ${err.message}`
+                message: err.message
             });
         }
     }

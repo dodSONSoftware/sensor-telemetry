@@ -11,8 +11,6 @@ import type { ILogger, IMqttNetworking } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
-
-
 export class MqttNetworking implements IMqttNetworking {
 
     // ********
@@ -25,8 +23,12 @@ export class MqttNetworking implements IMqttNetworking {
     // ********
     // ******** CTOR
 
-    constructor(config: z.infer<typeof configSchema>, logger: ILogger, configSource: string = "/app/configs/config.yml") {
-
+    constructor(
+        config: z.infer<typeof configSchema>,
+        logger: ILogger,
+        configSource: string = "/app/configs/config.yml",
+        configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void
+    ) {
         // save parameters
         this.configuration = config;
         this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
@@ -40,11 +42,12 @@ export class MqttNetworking implements IMqttNetworking {
         this.forward_sensor_logs_level = config.forwardSensorLogsLevel
             ? sysFunc.convert_from_log_level_string_to_enum(config.forwardSensorLogsLevel)
             : LogLevel.Debug;
+
         // create mqtt client and connect to mqtt broker first
         this.mqtt_client = this.connect_to_mqtt_broker();
 
-        // Now create PrometheusWriter and pass self (MqttNetworking is fully initialized now)
-        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource);
+        // Create PrometheusWriter with callback (registered before server starts)
+        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource, configChangeCallback);
         this.promWriter.setMqttNetworking(this);
 
         // log-it
@@ -150,6 +153,16 @@ export class MqttNetworking implements IMqttNetworking {
         return this.promWriter;
     }
 
+    /**
+     * Set callback to invoke when config is updated via /write-config.
+     */
+    public setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void {
+        // Register with PrometheusWriter if already created
+        if (this.promWriter) {
+            this.promWriter.setConfigChangeCallback(callback);
+        }
+    }
+
     public async close(timeout_ms: number = 5000): Promise<void> {
         this.logger.write_info(this.originator, `<close> => Shutting down MQTT client (timeout: ${timeout_ms}ms)...`);
 
@@ -187,7 +200,7 @@ export class MqttNetworking implements IMqttNetworking {
         this.configuration = { ...newConfig };
 
         // Update forward_sensor_logs settings
-        this.forward_sensor_logs = newConfig.forwardSensorLogs ?? true;
+        this.forward_sensor_logs = newConfig.forwardSensorLogs !== undefined ? newConfig.forwardSensorLogs : true;
 
         // Update forward_sensor_logs_level threshold
         this.forward_sensor_logs_level = newConfig.forwardSensorLogsLevel
@@ -349,14 +362,14 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** HANDLE MQTT TELEMETRY MESSAGES
 
     private handle_mqtt_message_telemetry(json_doc: any): void {
-    // Guard: payload and system-info must exist before any nested access
+    // initialize
+        // Get system-info for timestamp handling
         const payload = json_doc?.["payload"];
         if (!payload) {
-            this.logger.write_error(this.originator, "<handle_message_telemetry> => Missing 'payload', dropping telemetry message");
+            this.logger.write_error(this.originator, "<handle_mqtt_message_telemetry> => Missing 'payload', dropping telemetry message");
             return;
         }
 
-        // Get system-info for timestamp handling
         const systemInfo = payload?.["system-info"];
 
         // init

@@ -1,6 +1,6 @@
 {
   "name": "sensor-telemetry",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "MQTT-to-Prometheus telemetry bridge for IoT sensors",
   "author": "dodson labs",
   "license": "MIT",

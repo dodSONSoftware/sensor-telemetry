@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+import type { z } from "zod";
+import type { configSchema } from "../schemas/config";
+
 // **** Common
 
 export interface SystemInfo {
@@ -49,5 +52,9 @@ export interface ILogger {
 export interface IMqttNetworking {
   is_connected(): boolean;
   close(): Promise<void>;
+  /**
+   * Set callback to invoke when config is updated via /write-config.
+   * @param callback - Function to call with new configuration
+   */
+  setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void;
 }
-
