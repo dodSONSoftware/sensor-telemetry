@@ -1,123 +1,156 @@
 # /git-commit: Analyze and Commit Workflow
 
-Analyze all changes in the repository, update CLAUDE.md to reflect current project state, create a formatted commit message, stage everything, and commit. All commands execute from the project root.
+Analyze all changes in the repository, update CLAUDE.md and README.md to reflect current project state, create a formatted commit message, stage everything, and commit. All commands execute from the project root.
 
 ## Steps
 
-### 0. UPDATE CLAUDE.md FIRST
+### 0. PRE-FLIGHT CHECKS
 
-Before doing anything else, check if `CLAUDE.md` needs updating based on the changes being committed:
+Run these before making any changes:
+- `git status --porcelain=v1` — check for uncommitted changes
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && test -f "$PROJECT_ROOT/code/package.json"` — verify package.json exists at expected path
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "try { JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/code/package.json')); true } catch(e) { false }"` — validate package.json syntax
 
-- **New files/directories** — add entries to the directory tree in the appropriate section
-- **Modified commands/skills** — update any references or descriptions that changed
-- **Removed files** — remove stale entries from CLAUDE.md
-- **Architecture/config changes** — update architecture notes, common commands, or development notes as needed
+If checks fail, abort with clear error message.
 
-If CLAUDE.md is already up to date (no structural changes in this commit), skip this step. Do NOT stage the CLAUDE.md change yet — it will be staged together with everything else at Step 4.
+### 1. UPDATE CLAUDE.md AND README.md IF NEEDED
 
-### 1. ANALYZE GIT CHANGES
+Check if documentation needs updating based on changes:
+
+**For CLAUDE.md:**
+- **New files/directories** — add entries to directory tree
+- **Modified commands/skills** — update references or descriptions
+- **Removed files** — remove stale entries
+- **Architecture/config changes** — update architecture notes or commands
+
+**For README.md:**
+- **New features** — add feature highlights or usage examples
+- **API changes** — update endpoint tables or request/response examples
+- **Configuration changes** — update config examples or environment variables
+- **Dependency updates** — note major version changes
+- **Breaking changes** — add migration notes or deprecation warnings
+
+Skip if no structural or documentation-relevant changes. Do NOT stage documentation files yet.
+
+### 2. ANALYZE GIT CHANGES
 
 Run these commands to understand what changed:
 - `git status --short` — list all modified/added/deleted files
 - `git diff --stat HEAD` — show file-level change summary
 - `git log --oneline -5` — recent commit history for context
+- `git diff --name-status HEAD` — detect renames and deletions
 
-Classify every changed file into one of these categories:
+Classify every changed file:
 - **Added** (`??` or `A`)
 - **Modified** (`M`)
 - **Deleted** (`D`)
+- **Renamed** (`R`)
 
-### 2. ALWAYS UPDATE PACKAGE.JSON VERSION BEFORE COMMITTING
+### 3. DETERMINE VERSION BUMP FROM CONVENTIONAL COMMITS
 
-**REQUIRED STEP:** You MUST update `package.json` with a new version before every commit. Never commit without updating the version.
+Parse recent commits to determine appropriate version bump:
 
-First, check the current version:
 ```bash
-node -p "require('./package.json').version"
+git log --pretty=format:"%h %s" -10 | grep -E "^(feat|fix)" | head -5
 ```
 
-Determine the appropriate version bump based on the changes:
-- **major** — any breaking change (look for `BREAKING CHANGE` in diffs, or `!` after type/scope like `feat!:`, or API-breaking structural changes)
-- **minor** — new features (`feat:`), significant additions (new pages, components, infrastructure)
-- **patch** — bug fixes (`fix:`), docs, chores, refactors, test updates
+Apply semantic versioning rules:
+- **major**: `BREAKING CHANGE:` in commit body OR `!` after type/scope (e.g., `feat!:`, `fix(api)!:`)
+- **minor**: `feat:` commits (new features)
+- **patch**: `fix:` commits (bug fixes), `chore:`, `docs:`, `refactor:`, `test:`, or no conventional commit type
 
-Update `package.json` with the new version:
-```bash
-node -e "
-import { readFileSync, writeFileSync } from 'fs';
-const pkg = JSON.parse(readFileSync('./package.json', 'utf8'));
-const parts = pkg.version.split('.').map(Number);
-// Determine which part to bump based on commit type
-parts[2]++; // Default to patch bump
-if (type === 'minor') {
-  parts[1]++;
-  parts[2] = 0;
-} else if (type === 'major') {
-  parts[0]++;
-  parts[1] = 0;
-  parts[2] = 0;
-}
-pkg.version = parts.join('.');
-writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
-console.log('Updated to', pkg.version);
-"
-```
+Use `semver` library if available, otherwise manual bump:
+- Patch: increment third number, reset lower numbers
+- Minor: increment second number, reset third to 0
+- Major: increment first number, reset others to 0
 
-Verify the version was updated:
-```bash
-node -p "require('./package.json').version"
-```
+Update `package.json` with new version and verify.
 
-### 3. CREATE COMMIT MESSAGE
+### 4. GENERATE COMMIT MESSAGE
 
-Format the commit message exactly like this:
+Format the commit message:
 
 ```
-[X.Y.Z] <conventional_commit_type>: <overview_message>
+[X.Y.Z] <type>: <overview>
 
-- <one-line description of change>
-- <one-line description of change>
+- <change 1>
+- <change 2>
 ```
 
 Rules:
-- **Always include the version in square brackets on the very first line** (e.g., `[0.5.0]`)
-- Follow the version with a conventional commit type (`feat:`, `fix:`, `chore:`, `refactor:`, etc.)
-- The overview message should be a brief summary (e.g., `remove theme from General tab`)
-- One-line descriptions should be concise and specific
-- Group related changes under a single bullet when appropriate
+- Version in square brackets on first line (e.g., `[4.5.0]`)
+- Conventional commit type (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `perf:`, `ci:`, `build:`, `style:`)
+- Overview is brief summary
+- One-line descriptions per file/group of changes
+- If breaking change, add `BREAKING CHANGE:` footer with migration notes
 
-### 4. STAGE AND COMMIT
+### 5. STAGE ALL CHANGES
 
 ```bash
 git add .
-git commit -m "<commit_message>"
 ```
 
-Use the formatted message from Step 3 as the `-m` value (escape newlines or use a heredoc).
+### 6. CREATE COMMIT
 
-### 5. VERIFY
+```bash
+git commit -m "$(cat <<'EOF'
+[X.Y.Z] <type>: <overview>
+
+- <change 1>
+- <change 2>
+EOF
+)"
+```
+
+### 7. POST-COMMIT VERIFICATION
 
 Run:
 - `git status` — confirm working tree is clean
 - `git log --oneline -3` — confirm commit landed correctly
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "require('$PROJECT_ROOT/code/package.json').version"` — verify version in committed commit
+
+## Error Handling
+
+- **Uncommitted changes detected**: Abort with message listing conflicting files
+- **Malformed package.json**: Show parsing error and exit
+- **Git command failure**: Show error output and exit code
+- **Commit failure**: Rollback version bump (restore original package.json)
 
 ## Output
 
-1. **The full commit message** that was used
-2. **List of all files changed**, with one-sentence descriptions:
+After successful commit, return:
 
-```
-- <file_path>: <one sentence description>
-```
-
-3. **Brief summary** of notable changes (what matters to a reviewer)
+1. **Full commit message** used
+2. **Files changed** with descriptions:
+   ```
+   - <file_path>: <description>
+   ```
+3. **Documentation updates**: CLAUDE.md and/or README.md (if applicable)
+4. **Version bump**: old → new
+5. **Summary** of notable changes
 
 ## EXAMPLE OUTPUT
 
-[0.5.0] fix: remove theme from General tab
+```
+[4.5.0] feat: add user authentication
 
-- src/app/services/settings.service.ts: skip theme in getSettingsSections()
-- src/app/pages/settings/settings.component.html: remove theme control rendering
-- src/app/services/settings.service.spec.ts: update tests to reflect theme exclusion
+- src/middleware/auth.ts: implement JWT-based auth middleware
+- src/controllers/userController.ts: add login/register endpoints
+- tests/__tests__/auth.test.ts: add auth middleware tests
+- package.json: bump version 4.4.1 → 4.5.0
+- README.md: add authentication section with usage examples
 
-Notable changes: Theme setting removed from settings page tabs; users must use header toggle for dark/light mode.
+Notable changes: Users can now authenticate via JWT tokens. Breaking: /api/* routes require Authorization header.
+```
+
+## IMPROVEMENTS OVER ORIGINAL
+
+| Original Issue | Fix Applied |
+|----------------|-------------|
+| Version bump ignored `feat:` | Parse conventional commits to determine bump level |
+| No prerelease support | Use `semver` library for proper version manipulation |
+| No rename detection | Add `--diff-filter=R` handling |
+| No error recovery | Try/catch with rollback on failure |
+| Monolithic design | Clear phase separation with pre-flight checks |
+| No breaking change detection | Detect `!` and `BREAKING CHANGE:` footer |
+| Manual version math | Use semver library or validated logic |
