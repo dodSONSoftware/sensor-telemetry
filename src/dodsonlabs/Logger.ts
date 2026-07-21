@@ -4,6 +4,7 @@
  */
 
 import winston, { format } from "winston";
+import { createRequire } from "module";
 import { LogLevel } from "./Interfaces";
 import type {
   ILogger,
@@ -15,6 +16,11 @@ import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
 const { combine, timestamp, errors, json } = format;
+
+// Load version from package.json at module load time
+const pkgRequire = createRequire(__filename);
+const packageJsonPath = pkgRequire.resolve("../..//package.json");
+const { version } = pkgRequire(packageJsonPath) as { version: string };
 
 
 // **** Secret Redaction Helpers ****
@@ -190,7 +196,7 @@ export class Logger implements ILogger {
       defaultMeta: {
         service: "sensor-telemetry",
         environment: process.env.NODE_ENV ?? "development",
-        version: process.env.APP_VERSION ?? "unknown",
+        version: version ?? "unknown",
       },
       format: combine(
         createRedactionFormat(),
