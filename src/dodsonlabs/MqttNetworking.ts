@@ -33,6 +33,7 @@ export class MqttNetworking implements IMqttNetworking {
         this.configuration = config;
         this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
         this.mqtt_topic_telemetry = config.mqttTopicTelemetry;
+        this.mqtt_topic_log = config.mqttTopicLog || "";
         // ----
         this.logger = logger;
         this.originator = "networking";
@@ -51,7 +52,17 @@ export class MqttNetworking implements IMqttNetworking {
         this.promWriter.setMqttNetworking(this);
 
         // log-it
-        this.logger.write_info("MqttNetworking::ctor()", "MqttNetworking Initialized");
+        this.logger.write_info(
+            "networking/constructor",
+            "MQTT networking initialized",
+            {
+                event: "mqtt_networking_initialized",
+                logType: "service",
+                mqttBrokerIp: this.mqtt_server_ip_address,
+                mqttTopicTelemetry: this.mqtt_topic_telemetry,
+                mqttTopicLog: this.mqtt_topic_log,
+            }
+        );
     }
 
     // ********
@@ -101,6 +112,7 @@ export class MqttNetworking implements IMqttNetworking {
     // ----
     private readonly mqtt_server_ip_address: string;
     public readonly mqtt_topic_telemetry: string;
+    public readonly mqtt_topic_log: string;
     // ----
     private readonly originator: string;
     // ----
@@ -164,7 +176,15 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     public async close(timeout_ms: number = 5000): Promise<void> {
-        this.logger.write_info(this.originator, `<close> => Shutting down MQTT client (timeout: ${timeout_ms}ms)...`);
+        this.logger.write_info(
+            "networking/close",
+            `Shutting down MQTT client (timeout: ${timeout_ms}ms)...`,
+            {
+                event: "mqtt_client_closing",
+                logType: "service",
+                timeoutMs: timeout_ms,
+            }
+        );
 
         // Close Prometheus writer first (no timeout needed)
         this.promWriter.close();
@@ -172,7 +192,14 @@ export class MqttNetworking implements IMqttNetworking {
         // Close MQTT client with timeout
         const closePromise = new Promise<void>((resolve) => {
             this.mqtt_client.end(() => {
-                this.logger.write_info(this.originator, "<close> => MQTT client disconnected.");
+                this.logger.write_info(
+                    "networking/close",
+                    "MQTT client disconnected.",
+                    {
+                        event: "mqtt_client_disconnected",
+                        logType: "service",
+                    }
+                );
                 resolve();
             });
         });
@@ -180,8 +207,13 @@ export class MqttNetworking implements IMqttNetworking {
         const timeoutPromise = new Promise<void>((resolve) => {
             setTimeout(() => {
                 this.logger.write_error(
-                    this.originator,
-                    `<close> => MQTT client close timed out after ${timeout_ms}ms, forcing disconnect.`
+                    "networking/close_timeout",
+                    `MQTT client close timed out after ${timeout_ms}ms, forcing disconnect.`,
+                    {
+                        event: "mqtt_client_close_timeout",
+                        logType: "service",
+                        timeoutMs: timeout_ms,
+                    }
                 );
                 // Force close as a last resort — force=true skips waiting for
                 // pending packets to be acknowledged, avoiding the hang.
@@ -208,8 +240,15 @@ export class MqttNetworking implements IMqttNetworking {
             : LogLevel.Debug;
 
         this.logger.write_info(
-            this.originator + ".updateConfig",
-            `Configuration updated: logLevel=${newConfig.logLevel}, forwardSensorLogs=${this.forward_sensor_logs}`
+            "networking/updateConfig",
+            "Configuration updated",
+            {
+                event: "configuration_updated",
+                logType: "audit",
+                source: this.originator,
+                logLevel: newConfig.logLevel,
+                forwardSensorLogs: this.forward_sensor_logs,
+            }
         );
     }
 
@@ -218,49 +257,111 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** MQTT HANDLER FUNCTIONS
 
     private async on_connect(): Promise<void> {
-    // log-it
-        this.logger.write_debug(this.originator, "<on_connect> => Connected to the MQTT broker");
+        // log-it
+        this.logger.write_debug(
+            "networking/onConnect",
+            "Connected to the MQTT broker",
+            {
+                event: "mqtt_connected",
+                logType: "service",
+            }
+        );
 
-        // subscribe to topic
-        this.logger.write_debug(this.originator, `<on_connect> => Subscribing to Topic: ${this.mqtt_topic_telemetry}`);
+        // subscribe to telemetry topic
+        this.logger.write_debug(
+            "networking/onConnect",
+            `Subscribing to Topic: ${this.mqtt_topic_telemetry}`,
+            {
+                event: "mqtt_subscription_started",
+                logType: "service",
+                mqttTopic: this.mqtt_topic_telemetry,
+            }
+        );
         this.mqtt_client.subscribe(this.mqtt_topic_telemetry);
+
+        // subscribe to log topic if configured
+        if (this.mqtt_topic_log && this.mqtt_topic_log.length > 0) {
+            this.logger.write_debug(
+                "networking/onConnect",
+                `Subscribing to Log Topic: ${this.mqtt_topic_log}`,
+                {
+                    event: "mqtt_subscription_started",
+                    logType: "service",
+                    mqttTopic: this.mqtt_topic_log,
+                }
+            );
+            this.mqtt_client.subscribe(this.mqtt_topic_log);
+        }
     }
 
     private on_disconnect(): void {
-        this.logger.write_warn(this.originator, "<on_disconnect> => Disconnected from MQTT broker");
-    // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
-    // When it does, the 'connect' event fires on_connect() which resubscribes.
+        this.logger.write_warn(
+            "networking/onDisconnect",
+            "Disconnected from MQTT broker",
+            {
+                event: "mqtt_disconnected",
+                logType: "service",
+            }
+        );
+        // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
+        // When it does, the 'connect' event fires on_connect() which resubscribes.
     }
 
     private on_message(
-        _topic: string,
+        topic: string,
         payload: Buffer,
         _packet: mqtt.IPublishPacket
     ): void {
         try {
-            this.handle_mqtt_message(JSON.parse(payload.toString())).catch((error) => {
-                this.logger.write_error(
-                    this.originator,
-                    `<on_message> => ERROR=${error}`
-                );
-            });
+            const json_doc = JSON.parse(payload.toString());
+
+            // Route message based on topic
+            if (topic === this.mqtt_topic_log) {
+                // Message from log topic - treat as log message
+                if (this.forward_sensor_logs) {
+                    this.handle_mqtt_message_log(json_doc);
+                }
+            } else {
+                // Message from telemetry topic - route by message-type
+                this.handle_mqtt_message(json_doc).catch((error) => {
+                    this.logger.write_error(
+                        "networking/onMessage",
+                        `Error handling MQTT message: ${error}`,
+                        {
+                            event: "mqtt_message_handling_error",
+                            logType: "sensor",
+                            error,
+                        }
+                    );
+                });
+            }
 
         } catch (error) {
             this.logger.write_error(
-                this.originator,
-                `<on_message> => ERROR=${error}`
+                "networking/onMessageParse",
+                `Failed to parse MQTT message: ${error}`,
+                {
+                    event: "mqtt_message_parse_error",
+                    logType: "sensor",
+                    error,
+                }
             );
         }
     }
 
     private on_error(error: any): void {
         this.logger.write_error(
-            this.originator,
-            `<on_error> => Cannot connect! ERROR=${sysFunc.ensureError(error).message}`
+            "networking/onError",
+            `Cannot connect! ERROR=${sysFunc.ensureError(error).message}`,
+            {
+                event: "mqtt_connection_error",
+                logType: "service",
+                error: sysFunc.ensureError(error),
+            }
         );
-    // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
-    // Do NOT call on_connect() here — the client may be in an error state,
-    // and calling subscribe() on it would trigger another error event.
+        // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
+        // Do NOT call on_connect() here — the client may be in an error state,
+        // and calling subscribe() on it would trigger another error event.
     }
 
 
@@ -270,10 +371,17 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** PROCESSING MQTT MESSAGES
 
     private async handle_mqtt_message(json_doc: any): Promise<void> {
-    // initialize
+        // initialize
         const msg_type_raw = json_doc["message-type"];
         if (msg_type_raw === undefined) {
-            this.logger.write_error(this.originator, "<handle_mqtt_message> => Missing 'message-type' key, dropping message");
+            this.logger.write_error(
+                "networking/handleMessage",
+                "Missing 'message-type' key, dropping message",
+                {
+                    event: "mqtt_message_missing_type",
+                    logType: "sensor",
+                }
+            );
             return;
         }
         const msg_type: string = msg_type_raw.toString();
@@ -292,8 +400,13 @@ export class MqttNetworking implements IMqttNetworking {
 
         default:
             this.logger.write_warn(
-                this.originator,
-                `<handle_mqtt_message> => Unknown message-type '${msg_type}', dropping message`
+                "networking/handleMessage",
+                `Unknown message-type '${msg_type}', dropping message`,
+                {
+                    event: "mqtt_unknown_message_type",
+                    logType: "sensor",
+                    messageType: msg_type,
+                }
             );
         }
     }
@@ -305,11 +418,18 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** HANDLE MQTT LOG MESSAGES
 
     private handle_mqtt_message_log(json_doc: any): void {
-        this.logger.write_debug(this.originator, "<handle_message_log>: message-type: LOG");
+        // Extract payload if present (format 2), otherwise use json_doc directly (format 1)
+        let logData = json_doc["payload"] || json_doc;
 
-        const source = json_doc["source"] ?? "unknown";
-        const level = json_doc["level"] ?? "info";
-        const message = json_doc["message"] ?? json_doc;
+        // Remove service-managed fields from sensor log data
+        delete logData["version"];
+
+        // Add timestamp as if it came from the sender
+        logData["timestamp"] = sysFunc.get_timestamp_iso();
+
+        const source = logData["source"] ?? "unknown";
+        const level = logData["level"] ?? "info";
+        const message = logData["message"] ?? logData;
 
         // Gate: only forward if the sensor's log level meets the configured threshold
         const sensor_level = this.sensor_log_level_to_enum(String(level).toLowerCase());
@@ -320,27 +440,98 @@ export class MqttNetworking implements IMqttNetworking {
         // Forward sensor log messages to the application logger at the appropriate level
         const logMessage = `[${source}] ${JSON.stringify(message)}`;
 
+        // Build metadata from log data, preserving all fields except service-managed fields
+        const metadata: Record<string, unknown> = {
+            event: logData["event"] ?? "sensor_log_generic",
+            logType: "sensor",
+            source,
+        };
+
+        // Add optional fields if present (support both snake_case and camelCase)
+        if (logData["command_id"]) metadata.commandId = logData["command_id"];
+        else if (logData["commandId"]) metadata.commandId = logData["commandId"];
+        if (logData["target"]) metadata.target = logData["target"];
+        else if (logData["Target"]) metadata.target = logData["Target"];
+        if (logData["targeted"] !== undefined) metadata.targeted = logData["targeted"];
+        else if (logData["Targeted"] !== undefined) metadata.targeted = logData["Targeted"];
+        if (logData["response_topic"]) metadata.responseTopic = logData["response_topic"];
+        else if (logData["responseTopic"]) metadata.responseTopic = logData["responseTopic"];
+        if (logData["payload_size"] !== undefined) metadata.payloadSize = logData["payload_size"];
+        else if (logData["payloadSize"] !== undefined) metadata.payloadSize = logData["payloadSize"];
+        if (logData["duration_ms"] !== undefined) metadata.durationMs = logData["duration_ms"];
+        else if (logData["durationMs"] !== undefined) metadata.durationMs = logData["durationMs"];
+        if (logData["device_ip"]) metadata.deviceIp = logData["device_ip"];
+        else if (logData["deviceIp"]) metadata.deviceIp = logData["deviceIp"];
+        if (logData["device_source"]) metadata.deviceSource = logData["device_source"];
+        else if (logData["deviceSource"]) metadata.deviceSource = logData["deviceSource"];
+        if (logData["function"]) metadata.function = logData["function"];
+        if (logData["module"]) metadata.module = logData["module"];
+
         switch (sensor_level) {
+        case LogLevel.Critical:
+            this.logger.write_critical(
+                "networking/logCritical",
+                logMessage,
+                {
+                    ...metadata,
+                    severity: "critical",
+                    fatal: false,
+                    version: undefined,  // Override defaultMeta version
+                }
+            );
+            break;
         case LogLevel.Error:
-            this.logger.write_error("MqttNetworking::log", logMessage);
+            this.logger.write_error(
+                "networking/logError",
+                logMessage,
+                {
+                    ...metadata,
+                    severity: "standard",
+                    version: undefined,  // Override defaultMeta version
+                }
+            );
             break;
         case LogLevel.Warn:
-            this.logger.write_warn("MqttNetworking::log", logMessage);
+            this.logger.write_warn(
+                "networking/logWarn",
+                logMessage,
+                {
+                    ...metadata,
+                    version: undefined,  // Override defaultMeta version
+                }
+            );
             break;
         case LogLevel.Debug:
-            this.logger.write_debug("MqttNetworking::log", logMessage);
+            this.logger.write_debug(
+                "networking/logDebug",
+                logMessage,
+                {
+                    ...metadata,
+                    version: undefined,  // Override defaultMeta version
+                }
+            );
             break;
         default:
-            this.logger.write_info("MqttNetworking::log", logMessage);
+            this.logger.write_info(
+                "networking/logInfo",
+                logMessage,
+                {
+                    ...metadata,
+                    version: undefined,  // Override defaultMeta version
+                }
+            );
         }
     }
 
     /**
      * Map a sensor log level string to the internal LogLevel enum.
-     * Accepts aliases like "err"/"wrn"/"dbg" and falls back to Info for unknown values.
+     * Accepts aliases like "err"/"wrn"/"dbg"/"crit" and falls back to Info for unknown values.
      */
     private sensor_log_level_to_enum(level: string): LogLevel {
         switch (level) {
+        case "critical":
+        case "crit":
+            return LogLevel.Critical;
         case "error":
         case "err":
             return LogLevel.Error;
@@ -362,11 +553,18 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** HANDLE MQTT TELEMETRY MESSAGES
 
     private handle_mqtt_message_telemetry(json_doc: any): void {
-    // initialize
+        // initialize
         // Get system-info for timestamp handling
         const payload = json_doc?.["payload"];
         if (!payload) {
-            this.logger.write_error(this.originator, "<handle_mqtt_message_telemetry> => Missing 'payload', dropping telemetry message");
+            this.logger.write_error(
+                "networking/handleTelemetry",
+                "Missing 'payload', dropping telemetry message",
+                {
+                    event: "mqtt_telemetry_missing_payload",
+                    logType: "sensor",
+                }
+            );
             return;
         }
 
@@ -439,14 +637,27 @@ export class MqttNetworking implements IMqttNetworking {
             const value = section[field];
             if (value === undefined || value === null) {
                 this.logger.write_warn(
-                    this.originator + ".is_telemetry_valid",
-                    `Source: ${source}, missing field '${field}', skipping`
+                    "networking/isTelemetryValid",
+                    `Source: ${source}, missing field '${field}', skipping`,
+                    {
+                        event: "telemetry_field_missing",
+                        logType: "sensor",
+                        source,
+                        field,
+                    }
                 );
                 return false;
             } else if (!Number.isFinite(Number(value))) {
                 this.logger.write_warn(
-                    this.originator + ".is_telemetry_valid",
-                    `Source: ${source}, invalid numeric value '${value}' for field '${field}', skipping`
+                    "networking/isTelemetryValid",
+                    `Source: ${source}, invalid numeric value '${value}' for field '${field}', skipping`,
+                    {
+                        event: "telemetry_field_invalid",
+                        logType: "sensor",
+                        source,
+                        field,
+                        value,
+                    }
                 );
                 return false;
             }

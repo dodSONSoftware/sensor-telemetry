@@ -20,7 +20,6 @@ const { version } = pkgRequire(packageJsonPath) as { version: string };
 export class PrometheusWriter {
     // ******** private properties
 
-    private readonly originator: string = "PrometheusWriter";
     private readonly logger: ILogger;
     private readonly prometheus_port: number;
     private server: http.Server | undefined;
@@ -59,6 +58,9 @@ export class PrometheusWriter {
      * - sensor-source-max-length: Maximum length for source labels (default: 30)
      * - sensor-source-valid-chars-regex: Character whitelist for source names (default: a-zA-Z0-9._-)
      * These prevent unbounded Prometheus cardinality from arbitrary MQTT source names.
+     *
+     * Note: The VALID_CHARS regex uses the global flag to replace ALL invalid characters,
+     * not just the first match encountered.
      */
     constructor(
         config: z.infer<typeof configSchema>,
@@ -72,7 +74,8 @@ export class PrometheusWriter {
         const validChars = config.sensorSourceValidCharsRegex ?? "a-zA-Z0-9._-";
         // Escape regex metacharacters in the valid chars pattern to prevent syntax errors
         const escapedValidChars = validChars.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-        this.VALID_CHARS = new RegExp(`[^${escapedValidChars}]+`);
+        // Use global flag to replace ALL invalid characters, not just the first match
+        this.VALID_CHARS = new RegExp(`[^${escapedValidChars}]+`, "g");
 
         // save config and source for endpoint access
         this.config = { ...config };
@@ -100,12 +103,19 @@ export class PrometheusWriter {
         // --------------------------------
         // setup http server
         const server = http.createServer(async (req, res) => {
-            // Log endpoint access
-            this.logger.write_debug(
-                this.originator + ".http",
-                `HTTP ${req.method || "UNKNOWN"} ${req.url || "/"}`
-
-            );
+            // Suppress logging for successful /metrics and /health requests
+            if (req.url !== "/metrics" && req.url !== "/health") {
+                this.logger.write_debug(
+                    "prometheus/httpRequest",
+                    "HTTP request received",
+                    {
+                        event: "http_request_received",
+                        logType: "service",
+                        method: req.method || "UNKNOWN",
+                        url: req.url || "/",
+                    }
+                );
+            }
 
             if (req.url === "/metrics") {
                 res.setHeader("Content-Type", register.contentType);
@@ -132,6 +142,19 @@ export class PrometheusWriter {
             } else {
                 res.statusCode = 404;
                 res.end("Not Found");
+
+                this.logger.write_warn(
+                    "prometheus/routeNotFound",
+                    "HTTP route not found",
+                    {
+                        event: "route_not_found",
+                        logType: "service",
+                        requestId: req.headers["x-request-id"] as string | undefined,
+                        method: req.method,
+                        path: req.url || "/",
+                        statusCode: 404,
+                    }
+                );
             }
         });
 
@@ -141,26 +164,47 @@ export class PrometheusWriter {
 
             // log-it
             this.logger.write_info(
-                this.originator + ".ctor",
-                `HTTP Server, for Prometheus, is running at http://localhost:${this.prometheus_port}`
+                "prometheus/serverStarted",
+                "HTTP Server for Prometheus metrics is running",
+                {
+                    event: "prometheus_server_started",
+                    logType: "service",
+                    port: this.prometheus_port,
+                    metricsEndpoint: `/metrics`,
+                }
             );
             this.logger.write_info(
-                this.originator + ".ctor",
-                `Prometheus metrics can be found at http://localhost:${this.prometheus_port}/metrics`
+                "prometheus/metricsReady",
+                "Prometheus metrics available",
+                {
+                    event: "prometheus_metrics_ready",
+                    logType: "service",
+                    metricsUrl: `http://localhost:${this.prometheus_port}/metrics`,
+                }
             );
         });
 
         // handle listen errors (e.g., port already in use)
         this.server.on("error", (err: NodeJS.ErrnoException) => {
             this.logger.write_error(
-                this.originator + ".ctor",
-                `Prometheus server listen error: ${err.message}`
+                "prometheus/serverStartFailed",
+                `Prometheus server failed to start: ${err.message}`,
+                {
+                    event: "prometheus_server_start_failed",
+                    logType: "service",
+                    fatal: true,
+                    exitCode: 1,
+                    error: err,
+                }
             );
         });
 
         // log-it
         const msg = "PrometheusWriter class initialized.";
-        logger.write_info(this.originator + ".ctor", msg);
+        logger.write_info("prometheus/constructor", msg, {
+            event: "prometheus_writer_initialized",
+            logType: "service",
+        });
     }
 
     // ******** public methods for config management
@@ -331,13 +375,24 @@ export class PrometheusWriter {
                 // Apply log level change if it differs
                 if (oldLogLevel !== newLogLevel && this.logger.setLogLevel) {
                     this.logger.write_info(
-                        this.originator + ".handleWriteConfig",
-                        `Log level changing from "${oldLogLevel}" to "${newLogLevel}"`
+                        "prometheus/logLevelChanging",
+                        `Log level changing from "${oldLogLevel}" to "${newLogLevel}"`,
+                        {
+                            event: "log_level_change_initiated",
+                            logType: "audit",
+                            previousLevel: oldLogLevel,
+                            newLevel: newLogLevel,
+                        }
                     );
                     this.logger.setLogLevel(newLogLevel);
                     this.logger.write_info(
-                        this.originator + ".handleWriteConfig",
-                        `New log level is now: ${this.logger.global_log_level_string()}`
+                        "prometheus/logLevelChanged",
+                        `New log level is now: ${this.logger.global_log_level_string()}`,
+                        {
+                            event: "log_level_changed",
+                            logType: "audit",
+                            newLevel: this.logger.global_log_level_string(),
+                        }
                     );
                 }
 
@@ -395,28 +450,41 @@ export class PrometheusWriter {
 
     /**
      * Sanitize source name for Prometheus gauge labels.
+     * - Normalizes Unicode dashes to ASCII hyphens (preserves canonical source identity)
      * - Strips invalid characters (keeps only configured valid chars)
      * - Truncates to MAX_SOURCE_LENGTH
-     * - Logs warning if sanitization changed the source
+     * - Logs only when sanitization actually modifies the source beyond normalization
      */
     private sanitizeSource(source: string): string {
         if (!source) {
             return "unknown";
         }
 
+        // Normalize common Unicode dash characters to ASCII hyphen-minus
+        // This ensures consistent source identity across logs and metrics
+        let normalized = source
+            .replace(/[‐-―−]/g, "-"); // Unicode dash variants
+
         // Strip invalid characters, keeping only valid ones
-        let sanitized = source.replace(this.VALID_CHARS, "");
+        let sanitized = normalized.replace(this.VALID_CHARS, "");
 
         // Truncate if too long
         if (sanitized.length > this.MAX_SOURCE_LENGTH) {
             sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
         }
 
-        // Log if sanitization changed the source
-        if (sanitized !== source) {
+        // Log only if sanitization actually modified the source (beyond normalization)
+        // This prevents duplicate debug entries for no-op sanitizations
+        if (sanitized !== normalized) {
             this.logger.write_debug(
-                this.originator + ".sanitizeSource",
-                `Sanitized source '${source}' -> '${sanitized}'`
+                "prometheus/sourceSanitized",
+                `Sanitized source '${normalized}' -> '${sanitized}'`,
+                {
+                    event: "sensor_source_sanitized",
+                    logType: "sensor",
+                    originalSource: normalized,
+                    sanitizedSource: sanitized,
+                }
             );
         }
 
@@ -433,7 +501,14 @@ export class PrometheusWriter {
         this._ready = false;
         if (this.server) {
             this.server.close(() => {
-                this.logger.write_info(this.originator + ".close", "Prometheus metrics server closed.");
+                this.logger.write_info(
+                    "prometheus/serverClosed",
+                    "Prometheus metrics server closed.",
+                    {
+                        event: "prometheus_server_closed",
+                        logType: "service",
+                    }
+                );
             });
         }
     }
@@ -443,8 +518,14 @@ export class PrometheusWriter {
         const air = payload?.["air"];
         if (!air) {
             this.logger.write_warn(
-                this.originator + ".publish_air",
-                `Source: ${sanitized}, missing 'air', skipping`
+                "prometheus/publishAirMissing",
+                `Source: ${sanitized}, missing 'air', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "air",
+                }
             );
             return;
         }
@@ -453,13 +534,30 @@ export class PrometheusWriter {
       (Number(air["temperature-c"]) * 9) / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
-                this.originator + ".publish_air",
-                `Source: ${sanitized}, invalid temperature-c (${air["temperature-c"]}), skipping Air_Temperature gauge`
+                "prometheus/publishAirInvalidTemp",
+                `Source: ${sanitized}, invalid temperature-c (${air["temperature-c"]}), skipping Air_Temperature gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "temperature-c",
+                    value: air["temperature-c"],
+                }
             );
         } else if (temp_f < -100 || temp_f > 200) {
             this.logger.write_warn(
-                this.originator + ".publish_air",
-                `Source: ${sanitized}, temperature-c out of physical range (${air["temperature-c"]}C = ${temp_f}F), skipping Air_Temperature gauge`
+                "prometheus/publishAirTempOutOfRange",
+                `Source: ${sanitized}, temperature-c out of physical range (${air["temperature-c"]}C = ${temp_f}F), skipping Air_Temperature gauge`,
+                {
+                    event: "telemetry_out_of_range",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "temperature-c",
+                    value: air["temperature-c"],
+                    convertedValue: temp_f,
+                    minRange: -100,
+                    maxRange: 200,
+                }
             );
         } else {
             this.prometheus_Gauge_AirTemp!.set({ source: sanitized }, temp_f);
@@ -471,8 +569,16 @@ export class PrometheusWriter {
         );
 
         this.logger.write_debug(
-            this.originator + ".publish_air",
-            `Source: ${sanitized}, Temperature: ${temp_f}, Humidity: ${humidity}, Pressure: ${pressure}`
+            "prometheus/publishAirData",
+            `Source: ${sanitized}, Temperature: ${temp_f}, Humidity: ${humidity}, Pressure: ${pressure}`,
+            {
+                event: "air_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                temperatureF: temp_f,
+                humidityPercent: humidity,
+                pressureInhg: pressure,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "air" });
 
@@ -490,8 +596,14 @@ export class PrometheusWriter {
         const light = payload?.["light"];
         if (!light) {
             this.logger.write_warn(
-                this.originator + ".publish_light",
-                `Source: ${sanitized}, missing 'light', skipping`
+                "prometheus/publishLightMissing",
+                `Source: ${sanitized}, missing 'light', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "light",
+                }
             );
             return;
         }
@@ -499,8 +611,15 @@ export class PrometheusWriter {
         const uvIndex = Number(light["uv-index"]);
         if (!Number.isFinite(uvIndex)) {
             this.logger.write_warn(
-                this.originator + ".publish_light",
-                `Source: ${sanitized}, invalid uv-index (${light["uv-index"]}), skipping Light_UV_Index gauge`
+                "prometheus/publishLightInvalidUv",
+                `Source: ${sanitized}, invalid uv-index (${light["uv-index"]}), skipping Light_UV_Index gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "uv-index",
+                    value: light["uv-index"],
+                }
             );
         } else {
             this.prometheus_Gauge_LightUVIndex!.set({ source: sanitized }, uvIndex);
@@ -509,16 +628,30 @@ export class PrometheusWriter {
         const lux = Number(light["lux"]);
         if (!Number.isFinite(lux)) {
             this.logger.write_warn(
-                this.originator + ".publish_light",
-                `Source: ${sanitized}, invalid lux (${light["lux"]}), skipping Light_LUX gauge`
+                "prometheus/publishLightInvalidLux",
+                `Source: ${sanitized}, invalid lux (${light["lux"]}), skipping Light_LUX gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "lux",
+                    value: light["lux"],
+                }
             );
         } else {
             this.prometheus_Gauge_LightLux!.set({ source: sanitized }, lux);
         }
 
         this.logger.write_debug(
-            this.originator + ".publish_light",
-            `Source: ${sanitized}, uvIndex: ${uvIndex}, lux: ${lux}`
+            "prometheus/publishLightData",
+            `Source: ${sanitized}, uvIndex: ${uvIndex}, lux: ${lux}`,
+            {
+                event: "light_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                uvIndex,
+                lux,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "light" });
     }
@@ -528,8 +661,14 @@ export class PrometheusWriter {
         const rain = payload?.["rain"];
         if (!rain) {
             this.logger.write_warn(
-                this.originator + ".publish_rain",
-                `Source: ${sanitized}, missing 'rain', skipping`
+                "prometheus/publishRainMissing",
+                `Source: ${sanitized}, missing 'rain', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "rain",
+                }
             );
             return;
         }
@@ -537,16 +676,29 @@ export class PrometheusWriter {
         const inches = Number(rain["in-h2o"]);
         if (!Number.isFinite(inches)) {
             this.logger.write_warn(
-                this.originator + ".publish_rain",
-                `Source: ${sanitized}, invalid in-h2o (${rain["in-h2o"]}), skipping Rain_In_H2O gauge`
+                "prometheus/publishRainInvalid",
+                `Source: ${sanitized}, invalid in-h2o (${rain["in-h2o"]}), skipping Rain_In_H2O gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "in-h2o",
+                    value: rain["in-h2o"],
+                }
             );
         } else {
             this.prometheus_Gauge_RainInches!.set({ source: sanitized }, inches);
         }
 
         this.logger.write_debug(
-            this.originator + ".publish_rain",
-            `Source: ${sanitized}, in-h2o: ${inches}`
+            "prometheus/publishRainData",
+            `Source: ${sanitized}, in-h2o: ${inches}`,
+            {
+                event: "rain_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                rainInches: inches,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "rain" });
     }
@@ -556,8 +708,14 @@ export class PrometheusWriter {
         const wind = payload?.["wind"];
         if (!wind) {
             this.logger.write_warn(
-                this.originator + ".publish_wind",
-                `Source: ${sanitized}, missing 'wind', skipping`
+                "prometheus/publishWindMissing",
+                `Source: ${sanitized}, missing 'wind', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "wind",
+                }
             );
             return;
         }
@@ -567,8 +725,15 @@ export class PrometheusWriter {
         );
         if (!Number.isFinite(speed)) {
             this.logger.write_warn(
-                this.originator + ".publish_wind",
-                `Source: ${sanitized}, invalid wind-speed-cm-sec (${wind["wind-speed-cm-sec"]}), skipping Wind_Speed gauge`
+                "prometheus/publishWindInvalidSpeed",
+                `Source: ${sanitized}, invalid wind-speed-cm-sec (${wind["wind-speed-cm-sec"]}), skipping Wind_Speed gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "wind-speed-cm-sec",
+                    value: wind["wind-speed-cm-sec"],
+                }
             );
         } else {
             this.prometheus_Gauge_WindSpeed!.set({ source: sanitized }, speed);
@@ -579,16 +744,30 @@ export class PrometheusWriter {
         );
         if (!Number.isFinite(gusts)) {
             this.logger.write_warn(
-                this.originator + ".publish_wind",
-                `Source: ${sanitized}, invalid gusts-cm-sec (${wind["gusts-cm-sec"]}), skipping Wind_Gusts gauge`
+                "prometheus/publishWindInvalidGusts",
+                `Source: ${sanitized}, invalid gusts-cm-sec (${wind["gusts-cm-sec"]}), skipping Wind_Gusts gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "gusts-cm-sec",
+                    value: wind["gusts-cm-sec"],
+                }
             );
         } else {
             this.prometheus_Gauge_WindGusts!.set({ source: sanitized }, gusts);
         }
 
         this.logger.write_debug(
-            this.originator + ".publish_wind",
-            `Source: ${sanitized}, speed: ${speed}, gusts: ${gusts}`
+            "prometheus/publishWindData",
+            `Source: ${sanitized}, speed: ${speed}, gusts: ${gusts}`,
+            {
+                event: "wind_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                speedMph: speed,
+                gustsMph: gusts,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "wind" });
     }
@@ -598,8 +777,14 @@ export class PrometheusWriter {
         const water = payload?.["water"];
         if (!water) {
             this.logger.write_warn(
-                this.originator + ".publish_water",
-                `Source: ${sanitized}, missing 'water', skipping`
+                "prometheus/publishWaterMissing",
+                `Source: ${sanitized}, missing 'water', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "water",
+                }
             );
             return;
         }
@@ -608,21 +793,44 @@ export class PrometheusWriter {
       (Number(water["temperature-c"]) * 9) / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
-                this.originator + ".publish_water",
-                `Source: ${sanitized}, invalid temperature-c (${water["temperature-c"]}), skipping Water_Temperature gauge`
+                "prometheus/publishWaterInvalidTemp",
+                `Source: ${sanitized}, invalid temperature-c (${water["temperature-c"]}), skipping Water_Temperature gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "temperature-c",
+                    value: water["temperature-c"],
+                }
             );
         } else if (temp_f < -50 || temp_f > 212) {
             this.logger.write_warn(
-                this.originator + ".publish_water",
-                `Source: ${sanitized}, temperature-c out of physical range (${water["temperature-c"]}C = ${temp_f}F), skipping Water_Temperature gauge`
+                "prometheus/publishWaterTempOutOfRange",
+                `Source: ${sanitized}, temperature-c out of physical range (${water["temperature-c"]}C = ${temp_f}F), skipping Water_Temperature gauge`,
+                {
+                    event: "telemetry_out_of_range",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "temperature-c",
+                    value: water["temperature-c"],
+                    convertedValue: temp_f,
+                    minRange: -50,
+                    maxRange: 212,
+                }
             );
         } else {
             this.prometheus_Gauge_WaterTemp!.set({ source: sanitized }, temp_f);
         }
 
         this.logger.write_debug(
-            this.originator + ".publish_water",
-            `Source: ${sanitized}, Temperature: ${temp_f}`
+            "prometheus/publishWaterData",
+            `Source: ${sanitized}, Temperature: ${temp_f}`,
+            {
+                event: "water_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                temperatureF: temp_f,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "water" });
     }
@@ -632,8 +840,14 @@ export class PrometheusWriter {
         const lightning = payload?.["lightning"];
         if (!lightning) {
             this.logger.write_warn(
-                this.originator + ".publish_lightning",
-                `Source: ${sanitized}, missing 'lightning', skipping`
+                "prometheus/publishLightningMissing",
+                `Source: ${sanitized}, missing 'lightning', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "lightning",
+                }
             );
             return;
         }
@@ -641,16 +855,29 @@ export class PrometheusWriter {
         const count = Number(lightning["lightning-count"]);
         if (!Number.isFinite(count)) {
             this.logger.write_warn(
-                this.originator + ".publish_lightning",
-                `Source: ${sanitized}, invalid lightning-count (${lightning["lightning-count"]}), skipping Lightning gauge`
+                "prometheus/publishLightningInvalid",
+                `Source: ${sanitized}, invalid lightning-count (${lightning["lightning-count"]}), skipping Lightning gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "lightning-count",
+                    value: lightning["lightning-count"],
+                }
             );
         } else {
             this.prometheus_Gauge_Lightning!.set({ source: sanitized }, count);
         }
 
         this.logger.write_debug(
-            this.originator + ".publish_lightning",
-            `Source: ${sanitized}, Strikes: ${count}`
+            "prometheus/publishLightningData",
+            `Source: ${sanitized}, Strikes: ${count}`,
+            {
+                event: "lightning_telemetry_published",
+                logType: "sensor",
+                source: sanitized,
+                strikeCount: count,
+            }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning" });
     }

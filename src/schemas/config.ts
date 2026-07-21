@@ -10,8 +10,8 @@ import { z } from "zod";
  * All keys are required and must match their expected types.
  */
 export const configSchema = z.object({
-    logLevel: z.enum(["error", "warn", "info", "debug"], {
-        error: "logLevel must be one of: error, warn, info, debug",
+    logLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
+        error: "logLevel must be one of: error, warn, info, debug, critical",
     }),
     apiPort: z.number({
         error: "apiPort must be a number",
@@ -23,6 +23,9 @@ export const configSchema = z.object({
     mqttTopicTelemetry: z.string({
         error: "mqttTopicTelemetry must be a string",
     }).min(1, "mqttTopicTelemetry must not be empty"),
+    mqttTopicLog: z.string({
+        error: "mqttTopicLog must be a string",
+    }).min(1, "mqttTopicLog must not be empty").optional(),
     sensorSourceMaxLength: z.number({
         error: "sensorSourceMaxLength must be a number",
     }).int("sensorSourceMaxLength must be an integer")
@@ -30,8 +33,8 @@ export const configSchema = z.object({
         .optional(),
     sensorSourceValidCharsRegex: z.string().optional(),
     forwardSensorLogs: z.boolean().optional(),
-    forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug"], {
-        error: "forwardSensorLogsLevel must be one of: error, warn, info, debug",
+    forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
+        error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",
     }).optional(),
 });
 
