@@ -494,7 +494,13 @@ export class MqttNetworking implements IMqttNetworking {
         // Extract payload if present (V2 format), otherwise use json_doc directly (V1 format)
         let logData = json_doc["payload"] || json_doc;
 
-        // Remove service-managed fields from sensor log data
+        // For V2 format, extract top-level fields for metadata
+        const schemaVersion = this.getField(json_doc, "schema_version");
+        const runtimeId = this.getField(json_doc, "runtime_id");
+        const firmwareVersion = this.getField(json_doc, "firmware_version");
+        const uptimeMs = this.getNumericField(json_doc, "uptime_ms");
+
+        // Remove service-managed fields from log data (not metadata)
         delete logData["schema_version"];
         delete logData["runtime_id"];
         delete logData["firmware_version"];
@@ -504,7 +510,8 @@ export class MqttNetworking implements IMqttNetworking {
         logData["timestamp"] = sysFunc.get_timestamp_iso();
 
         // Use V2 snake_case field names (with camelCase fallbacks where needed)
-        const source = this.getLogField(logData, "source") ?? "unknown";
+        // Source can be in logData (V1) or at top level (V2)
+        const source = this.getLogField(logData, "source") ?? json_doc["source"] ?? "unknown";
         const level = this.getLogField(logData, "level", "log_level") ?? "info";
         const message = this.getLogField(logData, "message", "msg") ?? logData;
 
@@ -517,12 +524,23 @@ export class MqttNetworking implements IMqttNetworking {
         // Forward sensor log messages to the application logger at the appropriate level
         const logMessage = `[${source}] ${JSON.stringify(message)}`;
 
-        // Build metadata from log data, preserving all fields except service-managed fields
+        // Build metadata from log data for Loki compatibility
+        // Loki uses labels for indexing: source, module, function, level
         const metadata: Record<string, unknown> = {
             event: this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic",
             logType: "sensor",
             source,
+            // Add Loki-compatible labels
+            module: this.getLogField(logData, "module"),
+            function: this.getLogField(logData, "function"),
+            level: String(level).toLowerCase(),
         };
+
+        // Add V2 format fields to metadata if available
+        if (runtimeId !== undefined) metadata.runtime_id = runtimeId;
+        if (firmwareVersion !== undefined) metadata.firmware_version = firmwareVersion;
+        if (uptimeMs !== undefined) metadata.uptime_ms = uptimeMs;
+        if (schemaVersion !== undefined) metadata.schema_version = schemaVersion;
 
         // Add optional fields if present (snake_case preferred, with camelCase fallbacks)
         const commandId = this.getLogField(logData, "command_id", "commandId");
@@ -541,10 +559,6 @@ export class MqttNetworking implements IMqttNetworking {
         if (deviceIp !== undefined) metadata.deviceIp = deviceIp;
         const deviceSource = this.getLogField(logData, "device_source", "deviceSource");
         if (deviceSource !== undefined) metadata.deviceSource = deviceSource;
-        const functionField = this.getLogField(logData, "function");
-        if (functionField !== undefined) metadata.function = functionField;
-        const moduleField = this.getLogField(logData, "module");
-        if (moduleField !== undefined) metadata.module = moduleField;
 
         switch (sensor_level) {
         case LogLevel.Critical:
