@@ -513,6 +513,23 @@ export class PrometheusWriter {
         }
     }
 
+    /**
+     * Get a numeric value from an object using V2 snake_case field names.
+     * Returns undefined if not found or not a valid finite number.
+     */
+    private getNumericField(obj: any, ...fieldNames: string[]): number | undefined {
+        for (const fieldName of fieldNames) {
+            const value = obj[fieldName];
+            if (value !== undefined && value !== null) {
+                const numValue = Number(value);
+                if (Number.isFinite(numValue)) {
+                    return numValue;
+                }
+            }
+        }
+        return undefined;
+    }
+
     publish_air(payload: any, source: string) {
         const sanitized = this.sanitizeSource(source);
         const air = payload?.["air"];
@@ -530,30 +547,31 @@ export class PrometheusWriter {
             return;
         }
 
+        // Use V2 snake_case field names
         const temp_f =
-      (Number(air["temperature-c"]) * 9) / 5 + 32;
+      (this.getNumericField(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
                 "prometheus/publishAirInvalidTemp",
-                `Source: ${sanitized}, invalid temperature-c (${air["temperature-c"]}), skipping Air_Temperature gauge`,
+                `Source: ${sanitized}, invalid temperature_c, skipping Air_Temperature gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "temperature-c",
-                    value: air["temperature-c"],
+                    field: "temperature_c",
+                    value: air["temperature_c"],
                 }
             );
         } else if (temp_f < -100 || temp_f > 200) {
             this.logger.write_warn(
                 "prometheus/publishAirTempOutOfRange",
-                `Source: ${sanitized}, temperature-c out of physical range (${air["temperature-c"]}C = ${temp_f}F), skipping Air_Temperature gauge`,
+                `Source: ${sanitized}, temperature_c out of physical range (${air["temperature_c"]}C = ${temp_f}F), skipping Air_Temperature gauge`,
                 {
                     event: "telemetry_out_of_range",
                     logType: "sensor",
                     source: sanitized,
-                    field: "temperature-c",
-                    value: air["temperature-c"],
+                    field: "temperature_c",
+                    value: air["temperature_c"],
                     convertedValue: temp_f,
                     minRange: -100,
                     maxRange: 200,
@@ -563,10 +581,8 @@ export class PrometheusWriter {
             this.prometheus_Gauge_AirTemp!.set({ source: sanitized }, temp_f);
         }
 
-        const humidity = Number(air["humidity-percent"]);
-        const pressure = this.pascalToInHg(
-            Number(air["pressure-pascal"])
-        );
+        const humidity = this.getNumericField(air, "humidity_percent");
+        const pressure = this.pascalToInHg(this.getNumericField(air, "pressure_pascal") ?? NaN);
 
         this.logger.write_debug(
             "prometheus/publishAirData",
@@ -583,12 +599,45 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "air" });
 
         // air telemetry
-        if (Number.isFinite(humidity)) {
+        if (humidity !== undefined) {
             this.prometheus_Gauge_AirHumidity!.set({ source: sanitized }, humidity);
+            this.logger.write_debug(
+                "prometheus/publishAirData",
+                `Set Air_Humidity gauge: ${humidity}`,
+                {
+                    event: "gauge_set",
+                    logType: "sensor",
+                    source: sanitized,
+                    gauge: "Air_Humidity",
+                    value: humidity,
+                }
+            );
         }
-        if (Number.isFinite(pressure)) {
+        if (pressure !== undefined) {
             this.prometheus_Gauge_AirPressure!.set({ source: sanitized }, pressure);
+            this.logger.write_debug(
+                "prometheus/publishAirData",
+                `Set Air_Pressure gauge: ${pressure}`,
+                {
+                    event: "gauge_set",
+                    logType: "sensor",
+                    source: sanitized,
+                    gauge: "Air_Pressure",
+                    value: pressure,
+                }
+            );
         }
+
+        this.logger.write_debug(
+            "prometheus/publishAirComplete",
+            `Published all air metrics for source: ${sanitized}`,
+            {
+                event: "metrics_published",
+                logType: "sensor",
+                source: sanitized,
+                metricsCount: 3, // temp, humidity, pressure
+            }
+        );
     }
 
     publish_light(payload: any, source: string) {
@@ -608,28 +657,29 @@ export class PrometheusWriter {
             return;
         }
 
-        const uvIndex = Number(light["uv-index"]);
-        if (!Number.isFinite(uvIndex)) {
+        // Use V2 snake_case field names
+        const uvIndex = this.getNumericField(light, "uv_index");
+        if (uvIndex === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightInvalidUv",
-                `Source: ${sanitized}, invalid uv-index (${light["uv-index"]}), skipping Light_UV_Index gauge`,
+                `Source: ${sanitized}, invalid uv_index, skipping Light_UV_Index gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "uv-index",
-                    value: light["uv-index"],
+                    field: "uv_index",
+                    value: light["uv_index"],
                 }
             );
         } else {
             this.prometheus_Gauge_LightUVIndex!.set({ source: sanitized }, uvIndex);
         }
 
-        const lux = Number(light["lux"]);
-        if (!Number.isFinite(lux)) {
+        const lux = this.getNumericField(light, "lux");
+        if (lux === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightInvalidLux",
-                `Source: ${sanitized}, invalid lux (${light["lux"]}), skipping Light_LUX gauge`,
+                `Source: ${sanitized}, invalid lux, skipping Light_LUX gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
@@ -673,17 +723,18 @@ export class PrometheusWriter {
             return;
         }
 
-        const inches = Number(rain["in-h2o"]);
-        if (!Number.isFinite(inches)) {
+        // Use V2 snake_case field names
+        const inches = this.getNumericField(rain, "in_h2o");
+        if (inches === undefined) {
             this.logger.write_warn(
                 "prometheus/publishRainInvalid",
-                `Source: ${sanitized}, invalid in-h2o (${rain["in-h2o"]}), skipping Rain_In_H2O gauge`,
+                `Source: ${sanitized}, invalid in_h2o, skipping Rain_In_H2O gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "in-h2o",
-                    value: rain["in-h2o"],
+                    field: "in_h2o",
+                    value: rain["in_h2o"],
                 }
             );
         } else {
@@ -692,7 +743,7 @@ export class PrometheusWriter {
 
         this.logger.write_debug(
             "prometheus/publishRainData",
-            `Source: ${sanitized}, in-h2o: ${inches}`,
+            `Source: ${sanitized}, in_h2o: ${inches}`,
             {
                 event: "rain_telemetry_published",
                 logType: "sensor",
@@ -720,38 +771,35 @@ export class PrometheusWriter {
             return;
         }
 
-        const speed = this.cmPerSecToMph(
-            Number(wind["wind-speed-cm-sec"])
-        );
+        // Use V2 snake_case field names
+        const speed = this.cmPerSecToMph(this.getNumericField(wind, "wind_speed_cm_sec") ?? NaN);
         if (!Number.isFinite(speed)) {
             this.logger.write_warn(
                 "prometheus/publishWindInvalidSpeed",
-                `Source: ${sanitized}, invalid wind-speed-cm-sec (${wind["wind-speed-cm-sec"]}), skipping Wind_Speed gauge`,
+                `Source: ${sanitized}, invalid wind_speed_cm_sec, skipping Wind_Speed gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "wind-speed-cm-sec",
-                    value: wind["wind-speed-cm-sec"],
+                    field: "wind_speed_cm_sec",
+                    value: wind["wind_speed_cm_sec"],
                 }
             );
         } else {
             this.prometheus_Gauge_WindSpeed!.set({ source: sanitized }, speed);
         }
 
-        const gusts = this.cmPerSecToMph(
-            Number(wind["gusts-cm-sec"])
-        );
+        const gusts = this.cmPerSecToMph(this.getNumericField(wind, "gusts_cm_sec") ?? NaN);
         if (!Number.isFinite(gusts)) {
             this.logger.write_warn(
                 "prometheus/publishWindInvalidGusts",
-                `Source: ${sanitized}, invalid gusts-cm-sec (${wind["gusts-cm-sec"]}), skipping Wind_Gusts gauge`,
+                `Source: ${sanitized}, invalid gusts_cm_sec, skipping Wind_Gusts gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "gusts-cm-sec",
-                    value: wind["gusts-cm-sec"],
+                    field: "gusts_cm_sec",
+                    value: wind["gusts_cm_sec"],
                 }
             );
         } else {
@@ -789,30 +837,30 @@ export class PrometheusWriter {
             return;
         }
 
-        const temp_f =
-      (Number(water["temperature-c"]) * 9) / 5 + 32;
+        // Use V2 snake_case field names
+        const temp_f = (this.getNumericField(water, "temperature_c") ?? NaN) * 9 / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
                 "prometheus/publishWaterInvalidTemp",
-                `Source: ${sanitized}, invalid temperature-c (${water["temperature-c"]}), skipping Water_Temperature gauge`,
+                `Source: ${sanitized}, invalid temperature_c, skipping Water_Temperature gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "temperature-c",
-                    value: water["temperature-c"],
+                    field: "temperature_c",
+                    value: water["temperature_c"],
                 }
             );
         } else if (temp_f < -50 || temp_f > 212) {
             this.logger.write_warn(
                 "prometheus/publishWaterTempOutOfRange",
-                `Source: ${sanitized}, temperature-c out of physical range (${water["temperature-c"]}C = ${temp_f}F), skipping Water_Temperature gauge`,
+                `Source: ${sanitized}, temperature_c out of physical range (${water["temperature_c"]}C = ${temp_f}F), skipping Water_Temperature gauge`,
                 {
                     event: "telemetry_out_of_range",
                     logType: "sensor",
                     source: sanitized,
-                    field: "temperature-c",
-                    value: water["temperature-c"],
+                    field: "temperature_c",
+                    value: water["temperature_c"],
                     convertedValue: temp_f,
                     minRange: -50,
                     maxRange: 212,
@@ -852,17 +900,18 @@ export class PrometheusWriter {
             return;
         }
 
-        const count = Number(lightning["lightning-count"]);
-        if (!Number.isFinite(count)) {
+        // Use V2 snake_case field names
+        const count = this.getNumericField(lightning, "lightning_count");
+        if (count === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightningInvalid",
-                `Source: ${sanitized}, invalid lightning-count (${lightning["lightning-count"]}), skipping Lightning gauge`,
+                `Source: ${sanitized}, invalid lightning_count, skipping Lightning gauge`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "lightning-count",
-                    value: lightning["lightning-count"],
+                    field: "lightning_count",
+                    value: lightning["lightning_count"],
                 }
             );
         } else {

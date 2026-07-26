@@ -315,14 +315,48 @@ export class MqttNetworking implements IMqttNetworking {
         try {
             const json_doc = JSON.parse(payload.toString());
 
-            // Route message based on topic
-            if (topic === this.mqtt_topic_log) {
+            // Debug: log incoming message details with case-normalized comparison
+            const topicLower = topic.toLowerCase();
+            const telemetryTopicLower = this.mqtt_topic_telemetry.toLowerCase();
+            const logTopicLower = this.mqtt_topic_log ? this.mqtt_topic_log.toLowerCase() : "";
+
+            this.logger.write_debug(
+                "networking/onMessage",
+                `Received message on topic: ${topic} (normalized: ${topicLower})`,
+                {
+                    event: "mqtt_message_received",
+                    logType: "sensor",
+                    topic,
+                    normalizedTopic: topicLower,
+                    expectedTelemetryTopic: this.mqtt_topic_telemetry,
+                    expectedTelemetryTopicNormalized: telemetryTopicLower,
+                    expectedLogTopic: this.mqtt_topic_log,
+                    expectedLogTopicNormalized: logTopicLower,
+                    isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
+                    isTelemetryTopic: topicLower === telemetryTopicLower,
+                    messageType: json_doc.message_type ?? json_doc["message-type"],
+                    source: json_doc.source,
+                }
+            );
+
+            // Route message based on topic (case-insensitive comparison)
+            if (this.mqtt_topic_log && topicLower === logTopicLower) {
                 // Message from log topic - treat as log message
+                this.logger.write_debug(
+                    "networking/onMessage",
+                    `Routing to log handler (topic matches log topic)`,
+                    { event: "route_log", logType: "sensor", topic }
+                );
                 if (this.forward_sensor_logs) {
                     this.handle_mqtt_message_log(json_doc);
                 }
             } else {
                 // Message from telemetry topic - route by message-type
+                this.logger.write_debug(
+                    "networking/onMessage",
+                    `Routing to telemetry handler`,
+                    { event: "route_telemetry", logType: "sensor", topic }
+                );
                 this.handle_mqtt_message(json_doc).catch((error) => {
                     this.logger.write_error(
                         "networking/onMessage",
@@ -372,11 +406,12 @@ export class MqttNetworking implements IMqttNetworking {
 
     private async handle_mqtt_message(json_doc: any): Promise<void> {
         // initialize
-        const msg_type_raw = json_doc["message-type"];
+        // Support both V1 (message-type) and V2 (message_type) formats
+        const msg_type_raw = json_doc["message_type"] ?? json_doc["message-type"];
         if (msg_type_raw === undefined) {
             this.logger.write_error(
                 "networking/handleMessage",
-                "Missing 'message-type' key, dropping message",
+                "Missing 'message_type' or 'message-type' key, dropping message",
                 {
                     event: "mqtt_message_missing_type",
                     logType: "sensor",
@@ -417,19 +452,61 @@ export class MqttNetworking implements IMqttNetworking {
     // ****************************************************************
     // ******** HANDLE MQTT LOG MESSAGES
 
+    /**
+     * Get a value from an object using snake_case field names (V2 format).
+     * Supports both snake_case and camelCase for backward compatibility.
+     */
+    private getField(obj: any, ...fieldNames: string[]): any {
+        for (const fieldName of fieldNames) {
+            const value = obj[fieldName];
+            if (value !== undefined && value !== null) {
+                return value;
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Get a numeric value from an object using snake_case field names (V2 format).
+     * Returns undefined if not found or not a valid finite number.
+     */
+    private getNumericField(obj: any, ...fieldNames: string[]): number | undefined {
+        for (const fieldName of fieldNames) {
+            const value = obj[fieldName];
+            if (value !== undefined && value !== null) {
+                const numValue = Number(value);
+                if (Number.isFinite(numValue)) {
+                    return numValue;
+                }
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Get a value from log data using snake_case field names (V2 format).
+     */
+    private getLogField(logData: any, ...fieldNames: string[]): any {
+        return this.getField(logData, ...fieldNames);
+    }
+
     private handle_mqtt_message_log(json_doc: any): void {
-        // Extract payload if present (format 2), otherwise use json_doc directly (format 1)
+        // Extract payload if present (V2 format), otherwise use json_doc directly (V1 format)
         let logData = json_doc["payload"] || json_doc;
 
         // Remove service-managed fields from sensor log data
-        delete logData["version"];
+        delete logData["schema_version"];
+        delete logData["runtime_id"];
+        delete logData["firmware_version"];
+        delete logData["uptime_ms"];
 
         // Add timestamp as if it came from the sender
         logData["timestamp"] = sysFunc.get_timestamp_iso();
 
-        const source = logData["source"] ?? "unknown";
-        const level = logData["level"] ?? "info";
-        const message = logData["message"] ?? logData;
+        // Use V2 snake_case field names (with camelCase fallbacks where needed)
+        const source = this.getLogField(logData, "source") ?? "unknown";
+        const level = this.getLogField(logData, "level", "log_level") ?? "info";
+        const message = this.getLogField(logData, "message", "msg") ?? logData;
 
         // Gate: only forward if the sensor's log level meets the configured threshold
         const sensor_level = this.sensor_log_level_to_enum(String(level).toLowerCase());
@@ -442,30 +519,32 @@ export class MqttNetworking implements IMqttNetworking {
 
         // Build metadata from log data, preserving all fields except service-managed fields
         const metadata: Record<string, unknown> = {
-            event: logData["event"] ?? "sensor_log_generic",
+            event: this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic",
             logType: "sensor",
             source,
         };
 
-        // Add optional fields if present (support both snake_case and camelCase)
-        if (logData["command_id"]) metadata.commandId = logData["command_id"];
-        else if (logData["commandId"]) metadata.commandId = logData["commandId"];
-        if (logData["target"]) metadata.target = logData["target"];
-        else if (logData["Target"]) metadata.target = logData["Target"];
-        if (logData["targeted"] !== undefined) metadata.targeted = logData["targeted"];
-        else if (logData["Targeted"] !== undefined) metadata.targeted = logData["Targeted"];
-        if (logData["response_topic"]) metadata.responseTopic = logData["response_topic"];
-        else if (logData["responseTopic"]) metadata.responseTopic = logData["responseTopic"];
-        if (logData["payload_size"] !== undefined) metadata.payloadSize = logData["payload_size"];
-        else if (logData["payloadSize"] !== undefined) metadata.payloadSize = logData["payloadSize"];
-        if (logData["duration_ms"] !== undefined) metadata.durationMs = logData["duration_ms"];
-        else if (logData["durationMs"] !== undefined) metadata.durationMs = logData["durationMs"];
-        if (logData["device_ip"]) metadata.deviceIp = logData["device_ip"];
-        else if (logData["deviceIp"]) metadata.deviceIp = logData["deviceIp"];
-        if (logData["device_source"]) metadata.deviceSource = logData["device_source"];
-        else if (logData["deviceSource"]) metadata.deviceSource = logData["deviceSource"];
-        if (logData["function"]) metadata.function = logData["function"];
-        if (logData["module"]) metadata.module = logData["module"];
+        // Add optional fields if present (snake_case preferred, with camelCase fallbacks)
+        const commandId = this.getLogField(logData, "command_id", "commandId");
+        if (commandId !== undefined) metadata.commandId = commandId;
+        const target = this.getLogField(logData, "target", "Target");
+        if (target !== undefined) metadata.target = target;
+        const targeted = this.getLogField(logData, "targeted", "Targeted");
+        if (targeted !== undefined) metadata.targeted = targeted;
+        const responseTopic = this.getLogField(logData, "response_topic", "responseTopic");
+        if (responseTopic !== undefined) metadata.responseTopic = responseTopic;
+        const payloadSize = this.getLogField(logData, "payload_size", "payloadSize");
+        if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
+        const durationMs = this.getLogField(logData, "duration_ms", "durationMs");
+        if (durationMs !== undefined) metadata.durationMs = durationMs;
+        const deviceIp = this.getLogField(logData, "device_ip", "deviceIp");
+        if (deviceIp !== undefined) metadata.deviceIp = deviceIp;
+        const deviceSource = this.getLogField(logData, "device_source", "deviceSource");
+        if (deviceSource !== undefined) metadata.deviceSource = deviceSource;
+        const functionField = this.getLogField(logData, "function");
+        if (functionField !== undefined) metadata.function = functionField;
+        const moduleField = this.getLogField(logData, "module");
+        if (moduleField !== undefined) metadata.module = moduleField;
 
         switch (sensor_level) {
         case LogLevel.Critical:
@@ -568,37 +647,60 @@ export class MqttNetworking implements IMqttNetworking {
             return;
         }
 
-        const systemInfo = payload?.["system-info"];
+        const systemInfo = payload?.["system_info"];
 
-        // init
-        const boot_date_ok = !(
-            systemInfo?.["boot-date-utc"] === undefined ||
-      systemInfo?.["boot-date-utc"] === ""
-        );
-        const restart_date_ok = !(
-            systemInfo?.["restart-date-utc"] === undefined ||
-      systemInfo?.["restart-date-utc"] === ""
-        );
+        // Handle timestamp fields - support both V1 (empty strings) and V2 (proper dates)
+        // V2 uses empty strings for unset timestamps; V1 may have missing keys
+        const bootDateUtc = systemInfo?.["boot_date_utc"] ?? systemInfo?.["boot-date-utc"];
+        const restartDateUtc = systemInfo?.["restart_date_utc"] ?? systemInfo?.["restart-date-utc"];
+
+        const boot_date_ok = bootDateUtc !== undefined && bootDateUtc !== "";
+        const restart_date_ok = restartDateUtc !== undefined && restartDateUtc !== "";
 
         // Add missing timestamps to system-info if needed
         if (!boot_date_ok || !restart_date_ok) {
             // get the time_stamp from the time service
             const time_stamp = sysFunc.get_timestamp_iso();
 
-            // check for missing 'boot-date-utc'
-            if (!boot_date_ok && systemInfo) {
-                systemInfo["boot-date-utc"] = time_stamp;
-            }
-            // check for missing 'restart-date-utc'
-            if (!restart_date_ok && systemInfo) {
-                systemInfo["restart-date-utc"] = time_stamp;
+            // Set both V1 and V2 timestamp keys for compatibility
+            if (systemInfo) {
+                if (!boot_date_ok) {
+                    systemInfo["boot_date_utc"] = time_stamp;
+                    systemInfo["boot-date-utc"] = time_stamp;
+                }
+                if (!restart_date_ok) {
+                    systemInfo["restart_date_utc"] = time_stamp;
+                    systemInfo["restart-date-utc"] = time_stamp;
+                }
             }
         }
 
         // process telemetry
         const source = json_doc?.["source"] ?? "unknown";
+
+        // Debug log for telemetry processing
+        this.logger.write_debug(
+            "networking/handleTelemetry",
+            `Processing telemetry from source: ${source}`,
+            {
+                event: "telemetry_processing_start",
+                logType: "sensor",
+                source,
+            }
+        );
+
         const air_telemetry = payload?.["air"];
         if (air_telemetry !== undefined) {
+            this.logger.write_debug(
+                "networking/handleTelemetry",
+                "Found air telemetry section",
+                {
+                    event: "telemetry_section_found",
+                    logType: "sensor",
+                    source,
+                    section: "air",
+                }
+            );
             this.publish_air_telemetry(payload, source);
         }
 
@@ -631,32 +733,19 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** private telemetry publish helpers
 
     /** Validate numeric fields in a telemetry section before forwarding.
-     *  Returns true only if ALL fields are valid; logs warnings for invalid ones. */
+     *  Uses V2 snake_case field names. Returns true only if ALL fields are valid. */
     private is_telemetry_valid(section: any, fields: string[], source: string): boolean {
         for (const field of fields) {
-            const value = section[field];
-            if (value === undefined || value === null) {
+            const value = this.getNumericField(section, field);
+            if (value === undefined) {
                 this.logger.write_warn(
                     "networking/isTelemetryValid",
-                    `Source: ${source}, missing field '${field}', skipping`,
+                    `Source: ${source}, missing or invalid field '${field}', skipping`,
                     {
                         event: "telemetry_field_missing",
                         logType: "sensor",
                         source,
                         field,
-                    }
-                );
-                return false;
-            } else if (!Number.isFinite(Number(value))) {
-                this.logger.write_warn(
-                    "networking/isTelemetryValid",
-                    `Source: ${source}, invalid numeric value '${value}' for field '${field}', skipping`,
-                    {
-                        event: "telemetry_field_invalid",
-                        logType: "sensor",
-                        source,
-                        field,
-                        value,
                     }
                 );
                 return false;
@@ -668,8 +757,9 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_air_telemetry(payload: any, source: string): void {
         const air = payload?.["air"];
         if (!air) return;
+        // V2 snake_case field names
         if (this.is_telemetry_valid(air, [
-            "temperature-c", "humidity-percent", "pressure-pascal",
+            "temperature_c", "humidity_percent", "pressure_pascal",
         ], source)) {
             this.promWriter.publish_air(payload, source);
         }
@@ -678,7 +768,8 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_light_telemetry(payload: any, source: string): void {
         const light = payload?.["light"];
         if (!light) return;
-        if (this.is_telemetry_valid(light, ["uv-index", "lux"], source)) {
+        // V2 snake_case field names
+        if (this.is_telemetry_valid(light, ["uv_index", "lux"], source)) {
             this.promWriter.publish_light(payload, source);
         }
     }
@@ -686,7 +777,8 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_rain_telemetry(payload: any, source: string): void {
         const rain = payload?.["rain"];
         if (!rain) return;
-        if (this.is_telemetry_valid(rain, ["in-h2o"], source)) {
+        // V2 snake_case field names
+        if (this.is_telemetry_valid(rain, ["in_h2o"], source)) {
             this.promWriter.publish_rain(payload, source);
         }
     }
@@ -694,7 +786,8 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_wind_telemetry(payload: any, source: string): void {
         const wind = payload?.["wind"];
         if (!wind) return;
-        if (this.is_telemetry_valid(wind, ["wind-speed-cm-sec", "gusts-cm-sec"], source)) {
+        // V2 snake_case field names
+        if (this.is_telemetry_valid(wind, ["wind_speed_cm_sec", "gusts_cm_sec"], source)) {
             this.promWriter.publish_wind(payload, source);
         }
     }
@@ -702,7 +795,8 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_water_telemetry(payload: any, source: string): void {
         const water = payload?.["water"];
         if (!water) return;
-        if (this.is_telemetry_valid(water, ["temperature-c"], source)) {
+        // V2 snake_case field names
+        if (this.is_telemetry_valid(water, ["temperature_c"], source)) {
             this.promWriter.publish_water(payload, source);
         }
     }
@@ -710,7 +804,8 @@ export class MqttNetworking implements IMqttNetworking {
     private publish_lightning_telemetry(payload: any, source: string): void {
         const lightning = payload?.["lightning"];
         if (!lightning) return;
-        if (this.is_telemetry_valid(lightning, ["lightning-count"], source)) {
+        // V2 snake_case field names
+        if (this.is_telemetry_valid(lightning, ["lightning_count"], source)) {
             this.promWriter.publish_lightning(payload, source);
         }
     }
