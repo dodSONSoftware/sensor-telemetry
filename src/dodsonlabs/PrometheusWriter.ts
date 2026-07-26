@@ -35,6 +35,13 @@ export class PrometheusWriter {
     private prometheus_Gauge_WindGusts: Gauge | undefined;
     private prometheus_Gauge_WaterTemp: Gauge | undefined;
     private prometheus_Gauge_Lightning: Gauge | undefined;
+    // ---- System info gauges
+    private prometheus_Gauge_CpuTemp: Gauge | undefined;
+    private prometheus_Gauge_HeapFreeBytes: Gauge | undefined;
+    private prometheus_Gauge_HeapUsedPercent: Gauge | undefined;
+    private prometheus_Gauge_SensorReadFailures: Gauge | undefined;
+    private prometheus_Gauge_SensorReadCounter: Gauge | undefined;
+    private prometheus_Gauge_WifiRssiDbm: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
     // ---- config storage for read/write/reload endpoints
@@ -94,10 +101,11 @@ export class PrometheusWriter {
         this.create_prometheus_gauges();
 
         // create telemetry messages counter
+        // Note: firmware_version added to reduce cardinality compared to runtime_id
         this.prometheus_counter_telemetry_messages = new Counter({
             name: "telemetry_messages_total",
-            help: "Total number of telemetry messages received, labeled by sensor type.",
-            labelNames: ["source_type"] as const,
+            help: "Total number of telemetry messages received, labeled by sensor type and firmware version.",
+            labelNames: ["source_type", "firmware_version"] as const,
         });
 
         // --------------------------------
@@ -530,7 +538,7 @@ export class PrometheusWriter {
         return undefined;
     }
 
-    publish_air(payload: any, source: string) {
+    publish_air(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const air = payload?.["air"];
         if (!air) {
@@ -596,7 +604,7 @@ export class PrometheusWriter {
                 pressureInhg: pressure,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "air" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "air", firmware_version: firmwareVersion });
 
         // air telemetry
         if (humidity !== undefined) {
@@ -640,7 +648,7 @@ export class PrometheusWriter {
         );
     }
 
-    publish_light(payload: any, source: string) {
+    publish_light(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const light = payload?.["light"];
         if (!light) {
@@ -703,10 +711,10 @@ export class PrometheusWriter {
                 lux,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "light" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "light", firmware_version: firmwareVersion });
     }
 
-    publish_rain(payload: any, source: string) {
+    publish_rain(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const rain = payload?.["rain"];
         if (!rain) {
@@ -751,10 +759,10 @@ export class PrometheusWriter {
                 rainInches: inches,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "rain" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "rain", firmware_version: firmwareVersion });
     }
 
-    publish_wind(payload: any, source: string) {
+    publish_wind(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const wind = payload?.["wind"];
         if (!wind) {
@@ -817,10 +825,10 @@ export class PrometheusWriter {
                 gustsMph: gusts,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "wind" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "wind", firmware_version: firmwareVersion });
     }
 
-    publish_water(payload: any, source: string) {
+    publish_water(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const water = payload?.["water"];
         if (!water) {
@@ -880,10 +888,10 @@ export class PrometheusWriter {
                 temperatureF: temp_f,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "water" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "water", firmware_version: firmwareVersion });
     }
 
-    publish_lightning(payload: any, source: string) {
+    publish_lightning(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const lightning = payload?.["lightning"];
         if (!lightning) {
@@ -928,7 +936,191 @@ export class PrometheusWriter {
                 strikeCount: count,
             }
         );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning" });
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning", firmware_version: firmwareVersion });
+    }
+
+    // ******** public methods for system info metrics
+
+    set_cpu_temp(source: string, tempC: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(tempC)) {
+            this.logger.write_warn(
+                "prometheus/setCpuTempInvalid",
+                `Source: ${sanitized}, invalid cpu_temp_c`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "cpu_temp_c",
+                    value: tempC,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_CpuTemp!.set({ source: sanitized }, tempC);
+        this.logger.write_debug(
+            "prometheus/setCpuTemp",
+            `Set Cpu_Temp gauge: ${tempC}°C`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Cpu_Temp",
+                value: tempC,
+            }
+        );
+    }
+
+    set_heap_free_bytes(source: string, bytes: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(bytes) || bytes < 0) {
+            this.logger.write_warn(
+                "prometheus/setHeapFreeBytesInvalid",
+                `Source: ${sanitized}, invalid heap_free_bytes`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "heap_free_bytes",
+                    value: bytes,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_HeapFreeBytes!.set({ source: sanitized }, bytes);
+        this.logger.write_debug(
+            "prometheus/setHeapFreeBytes",
+            `Set Heap_Free_Bytes gauge: ${bytes}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Heap_Free_Bytes",
+                value: bytes,
+            }
+        );
+    }
+
+    set_heap_used_percent(source: string, percent: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+            this.logger.write_warn(
+                "prometheus/setHeapUsedPercentInvalid",
+                `Source: ${sanitized}, invalid heap_used_percent (${percent})`,
+                {
+                    event: "telemetry_out_of_range",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "heap_used_percent",
+                    value: percent,
+                    minRange: 0,
+                    maxRange: 100,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_HeapUsedPercent!.set({ source: sanitized }, percent);
+        this.logger.write_debug(
+            "prometheus/setHeapUsedPercent",
+            `Set Heap_Used_Percent gauge: ${percent}%`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Heap_Used_Percent",
+                value: percent,
+            }
+        );
+    }
+
+    set_sensor_read_failures(source: string, failures: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(failures) || failures < 0) {
+            this.logger.write_warn(
+                "prometheus/setSensorReadFailuresInvalid",
+                `Source: ${sanitized}, invalid sensor_read_failures`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "sensor_read_failures",
+                    value: failures,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_SensorReadFailures!.set({ source: sanitized }, failures);
+        this.logger.write_debug(
+            "prometheus/setSensorReadFailures",
+            `Set Sensor_Read_Failures gauge: ${failures}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Read_Failures",
+                value: failures,
+            }
+        );
+    }
+
+    set_sensor_read_counter(source: string, counter: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(counter) || counter < 0) {
+            this.logger.write_warn(
+                "prometheus/setSensorReadCounterInvalid",
+                `Source: ${sanitized}, invalid sensor_read_counter`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "sensor_read_counter",
+                    value: counter,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_SensorReadCounter!.set({ source: sanitized }, counter);
+        this.logger.write_debug(
+            "prometheus/setSensorReadCounter",
+            `Set Sensor_Read_Counter gauge: ${counter}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Read_Counter",
+                value: counter,
+            }
+        );
+    }
+
+    set_wifi_rssi_dbm(source: string, rssi: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(rssi)) {
+            this.logger.write_warn(
+                "prometheus/setWifiRssiDbmInvalid",
+                `Source: ${sanitized}, invalid wifi_rssi_dbm`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "wifi_rssi_dbm",
+                    value: rssi,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_WifiRssiDbm!.set({ source: sanitized }, rssi);
+        this.logger.write_debug(
+            "prometheus/setWifiRssiDbm",
+            `Set Wifi_RSSI_DBM gauge: ${rssi} dBm`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Wifi_RSSI_DBM",
+                value: rssi,
+            }
+        );
     }
 
     // ******** private methods
@@ -1003,6 +1195,44 @@ export class PrometheusWriter {
         this.prometheus_Gauge_Lightning = new Gauge({
             name: "lightning_strikes_total",
             help: "This indicator shows the number of lightning strikes.",
+            labelNames: ["source"],
+        });
+
+        // ******** system info
+
+        this.prometheus_Gauge_CpuTemp = new Gauge({
+            name: "cpu_temperature",
+            help: "CPU temperature in Celsius.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_HeapFreeBytes = new Gauge({
+            name: "heap_free_bytes",
+            help: "Free heap memory in bytes.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_HeapUsedPercent = new Gauge({
+            name: "heap_used_percent",
+            help: "Percentage of heap memory used.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_SensorReadFailures = new Gauge({
+            name: "sensor_read_failures_total",
+            help: "Total number of sensor read failures.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_SensorReadCounter = new Gauge({
+            name: "sensor_read_counter_total",
+            help: "Total number of successful sensor reads.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_WifiRssiDbm = new Gauge({
+            name: "wifi_rssi_dbm",
+            help: "WiFi signal strength in dBm.",
             labelNames: ["source"],
         });
     }

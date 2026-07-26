@@ -334,7 +334,7 @@ export class MqttNetworking implements IMqttNetworking {
                     expectedLogTopicNormalized: logTopicLower,
                     isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
                     isTelemetryTopic: topicLower === telemetryTopicLower,
-                    messageType: json_doc.message_type ?? json_doc["message-type"],
+                    messageType: json_doc.message_type,
                     source: json_doc.source,
                 }
             );
@@ -351,7 +351,7 @@ export class MqttNetworking implements IMqttNetworking {
                     this.handle_mqtt_message_log(json_doc);
                 }
             } else {
-                // Message from telemetry topic - route by message-type
+                // Message from telemetry topic - route by message_type
                 this.logger.write_debug(
                     "networking/onMessage",
                     `Routing to telemetry handler`,
@@ -406,12 +406,11 @@ export class MqttNetworking implements IMqttNetworking {
 
     private async handle_mqtt_message(json_doc: any): Promise<void> {
         // initialize
-        // Support both V1 (message-type) and V2 (message_type) formats
-        const msg_type_raw = json_doc["message_type"] ?? json_doc["message-type"];
+        const msg_type_raw = json_doc.message_type ?? json_doc["message-type"];
         if (msg_type_raw === undefined) {
             this.logger.write_error(
                 "networking/handleMessage",
-                "Missing 'message_type' or 'message-type' key, dropping message",
+                "Missing 'message_type' key, dropping message",
                 {
                     event: "mqtt_message_missing_type",
                     logType: "sensor",
@@ -421,7 +420,7 @@ export class MqttNetworking implements IMqttNetworking {
         }
         const msg_type: string = msg_type_raw.toString();
 
-        // process message by 'message-type'
+        // process message by 'message_type'
         switch (msg_type) {
         case "telemetry":
             this.handle_mqtt_message_telemetry(json_doc);
@@ -436,7 +435,7 @@ export class MqttNetworking implements IMqttNetworking {
         default:
             this.logger.write_warn(
                 "networking/handleMessage",
-                `Unknown message-type '${msg_type}', dropping message`,
+                `Unknown message_type '${msg_type}', dropping message`,
                 {
                     event: "mqtt_unknown_message_type",
                     logType: "sensor",
@@ -645,6 +644,26 @@ export class MqttNetworking implements IMqttNetworking {
     // ****************************************************************
     // ******** HANDLE MQTT TELEMETRY MESSAGES
 
+    /**
+     * Extract firmware version from telemetry message.
+     * Supports both top-level firmware_version field and nested system_info.firmware_version.
+     */
+    private getFirmwareVersion(json_doc: any): string {
+        // Try top-level firmware_version first (V2 format)
+        const fwTopLevel = this.getField(json_doc, "firmware_version");
+        if (fwTopLevel !== undefined) {
+            return String(fwTopLevel);
+        }
+        // Fallback to system_info.firmware_version
+        const payload = json_doc?.["payload"];
+        const systemInfo = payload?.["system_info"];
+        const fwSystem = this.getField(systemInfo, "firmware_version");
+        if (fwSystem !== undefined) {
+            return String(fwSystem);
+        }
+        return "unknown";
+    }
+
     private handle_mqtt_message_telemetry(json_doc: any): void {
         // initialize
         // Get system-info for timestamp handling
@@ -691,15 +710,17 @@ export class MqttNetworking implements IMqttNetworking {
 
         // process telemetry
         const source = json_doc?.["source"] ?? "unknown";
+        const firmwareVersion = this.getFirmwareVersion(json_doc);
 
         // Debug log for telemetry processing
         this.logger.write_debug(
             "networking/handleTelemetry",
-            `Processing telemetry from source: ${source}`,
+            `Processing telemetry from source: ${source} (firmware: ${firmwareVersion})`,
             {
                 event: "telemetry_processing_start",
                 logType: "sensor",
                 source,
+                firmwareVersion,
             }
         );
 
@@ -715,33 +736,36 @@ export class MqttNetworking implements IMqttNetworking {
                     section: "air",
                 }
             );
-            this.publish_air_telemetry(payload, source);
+            this.publish_air_telemetry(payload, source, firmwareVersion);
         }
 
         const light_telemetry = payload?.["light"];
         if (light_telemetry !== undefined) {
-            this.publish_light_telemetry(payload, source);
+            this.publish_light_telemetry(payload, source, firmwareVersion);
         }
 
         const rain_telemetry = payload?.["rain"];
         if (rain_telemetry !== undefined) {
-            this.publish_rain_telemetry(payload, source);
+            this.publish_rain_telemetry(payload, source, firmwareVersion);
         }
 
         const wind_telemetry = payload?.["wind"];
         if (wind_telemetry !== undefined) {
-            this.publish_wind_telemetry(payload, source);
+            this.publish_wind_telemetry(payload, source, firmwareVersion);
         }
 
         const water_telemetry = payload?.["water"];
         if (water_telemetry !== undefined) {
-            this.publish_water_telemetry(payload, source);
+            this.publish_water_telemetry(payload, source, firmwareVersion);
         }
 
         const lightning_telemetry = payload?.["lightning"];
         if (lightning_telemetry !== undefined) {
-            this.publish_lightning_telemetry(payload, source);
+            this.publish_lightning_telemetry(payload, source, firmwareVersion);
         }
+
+        // Publish system info metrics (hardware, wifi, sensor health)
+        this.publish_system_metrics(payload, source);
     }
 
     // ******** private telemetry publish helpers
@@ -768,59 +792,120 @@ export class MqttNetworking implements IMqttNetworking {
         return true;
     }
 
-    private publish_air_telemetry(payload: any, source: string): void {
+    private publish_air_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const air = payload?.["air"];
         if (!air) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(air, [
             "temperature_c", "humidity_percent", "pressure_pascal",
         ], source)) {
-            this.promWriter.publish_air(payload, source);
+            this.promWriter.publish_air(payload, source, firmwareVersion);
         }
     }
 
-    private publish_light_telemetry(payload: any, source: string): void {
+    private publish_light_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const light = payload?.["light"];
         if (!light) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(light, ["uv_index", "lux"], source)) {
-            this.promWriter.publish_light(payload, source);
+            this.promWriter.publish_light(payload, source, firmwareVersion);
         }
     }
 
-    private publish_rain_telemetry(payload: any, source: string): void {
+    private publish_rain_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const rain = payload?.["rain"];
         if (!rain) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(rain, ["in_h2o"], source)) {
-            this.promWriter.publish_rain(payload, source);
+            this.promWriter.publish_rain(payload, source, firmwareVersion);
         }
     }
 
-    private publish_wind_telemetry(payload: any, source: string): void {
+    private publish_wind_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const wind = payload?.["wind"];
         if (!wind) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(wind, ["wind_speed_cm_sec", "gusts_cm_sec"], source)) {
-            this.promWriter.publish_wind(payload, source);
+            this.promWriter.publish_wind(payload, source, firmwareVersion);
         }
     }
 
-    private publish_water_telemetry(payload: any, source: string): void {
+    private publish_water_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const water = payload?.["water"];
         if (!water) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(water, ["temperature_c"], source)) {
-            this.promWriter.publish_water(payload, source);
+            this.promWriter.publish_water(payload, source, firmwareVersion);
         }
     }
 
-    private publish_lightning_telemetry(payload: any, source: string): void {
+    private publish_lightning_telemetry(payload: any, source: string, firmwareVersion: string): void {
         const lightning = payload?.["lightning"];
         if (!lightning) return;
         // V2 snake_case field names
         if (this.is_telemetry_valid(lightning, ["lightning_count"], source)) {
-            this.promWriter.publish_lightning(payload, source);
+            this.promWriter.publish_lightning(payload, source, firmwareVersion);
+        }
+    }
+
+    // ****************************************************************
+    // ****************************************************************
+    // ******** PUBLISH SYSTEM INFO METRICS
+
+    /**
+     * Publish system info metrics (hardware, wifi, sensor health).
+     * Extracts data from payload.system_info and publishes to Prometheus.
+     */
+    private publish_system_metrics(payload: any, source: string): void {
+        const systemInfo = payload?.["system_info"];
+        if (!systemInfo) return;
+
+        // Hardware info
+        const hardwareInfo = systemInfo?.["hardware_info"] || systemInfo?.["hardwareInfo"];
+        if (hardwareInfo) {
+            // CPU temperature
+            const cpuTempC = this.getNumericField(hardwareInfo, "cpu_temp_c", "cpuTemperatureC");
+            if (cpuTempC !== undefined && Number.isFinite(cpuTempC)) {
+                this.promWriter.set_cpu_temp(source, cpuTempC);
+            }
+
+            // Heap free bytes
+            const heapFreeBytes = this.getNumericField(hardwareInfo, "heap_free_bytes", "heapFreeBytes");
+            if (heapFreeBytes !== undefined && Number.isFinite(heapFreeBytes)) {
+                this.promWriter.set_heap_free_bytes(source, heapFreeBytes);
+            }
+
+            // Heap used percent
+            const heapUsedPercent = this.getNumericField(hardwareInfo, "heap_used_percent", "heapUsedPercent");
+            if (heapUsedPercent !== undefined && Number.isFinite(heapUsedPercent)) {
+                this.promWriter.set_heap_used_percent(source, heapUsedPercent);
+            }
+        }
+
+        // Wifi info
+        const wifiInfo = systemInfo?.["wifi_info"] || systemInfo?.["wifiInfo"];
+        if (wifiInfo) {
+            // WiFi RSSI
+            const wifiRssiDbm = this.getNumericField(wifiInfo, "wifi_rssi_dbm", "wifiRssiDbm");
+            if (wifiRssiDbm !== undefined && Number.isFinite(wifiRssiDbm)) {
+                this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
+            }
+        }
+
+        // Sensor info
+        const sensorInfo = systemInfo?.["sensor_info"] || systemInfo?.["sensorInfo"];
+        if (sensorInfo) {
+            // Sensor read failures
+            const sensorReadFailures = this.getNumericField(sensorInfo, "sensor_read_failures", "sensorReadFailures");
+            if (sensorReadFailures !== undefined && Number.isFinite(sensorReadFailures)) {
+                this.promWriter.set_sensor_read_failures(source, sensorReadFailures);
+            }
+
+            // Sensor read counter
+            const sensorReadCounter = this.getNumericField(sensorInfo, "sensor_read_counter", "sensorReadCounter");
+            if (sensorReadCounter !== undefined && Number.isFinite(sensorReadCounter)) {
+                this.promWriter.set_sensor_read_counter(source, sensorReadCounter);
+            }
         }
     }
 }

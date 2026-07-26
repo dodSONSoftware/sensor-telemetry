@@ -8,7 +8,7 @@ apiPort: 3301
 
 # MQTT broker connection
 mqttBrokerIpAddress: 10.10.10.64
-mqttTopicTelemetry: iot/telemetry
+mqttTopicTelemetry: iot/v2/telemetry
 
 # Optional: Prometheus source label sanitization
 sensorSourceMaxLength: 30
