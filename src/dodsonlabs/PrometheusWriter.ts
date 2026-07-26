@@ -28,7 +28,7 @@ export class PrometheusWriter {
     private prometheus_Gauge_AirTemp: Gauge | undefined;
     private prometheus_Gauge_AirHumidity: Gauge | undefined;
     private prometheus_Gauge_AirPressure: Gauge | undefined;
-    private prometheus_Gauge_LightUVIndex: Gauge | undefined;
+    private prometheus_Gauge_LightUvIndex: Gauge | undefined;
     private prometheus_Gauge_LightLux: Gauge | undefined;
     private prometheus_Gauge_RainInches: Gauge | undefined;
     private prometheus_Gauge_WindSpeed: Gauge | undefined;
@@ -672,7 +672,7 @@ export class PrometheusWriter {
                 }
             );
         } else {
-            this.prometheus_Gauge_LightUVIndex!.set({ source: sanitized }, uvIndex);
+            this.prometheus_Gauge_LightUvIndex!.set({ source: sanitized }, uvIndex);
         }
 
         const lux = this.getNumericField(light, "lux");
@@ -937,33 +937,33 @@ export class PrometheusWriter {
         // ******** air
 
         this.prometheus_Gauge_AirTemp = new Gauge({
-            name: "Air_Temperature",
+            name: "air_temperature",
             help: "This indicator shows the temperature in fahrenheit.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_AirHumidity = new Gauge({
-            name: "Air_Humidity",
+            name: "air_humidity",
             help: "This indicator shows the humidity percentage.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_AirPressure = new Gauge({
-            name: "Air_Pressure",
+            name: "air_pressure",
             help: "This indicator shows the air pressure in in/Hg.",
             labelNames: ["source"],
         });
 
         // ******** light
 
-        this.prometheus_Gauge_LightUVIndex = new Gauge({
-            name: "Light_UV_Index",
+        this.prometheus_Gauge_LightUvIndex = new Gauge({
+            name: "light_uv_index",
             help: "This indicator shows the UV Index.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_LightLux = new Gauge({
-            name: "Light_LUX",
+            name: "light_lux",
             help: "This indicator shows the Light LUX value.",
             labelNames: ["source"],
         });
@@ -971,7 +971,7 @@ export class PrometheusWriter {
         // ******** rain
 
         this.prometheus_Gauge_RainInches = new Gauge({
-            name: "Rain_In_H2O",
+            name: "rain_in_h2o",
             help: "This indicator shows the accumulated Rain inches.",
             labelNames: ["source"],
         });
@@ -979,13 +979,13 @@ export class PrometheusWriter {
         // ******** wind
 
         this.prometheus_Gauge_WindSpeed = new Gauge({
-            name: "Wind_Speed",
+            name: "wind_speed",
             help: "This indicator shows the Wind Speed in mph.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_WindGusts = new Gauge({
-            name: "Wind_Gusts",
+            name: "wind_gusts",
             help: "This indicator shows the Wind Gusts in mph.",
             labelNames: ["source"],
         });
@@ -993,7 +993,7 @@ export class PrometheusWriter {
         // ******** water
 
         this.prometheus_Gauge_WaterTemp = new Gauge({
-            name: "Water_Temperature",
+            name: "water_temperature",
             help: "This indicator shows the temperature in fahrenheit.",
             labelNames: ["source"],
         });
@@ -1001,7 +1001,7 @@ export class PrometheusWriter {
         // ******** lightning
 
         this.prometheus_Gauge_Lightning = new Gauge({
-            name: "Lightning",
+            name: "lightning_strikes_total",
             help: "This indicator shows the number of lightning strikes.",
             labelNames: ["source"],
         });
