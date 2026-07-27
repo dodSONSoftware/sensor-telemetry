@@ -153,7 +153,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         {
           event: "graceful_shutdown_completed",
           logType: "service",
-          uptimeMs: Date.now() - start_time,
+          uptimeMs: Math.trunc(Date.now() - start_time),
         }
       );
     } catch (err) {

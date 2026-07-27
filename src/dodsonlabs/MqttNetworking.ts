@@ -467,6 +467,7 @@ export class MqttNetworking implements IMqttNetworking {
 
     /**
      * Get a numeric value from an object using snake_case field names (V2 format).
+     * For time-related fields (milliseconds), truncates to integer.
      * Returns undefined if not found or not a valid finite number.
      */
     private getNumericField(obj: any, ...fieldNames: string[]): number | undefined {
@@ -475,6 +476,11 @@ export class MqttNetworking implements IMqttNetworking {
             if (value !== undefined && value !== null) {
                 const numValue = Number(value);
                 if (Number.isFinite(numValue)) {
+                    // Truncate to integer for millisecond time fields
+                    if (fieldName.includes('time') || fieldName.includes('Time') ||
+                        fieldName.includes('millis') || fieldName.includes('Millis')) {
+                        return Math.trunc(numValue);
+                    }
                     return numValue;
                 }
             }
@@ -550,9 +556,9 @@ export class MqttNetworking implements IMqttNetworking {
         if (targeted !== undefined) metadata.targeted = targeted;
         const responseTopic = this.getLogField(logData, "response_topic", "responseTopic");
         if (responseTopic !== undefined) metadata.responseTopic = responseTopic;
-        const payloadSize = this.getLogField(logData, "payload_size", "payloadSize");
+        const payloadSize = this.getNumericField(logData, "payload_size", "payloadSize");
         if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
-        const durationMs = this.getLogField(logData, "duration_ms", "durationMs");
+        const durationMs = this.getNumericField(logData, "duration_ms", "durationMs");
         if (durationMs !== undefined) metadata.durationMs = durationMs;
         const deviceIp = this.getLogField(logData, "device_ip", "deviceIp");
         if (deviceIp !== undefined) metadata.deviceIp = deviceIp;
