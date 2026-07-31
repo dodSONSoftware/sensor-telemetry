@@ -1,4 +1,4 @@
-# Sensor Telemetry Service configuration
+# Sensor Telemetry Services configuration
 
 # Logging (debug, error, warn, info)
 logLevel: debug

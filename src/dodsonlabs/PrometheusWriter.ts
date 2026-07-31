@@ -241,6 +241,7 @@ export class PrometheusWriter {
 
     private sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {
         res.setHeader("Content-Type", "application/json");
+        res.setHeader("Access-Control-Allow-Origin", "*");
         res.writeHead(statusCode);
         res.end(JSON.stringify(data));
     }
@@ -248,7 +249,7 @@ export class PrometheusWriter {
     private handleAbout(_req: http.IncomingMessage, res: http.ServerResponse): void {
         const aboutInfo = {
             about: {
-                name: "Sensor Telemetry Service",
+                name: "Sensor Telemetry Services",
                 version: version ?? "unknown",
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
                 description: "MQTT-to-Prometheus bridge for IoT sensor telemetry.",

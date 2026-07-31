@@ -45,7 +45,7 @@ export function aboutDude(): IAbout {
 
         _aboutDudeInfo = {
             about: {
-                name: "Sensor Telemetry Service",
+                name: "Sensor Telemetry Services",
                 version,
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
                 description: "MQTT-to-Prometheus telemetry bridge for IoT sensors.",
