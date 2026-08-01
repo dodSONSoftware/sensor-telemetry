@@ -254,7 +254,7 @@ export class PrometheusWriter {
                 version: version ?? "unknown",
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
                 description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports both V1 and V2 telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, wind speed and gusts, rainfall, UV index, light intensity, lightning strikes, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values, including heat index, are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
-                copyright: "Copyright (c) 2026 dodson Software ( dodson labs )",
+                copyright: "Copyright © 2026 dodson Software ( dodson labs )",
                 license: "MIT License"
             },
             system: {
@@ -561,7 +561,7 @@ export class PrometheusWriter {
 
         // Use V2 snake_case field names
         const temp_f =
-      (this.getNumericField(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
+            (this.getNumericField(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
                 "prometheus/publishAirInvalidTemp",

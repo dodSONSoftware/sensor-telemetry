@@ -49,7 +49,7 @@ export function aboutDude(): IAbout {
                 version,
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
                 description: "MQTT-to-Prometheus telemetry bridge for IoT sensors.",
-                copyright: "Copyright (c) 2025-2026 dodson Software ( dodson labs )",
+                copyright: "Copyright © 2025-2026 dodson Software ( dodson labs )",
                 license: "Licensed under the MIT License with Patent Grant and NOTICE preservation."
             },
             system_info: sys_info
