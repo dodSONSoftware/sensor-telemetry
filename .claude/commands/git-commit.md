@@ -8,8 +8,8 @@ Analyze all changes in the repository, update CLAUDE.md and README.md to reflect
 
 Run these before making any changes:
 - `git status --porcelain=v1` — check for uncommitted changes
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && test -f "$PROJECT_ROOT/code/package.json"` — verify package.json exists at expected path
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "try { JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/code/package.json')); true } catch(e) { false }"` — validate package.json syntax
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && test -f "$PROJECT_ROOT/package.json"` — verify package.json exists at project root
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "try { JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/package.json')); true } catch(e) { false }"` — validate package.json syntax
 
 If checks fail, abort with clear error message.
 
@@ -46,7 +46,7 @@ Classify every changed file:
 - **Deleted** (`D`)
 - **Renamed** (`R`)
 
-### 3. DETERMINE VERSION BUMP FROM CONVENTIONAL COMMITS
+### 3. DETERMINE VERSION BUMP AND UPDATE PACKAGE.JSON
 
 Parse recent commits to determine appropriate version bump:
 
@@ -59,12 +59,22 @@ Apply semantic versioning rules:
 - **minor**: `feat:` commits (new features)
 - **patch**: `fix:` commits (bug fixes), `chore:`, `docs:`, `refactor:`, `test:`, or no conventional commit type
 
-Use `semver` library if available, otherwise manual bump:
-- Patch: increment third number, reset lower numbers
-- Minor: increment second number, reset third to 0
-- Major: increment first number, reset others to 0
+Read current version and compute new version:
+```bash
+PACKAGE_JSON=$(git rev-parse --show-toplevel)/package.json
+CURRENT_VERSION=$(node -p "require('$PACKAGE_JSON').version")
+# Compute NEW_VERSION based on version bump rules
+```
 
-Update `package.json` with new version and verify.
+**Update package.json** with the new version:
+```bash
+node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('$PACKAGE_JSON')); pkg.version = '$NEW_VERSION'; fs.writeFileSync('$PACKAGE_JSON', JSON.stringify(pkg, null, 2) + '\n');"
+```
+
+Verify the update:
+```bash
+node -p "require('$PACKAGE_JSON').version"
+```
 
 ### 4. GENERATE COMMIT MESSAGE
 
@@ -107,7 +117,7 @@ EOF
 Run:
 - `git status` — confirm working tree is clean
 - `git log --oneline -3` — confirm commit landed correctly
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "require('$PROJECT_ROOT/code/package.json').version"` — verify version in committed commit
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "require('$PROJECT_ROOT/package.json').version"` — verify version in committed commit
 
 ## Error Handling
 

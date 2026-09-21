@@ -42,6 +42,9 @@ export class PrometheusWriter {
     private prometheus_Gauge_SensorReadFailures: Gauge | undefined;
     private prometheus_Gauge_SensorReadCounter: Gauge | undefined;
     private prometheus_Gauge_WifiRssiDbm: Gauge | undefined;
+    // ---- V3 health gauges
+    private prometheus_Gauge_SensorHealthUp: Gauge | undefined;
+    private prometheus_Gauge_SensorUptime: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
     // ---- config storage for read/write/reload endpoints
@@ -594,7 +597,8 @@ export class PrometheusWriter {
         }
 
         const humidity = this.getNumericField(air, "humidity_percent");
-        const pressure = this.pascalToInHg(this.getNumericField(air, "pressure_pascal") ?? NaN);
+        // V3 renamed the pressure field to pressure_pa; accept both
+        const pressure = this.pascalToInHg(this.getNumericField(air, "pressure_pa", "pressure_pascal") ?? NaN);
 
         this.logger.write_debug(
             "prometheus/publishAirData",
@@ -1127,6 +1131,62 @@ export class PrometheusWriter {
         );
     }
 
+    /**
+     * Set the V3 health up/down gauge.
+     * @param source - Sensor source name
+     * @param up - 1 if the sensor reports status "healthy", 0 otherwise
+     */
+    set_health_up(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_SensorHealthUp!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setHealthUp",
+            `Set Sensor_Health_Up gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Health_Up",
+                value: up,
+            }
+        );
+    }
+
+    /**
+     * Set the V3 sensor uptime gauge.
+     * @param source - Sensor source name
+     * @param seconds - Uptime in seconds
+     */
+    set_uptime_seconds(source: string, seconds: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            this.logger.write_warn(
+                "prometheus/setUptimeSecondsInvalid",
+                `Source: ${sanitized}, invalid uptime (${seconds})`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "uptime_ms",
+                    value: seconds,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_SensorUptime!.set({ source: sanitized }, seconds);
+        this.logger.write_debug(
+            "prometheus/setUptimeSeconds",
+            `Set Sensor_Uptime gauge: ${seconds}s`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Uptime",
+                value: seconds,
+            }
+        );
+    }
+
     // ******** private methods
 
     private create_prometheus_gauges() {
@@ -1237,6 +1297,20 @@ export class PrometheusWriter {
         this.prometheus_Gauge_WifiRssiDbm = new Gauge({
             name: "wifi_rssi_dbm",
             help: "WiFi signal strength in dBm.",
+            labelNames: ["source"],
+        });
+
+        // ******** V3 health
+
+        this.prometheus_Gauge_SensorHealthUp = new Gauge({
+            name: "sensor_health_up",
+            help: "Sensor health status from V3 health messages (1 = healthy, 0 = degraded/unknown).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_SensorUptime = new Gauge({
+            name: "sensor_uptime_seconds",
+            help: "Sensor uptime in seconds from V3 health messages.",
             labelNames: ["source"],
         });
     }

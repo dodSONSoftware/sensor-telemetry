@@ -107,7 +107,9 @@ Create a `config.yml` file:
 logLevel: debug
 apiPort: 3301
 mqttBrokerIpAddress: "10.10.10.64"
-mqttTopicTelemetry: "iot/telemetry"
+mqttTopicTelemetry: "iot/v3/telemetry"
+mqttTopicLog: "iot/v3/log"
+mqttTopicHealth: "iot/v3/health"
 sensorSourceMaxLength: 30
 sensorSourceValidCharsRegex: "a-zA-Z0-9._-"
 forwardSensorLogs: true
@@ -122,6 +124,8 @@ forwardSensorLogsLevel: debug
 | `apiPort` | Port for Prometheus metrics endpoint | required |
 | `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
+| `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
+| `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
 | `forwardSensorLogs` | Forward sensor log messages | true |

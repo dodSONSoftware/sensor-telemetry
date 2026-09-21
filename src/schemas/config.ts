@@ -26,6 +26,9 @@ export const configSchema = z.object({
     mqttTopicLog: z.string({
         error: "mqttTopicLog must be a string",
     }).min(1, "mqttTopicLog must not be empty").optional(),
+    mqttTopicHealth: z.string({
+        error: "mqttTopicHealth must be a string",
+    }).min(1, "mqttTopicHealth must not be empty").optional(),
     sensorSourceMaxLength: z.number({
         error: "sensorSourceMaxLength must be a number",
     }).int("sensorSourceMaxLength must be an integer")

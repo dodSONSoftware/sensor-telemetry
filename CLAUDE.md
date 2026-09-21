@@ -20,9 +20,21 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 
 - **index.ts** (`src/index.ts`) — Main entry point with config loading, shutdown handling, and signal trapping
 
+### V3 Message Format (per-device telemetry)
+
+V3 telemetry messages are per-device rather than per-section: each carries a top-level `device` field and a `payload` with only that device's readings. `MqttNetworking` maps known device types to the metric category they feed:
+
+| V3 device | Metric category | Payload fields |
+|-----------|-----------------|----------------|
+| `bme280` | air | `temperature_c`, `humidity_percent`, `pressure_pa` |
+| `ds18b20` | water | `temperature_c` |
+| `ltr390` | light | `lux`, `uv_index` (+ `als_raw`, `uv_raw`, not published) |
+
+Unknown device types are dropped with a warning. V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path. V3 health messages (`iot/v3/health` or `message_type: "health"`) populate the system-info gauges plus `sensor_health_up` and `sensor_uptime_seconds`.
+
 ### Configuration
 
-- **config.yml** — Runtime configuration (YAML format)
+- **config.yml** (project root) — Single source of truth for runtime configuration (YAML). Copied to `dist/` by `npm run build`. In Docker it is not shipped in the image — the container reads a mounted file at `/app/configs/config.yml` instead (see docker-compose.yml).
 - **schemas/config.ts** — Zod schema for configuration validation
 
 ## Supported Sensor Types
@@ -43,7 +55,7 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 ## Commands
 
 ```bash
-npm run build     # Compile TypeScript
+npm run build     # Compile TypeScript + copy config.yml to dist/
 npm start         # Run production service
 npm run dev       # Development mode with ts-node
 npm run lint      # Run ESLint
@@ -57,6 +69,8 @@ npm run lint      # Run ESLint
 | `prometheusPort` | Port for Prometheus metrics endpoint | 3301 |
 | `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
+| `mqttTopicLog` | MQTT topic for log messages | - |
+| `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
 | `forwardSensorLogs` | Forward sensor logs to main logger | false |
@@ -90,7 +104,6 @@ The service handles SIGTERM and SIGINT signals gracefully:
 
 ```bash
 npm run build
-cp src/config.yml ./dist/
 cd dist
 node index.js
 ```

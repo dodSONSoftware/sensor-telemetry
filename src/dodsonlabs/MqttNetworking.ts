@@ -34,6 +34,7 @@ export class MqttNetworking implements IMqttNetworking {
         this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
         this.mqtt_topic_telemetry = config.mqttTopicTelemetry;
         this.mqtt_topic_log = config.mqttTopicLog || "";
+        this.mqtt_topic_health = config.mqttTopicHealth || "";
         // ----
         this.logger = logger;
         this.originator = "networking";
@@ -61,6 +62,7 @@ export class MqttNetworking implements IMqttNetworking {
                 mqttBrokerIp: this.mqtt_server_ip_address,
                 mqttTopicTelemetry: this.mqtt_topic_telemetry,
                 mqttTopicLog: this.mqtt_topic_log,
+                mqttTopicHealth: this.mqtt_topic_health,
             }
         );
     }
@@ -113,6 +115,7 @@ export class MqttNetworking implements IMqttNetworking {
     private readonly mqtt_server_ip_address: string;
     public readonly mqtt_topic_telemetry: string;
     public readonly mqtt_topic_log: string;
+    public readonly mqtt_topic_health: string;
     // ----
     private readonly originator: string;
     // ----
@@ -292,6 +295,20 @@ export class MqttNetworking implements IMqttNetworking {
             );
             this.mqtt_client.subscribe(this.mqtt_topic_log);
         }
+
+        // subscribe to health topic if configured (V3)
+        if (this.mqtt_topic_health && this.mqtt_topic_health.length > 0) {
+            this.logger.write_debug(
+                "networking/onConnect",
+                `Subscribing to Health Topic: ${this.mqtt_topic_health}`,
+                {
+                    event: "mqtt_subscription_started",
+                    logType: "service",
+                    mqttTopic: this.mqtt_topic_health,
+                }
+            );
+            this.mqtt_client.subscribe(this.mqtt_topic_health);
+        }
     }
 
     private on_disconnect(): void {
@@ -319,6 +336,7 @@ export class MqttNetworking implements IMqttNetworking {
             const topicLower = topic.toLowerCase();
             const telemetryTopicLower = this.mqtt_topic_telemetry.toLowerCase();
             const logTopicLower = this.mqtt_topic_log ? this.mqtt_topic_log.toLowerCase() : "";
+            const healthTopicLower = this.mqtt_topic_health ? this.mqtt_topic_health.toLowerCase() : "";
 
             this.logger.write_debug(
                 "networking/onMessage",
@@ -332,7 +350,10 @@ export class MqttNetworking implements IMqttNetworking {
                     expectedTelemetryTopicNormalized: telemetryTopicLower,
                     expectedLogTopic: this.mqtt_topic_log,
                     expectedLogTopicNormalized: logTopicLower,
+                    expectedHealthTopic: this.mqtt_topic_health,
+                    expectedHealthTopicNormalized: healthTopicLower,
                     isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
+                    isHealthTopic: !!this.mqtt_topic_health && topicLower === healthTopicLower,
                     isTelemetryTopic: topicLower === telemetryTopicLower,
                     messageType: json_doc.message_type,
                     source: json_doc.source,
@@ -350,6 +371,14 @@ export class MqttNetworking implements IMqttNetworking {
                 if (this.forward_sensor_logs) {
                     this.handle_mqtt_message_log(json_doc);
                 }
+            } else if (this.mqtt_topic_health && topicLower === healthTopicLower) {
+                // Message from health topic (V3) - publish health metrics
+                this.logger.write_debug(
+                    "networking/onMessage",
+                    `Routing to health handler (topic matches health topic)`,
+                    { event: "route_health", logType: "sensor", topic }
+                );
+                this.handle_mqtt_message_health(json_doc);
             } else {
                 // Message from telemetry topic - route by message_type
                 this.logger.write_debug(
@@ -432,6 +461,10 @@ export class MqttNetworking implements IMqttNetworking {
             }
             break;
 
+        case "health":
+            this.handle_mqtt_message_health(json_doc);
+            break;
+
         default:
             this.logger.write_warn(
                 "networking/handleMessage",
@@ -499,11 +532,13 @@ export class MqttNetworking implements IMqttNetworking {
         // Extract payload if present (V2 format), otherwise use json_doc directly (V1 format)
         let logData = json_doc["payload"] || json_doc;
 
-        // For V2 format, extract top-level fields for metadata
-        const schemaVersion = this.getField(json_doc, "schema_version");
+        // For V2/V3 format, extract top-level fields for metadata
+        // V3 renamed schema_version to message_schema_version
+        const schemaVersion = this.getField(json_doc, "message_schema_version", "schema_version");
         const runtimeId = this.getField(json_doc, "runtime_id");
         const firmwareVersion = this.getField(json_doc, "firmware_version");
         const uptimeMs = this.getNumericField(json_doc, "uptime_ms");
+        const sequence = this.getNumericField(json_doc, "sequence");
 
         // Remove service-managed fields from log data (not metadata)
         delete logData["schema_version"];
@@ -541,11 +576,17 @@ export class MqttNetworking implements IMqttNetworking {
             level: String(level).toLowerCase(),
         };
 
-        // Add V2 format fields to metadata if available
+        // Add V2/V3 format fields to metadata if available
         if (runtimeId !== undefined) metadata.runtime_id = runtimeId;
         if (firmwareVersion !== undefined) metadata.firmware_version = firmwareVersion;
         if (uptimeMs !== undefined) metadata.uptime_ms = uptimeMs;
         if (schemaVersion !== undefined) metadata.schema_version = schemaVersion;
+        if (sequence !== undefined) metadata.sequence = sequence;
+
+        // V3 log messages carry a nested 'data' object with event details —
+        // include it as structured metadata for Loki compatibility
+        const data = this.getLogField(logData, "data");
+        if (data !== undefined) metadata.data = data;
 
         // Add optional fields if present (snake_case preferred, with camelCase fallbacks)
         const commandId = this.getLogField(logData, "command_id", "commandId");
@@ -670,8 +711,164 @@ export class MqttNetworking implements IMqttNetworking {
         return "unknown";
     }
 
+    // V3 telemetry is per-device: each message carries a top-level `device`
+    // field and a payload with only that device's readings. Map the known
+    // device types to the metric category they feed (V2 section names).
+    // Unknown devices are dropped with a warning so new firmware device
+    // names surface in the logs instead of being mislabeled.
+    private static readonly V3_DEVICE_CATEGORIES: Record<string, string> = {
+        bme280: "air",
+        ds18b20: "water",
+        ltr390: "light",
+    };
+
+    /**
+     * Handle a V3 per-device telemetry message.
+     * Routes the device payload to the matching PrometheusWriter publisher.
+     */
+    private handle_v3_device_telemetry(json_doc: any, device: string): void {
+        const source = json_doc?.["source"] ?? "unknown";
+        const devicePayload = json_doc?.["payload"];
+        if (devicePayload === undefined || devicePayload === null) {
+            this.logger.write_error(
+                "networking/handleV3Telemetry",
+                "Missing 'payload', dropping V3 telemetry message",
+                {
+                    event: "mqtt_telemetry_missing_payload",
+                    logType: "sensor",
+                    source,
+                    device,
+                }
+            );
+            return;
+        }
+
+        const category = MqttNetworking.V3_DEVICE_CATEGORIES[device];
+        if (category === undefined) {
+            this.logger.write_warn(
+                "networking/handleV3Telemetry",
+                `Unknown V3 device type '${device}', dropping message`,
+                {
+                    event: "mqtt_unknown_v3_device",
+                    logType: "sensor",
+                    source,
+                    device,
+                }
+            );
+            return;
+        }
+
+        const firmwareVersion = this.getFirmwareVersion(json_doc);
+
+        this.logger.write_debug(
+            "networking/handleV3Telemetry",
+            `Processing V3 telemetry: device ${device} -> ${category} for source: ${source}`,
+            {
+                event: "v3_telemetry_processing_start",
+                logType: "sensor",
+                source,
+                device,
+                category,
+                firmwareVersion,
+            }
+        );
+
+        // Reuse the V2 publishers by wrapping the device payload in the
+        // section envelope they expect (e.g. { air: {...} }).
+        switch (category) {
+        case "air":
+            if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
+                this.getNumericField(devicePayload, "pressure_pa", "pressure_pascal") !== undefined) {
+                this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
+            }
+            break;
+
+        case "water":
+            if (this.is_telemetry_valid(devicePayload, ["temperature_c"], source)) {
+                this.promWriter.publish_water({ water: devicePayload }, source, firmwareVersion);
+            }
+            break;
+
+        case "light":
+            if (this.is_telemetry_valid(devicePayload, ["lux", "uv_index"], source)) {
+                this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
+            }
+            break;
+        }
+    }
+
+    /**
+     * Handle a V3 health message (iot/v3/health topic or message_type "health").
+     * Reuses the system-info gauges for overlapping fields and adds the
+     * sensor_health_up / sensor_uptime_seconds gauges.
+     */
+    private handle_mqtt_message_health(json_doc: any): void {
+        const source = json_doc?.["source"] ?? "unknown";
+        const payload = json_doc?.["payload"];
+        if (payload === undefined || payload === null) {
+            this.logger.write_error(
+                "networking/handleHealth",
+                "Missing 'payload', dropping V3 health message",
+                {
+                    event: "mqtt_health_missing_payload",
+                    logType: "sensor",
+                    source,
+                }
+            );
+            return;
+        }
+
+        // Overlapping system-info gauges (V3 field names)
+        const cpuTempC = this.getNumericField(payload, "cpu_temperature_c", "cpu_temp_c");
+        if (cpuTempC !== undefined) {
+            this.promWriter.set_cpu_temp(source, cpuTempC);
+        }
+        const freeHeapBytes = this.getNumericField(payload, "free_heap_bytes");
+        if (freeHeapBytes !== undefined) {
+            this.promWriter.set_heap_free_bytes(source, freeHeapBytes);
+        }
+        const wifiRssiDbm = this.getNumericField(payload, "wifi_rssi_dbm");
+        if (wifiRssiDbm !== undefined) {
+            this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
+        }
+
+        // V3-only gauges
+        const status = payload["status"];
+        if (status !== undefined) {
+            this.promWriter.set_health_up(source, String(status) === "healthy" ? 1 : 0);
+        }
+        // uptime_ms sits at the top level of V3 messages (fallback to payload)
+        let uptimeMs = this.getNumericField(json_doc, "uptime_ms");
+        if (uptimeMs === undefined) {
+            uptimeMs = this.getNumericField(payload, "uptime_ms");
+        }
+        if (uptimeMs !== undefined) {
+            this.promWriter.set_uptime_seconds(source, uptimeMs / 1000);
+        }
+
+        this.logger.write_debug(
+            "networking/handleHealth",
+            `Processed V3 health for source: ${source}`,
+            {
+                event: "v3_health_processed",
+                logType: "sensor",
+                source,
+                status,
+            }
+        );
+    }
+
     private handle_mqtt_message_telemetry(json_doc: any): void {
-        // initialize
+        // V3 format: one message per device, identified by a top-level `device`
+        // field. V2 messages never carry a top-level device key, so its
+        // presence is a reliable format discriminator.
+        const device = this.getField(json_doc, "device");
+        if (device !== undefined && device !== null && String(device).length > 0) {
+            this.handle_v3_device_telemetry(json_doc, String(device));
+            return;
+        }
+
+        // V2 format: section-based payload (air/light/rain/wind/water/lightning)
         // Get system-info for timestamp handling
         const payload = json_doc?.["payload"];
         if (!payload) {
