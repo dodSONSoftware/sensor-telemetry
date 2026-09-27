@@ -45,6 +45,24 @@ export class PrometheusWriter {
     // ---- V3 health gauges
     private prometheus_Gauge_SensorHealthUp: Gauge | undefined;
     private prometheus_Gauge_SensorUptime: Gauge | undefined;
+    // ---- air altitude (V3 bme280 altitude_m)
+    private prometheus_Gauge_AirAltitude: Gauge | undefined;
+    // ---- soil (V3 yl69_fc28 / plantmate_soil)
+    private prometheus_Gauge_SoilMoisturePercent: Gauge | undefined;
+    private prometheus_Gauge_SoilMoistureRaw: Gauge | undefined;
+    // ---- V4 health gauges
+    private prometheus_Gauge_MinHeapFreeBytes: Gauge | undefined;
+    private prometheus_Gauge_DevicesActive: Gauge | undefined;
+    private prometheus_Gauge_DevicesConfigured: Gauge | undefined;
+    private prometheus_Gauge_NetworkStackReady: Gauge | undefined;
+    private prometheus_Gauge_WifiConnected: Gauge | undefined;
+    private prometheus_Gauge_MqttConnected: Gauge | undefined;
+    private prometheus_Gauge_Core1Active: Gauge | undefined;
+    private prometheus_Gauge_OutboundQueueDepth: Gauge | undefined;
+    private prometheus_Gauge_OutboundEvicted: Gauge | undefined;
+    private prometheus_Gauge_OutboundRejected: Gauge | undefined;
+    private prometheus_Gauge_UtcValid: Gauge | undefined;
+    private prometheus_Gauge_UtcSyncAgeSec: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
     // ---- config storage for read/write/reload endpoints
@@ -629,7 +647,9 @@ export class PrometheusWriter {
                 }
             );
         }
-        if (pressure !== undefined) {
+        // NaN check (not undefined): SHT35 messages carry no pressure, and
+        // writing NaN would poison the gauge for sources that do report it.
+        if (Number.isFinite(pressure)) {
             this.prometheus_Gauge_AirPressure!.set({ source: sanitized }, pressure);
             this.logger.write_debug(
                 "prometheus/publishAirData",
@@ -644,6 +664,25 @@ export class PrometheusWriter {
             );
         }
 
+        // V3 bme280 messages carry altitude in meters (null when the adjusted
+        // pressure is non-positive); only bme280 devices send it.
+        const altitudeM = this.getNumericField(air, "altitude_m");
+        const altitudeFt = altitudeM === undefined ? NaN : this.metersToFeet(altitudeM);
+        if (Number.isFinite(altitudeFt)) {
+            this.prometheus_Gauge_AirAltitude!.set({ source: sanitized }, altitudeFt);
+            this.logger.write_debug(
+                "prometheus/publishAirData",
+                `Set Air_Altitude gauge: ${altitudeFt}`,
+                {
+                    event: "gauge_set",
+                    logType: "sensor",
+                    source: sanitized,
+                    gauge: "Air_Altitude",
+                    value: altitudeFt,
+                }
+            );
+        }
+
         this.logger.write_debug(
             "prometheus/publishAirComplete",
             `Published all air metrics for source: ${sanitized}`,
@@ -651,7 +690,7 @@ export class PrometheusWriter {
                 event: "metrics_published",
                 logType: "sensor",
                 source: sanitized,
-                metricsCount: 3, // temp, humidity, pressure
+                metricsCount: 4, // temp, humidity, pressure, altitude
             }
         );
     }
@@ -947,6 +986,104 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning", firmware_version: firmwareVersion });
     }
 
+    publish_soil(payload: any, source: string, firmwareVersion: string) {
+        const sanitized = this.sanitizeSource(source);
+        const soil = payload?.["soil"];
+        if (!soil) {
+            this.logger.write_warn(
+                "prometheus/publishSoilMissing",
+                `Source: ${sanitized}, missing 'soil', skipping`,
+                {
+                    event: "telemetry_missing_section",
+                    logType: "sensor",
+                    source: sanitized,
+                    section: "soil",
+                }
+            );
+            return;
+        }
+
+        // V3 snake_case field names (yl69_fc28 / plantmate_soil)
+        const percent = this.getNumericField(soil, "relative_moisture_percent");
+        if (percent === undefined) {
+            this.logger.write_warn(
+                "prometheus/publishSoilInvalidPercent",
+                `Source: ${sanitized}, invalid relative_moisture_percent, skipping Soil_Moisture_Percent gauge`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "relative_moisture_percent",
+                    value: soil["relative_moisture_percent"],
+                }
+            );
+        } else if (percent < 0 || percent > 100) {
+            this.logger.write_warn(
+                "prometheus/publishSoilPercentOutOfRange",
+                `Source: ${sanitized}, relative_moisture_percent out of physical range (${percent}%), skipping Soil_Moisture_Percent gauge`,
+                {
+                    event: "telemetry_out_of_range",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "relative_moisture_percent",
+                    value: percent,
+                    minRange: 0,
+                    maxRange: 100,
+                }
+            );
+        } else {
+            this.prometheus_Gauge_SoilMoisturePercent!.set({ source: sanitized }, percent);
+            this.logger.write_debug(
+                "prometheus/publishSoilData",
+                `Set Soil_Moisture_Percent gauge: ${percent}%`,
+                {
+                    event: "gauge_set",
+                    logType: "sensor",
+                    source: sanitized,
+                    gauge: "Soil_Moisture_Percent",
+                    value: percent,
+                }
+            );
+        }
+
+        // raw is an optional uncalibrated 16-bit ADC value
+        const raw = this.getNumericField(soil, "raw");
+        if (raw !== undefined) {
+            if (raw < 0 || raw > 65535) {
+                this.logger.write_warn(
+                    "prometheus/publishSoilRawOutOfRange",
+                    `Source: ${sanitized}, raw out of 16-bit ADC range (${raw}), skipping Soil_Moisture_Raw gauge`,
+                    {
+                        event: "telemetry_out_of_range",
+                        logType: "sensor",
+                        source: sanitized,
+                        field: "raw",
+                        value: raw,
+                        minRange: 0,
+                        maxRange: 65535,
+                    }
+                );
+            } else {
+                this.prometheus_Gauge_SoilMoistureRaw!.set({ source: sanitized }, raw);
+                this.logger.write_debug(
+                    "prometheus/publishSoilData",
+                    `Set Soil_Moisture_Raw gauge: ${raw}`,
+                    {
+                        event: "gauge_set",
+                        logType: "sensor",
+                        source: sanitized,
+                        gauge: "Soil_Moisture_Raw",
+                        value: raw,
+                    }
+                );
+            }
+        }
+
+        // Note: digital_state (yl69_fc28 only, nullable) is intentionally not
+        // published — it is null on most boards and not a useful gauge.
+        this.prometheus_counter_telemetry_messages?.inc({ source_type: "soil", firmware_version: firmwareVersion });
+    }
+
     // ******** public methods for system info metrics
 
     set_cpu_temp(source: string, tempC: number): void {
@@ -1187,6 +1324,298 @@ export class PrometheusWriter {
         );
     }
 
+    // ******** public methods for V4 health metrics
+
+    set_min_heap_free_bytes(source: string, bytes: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(bytes) || bytes < 0) {
+            this.logger.write_warn(
+                "prometheus/setMinHeapFreeBytesInvalid",
+                `Source: ${sanitized}, invalid minimum_free_heap_bytes`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "minimum_free_heap_bytes",
+                    value: bytes,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_MinHeapFreeBytes!.set({ source: sanitized }, bytes);
+        this.logger.write_debug(
+            "prometheus/setMinHeapFreeBytes",
+            `Set Heap_Min_Free_Bytes gauge: ${bytes}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Heap_Min_Free_Bytes",
+                value: bytes,
+            }
+        );
+    }
+
+    set_devices_active(source: string, count: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(count) || count < 0) {
+            this.logger.write_warn(
+                "prometheus/setDevicesActiveInvalid",
+                `Source: ${sanitized}, invalid devices_active`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "devices_active",
+                    value: count,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_DevicesActive!.set({ source: sanitized }, count);
+        this.logger.write_debug(
+            "prometheus/setDevicesActive",
+            `Set Sensor_Devices_Active gauge: ${count}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Devices_Active",
+                value: count,
+            }
+        );
+    }
+
+    set_devices_configured(source: string, count: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(count) || count < 0) {
+            this.logger.write_warn(
+                "prometheus/setDevicesConfiguredInvalid",
+                `Source: ${sanitized}, invalid devices_configured`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "devices_configured",
+                    value: count,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_DevicesConfigured!.set({ source: sanitized }, count);
+        this.logger.write_debug(
+            "prometheus/setDevicesConfigured",
+            `Set Sensor_Devices_Configured gauge: ${count}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Devices_Configured",
+                value: count,
+            }
+        );
+    }
+
+    set_network_stack_ready(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_NetworkStackReady!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setNetworkStackReady",
+            `Set Sensor_Network_Stack_Ready gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Network_Stack_Ready",
+                value: up,
+            }
+        );
+    }
+
+    set_wifi_connected(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_WifiConnected!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setWifiConnected",
+            `Set Sensor_Wifi_Connected gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Wifi_Connected",
+                value: up,
+            }
+        );
+    }
+
+    set_mqtt_connected(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_MqttConnected!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setMqttConnected",
+            `Set Sensor_Mqtt_Connected gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Mqtt_Connected",
+                value: up,
+            }
+        );
+    }
+
+    set_core_1_active(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_Core1Active!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setCore1Active",
+            `Set Sensor_Core_1_Active gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Core_1_Active",
+                value: up,
+            }
+        );
+    }
+
+    set_outbound_queue_depth(source: string, depth: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(depth) || depth < 0) {
+            this.logger.write_warn(
+                "prometheus/setOutboundQueueDepthInvalid",
+                `Source: ${sanitized}, invalid outbound_queue_depth`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "outbound_queue_depth",
+                    value: depth,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_OutboundQueueDepth!.set({ source: sanitized }, depth);
+        this.logger.write_debug(
+            "prometheus/setOutboundQueueDepth",
+            `Set Sensor_Outbound_Queue_Depth gauge: ${depth}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Outbound_Queue_Depth",
+                value: depth,
+            }
+        );
+    }
+
+    set_outbound_evicted(source: string, count: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(count) || count < 0) {
+            this.logger.write_warn(
+                "prometheus/setOutboundEvictedInvalid",
+                `Source: ${sanitized}, invalid outbound_evicted`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "outbound_evicted",
+                    value: count,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_OutboundEvicted!.set({ source: sanitized }, count);
+        this.logger.write_debug(
+            "prometheus/setOutboundEvicted",
+            `Set Sensor_Outbound_Evicted gauge: ${count}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Outbound_Evicted",
+                value: count,
+            }
+        );
+    }
+
+    set_outbound_rejected(source: string, count: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(count) || count < 0) {
+            this.logger.write_warn(
+                "prometheus/setOutboundRejectedInvalid",
+                `Source: ${sanitized}, invalid outbound_rejected`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "outbound_rejected",
+                    value: count,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_OutboundRejected!.set({ source: sanitized }, count);
+        this.logger.write_debug(
+            "prometheus/setOutboundRejected",
+            `Set Sensor_Outbound_Rejected gauge: ${count}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Outbound_Rejected",
+                value: count,
+            }
+        );
+    }
+
+    set_utc_valid(source: string, up: 0 | 1): void {
+        const sanitized = this.sanitizeSource(source);
+        this.prometheus_Gauge_UtcValid!.set({ source: sanitized }, up);
+        this.logger.write_debug(
+            "prometheus/setUtcValid",
+            `Set Sensor_Utc_Valid gauge: ${up}`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Utc_Valid",
+                value: up,
+            }
+        );
+    }
+
+    set_utc_sync_age_sec(source: string, seconds: number): void {
+        const sanitized = this.sanitizeSource(source);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            this.logger.write_warn(
+                "prometheus/setUtcSyncAgeSecInvalid",
+                `Source: ${sanitized}, invalid utc_sync_age_sec`,
+                {
+                    event: "telemetry_invalid_value",
+                    logType: "sensor",
+                    source: sanitized,
+                    field: "utc_sync_age_sec",
+                    value: seconds,
+                }
+            );
+            return;
+        }
+        this.prometheus_Gauge_UtcSyncAgeSec!.set({ source: sanitized }, seconds);
+        this.logger.write_debug(
+            "prometheus/setUtcSyncAgeSec",
+            `Set Sensor_Utc_Sync_Age gauge: ${seconds}s`,
+            {
+                event: "gauge_set",
+                logType: "sensor",
+                source: sanitized,
+                gauge: "Sensor_Utc_Sync_Age",
+                value: seconds,
+            }
+        );
+    }
+
     // ******** private methods
 
     private create_prometheus_gauges() {
@@ -1207,6 +1636,12 @@ export class PrometheusWriter {
         this.prometheus_Gauge_AirPressure = new Gauge({
             name: "air_pressure",
             help: "This indicator shows the air pressure in in/Hg.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_AirAltitude = new Gauge({
+            name: "air_altitude_ft",
+            help: "This indicator shows the air altitude in feet.",
             labelNames: ["source"],
         });
 
@@ -1262,6 +1697,20 @@ export class PrometheusWriter {
             labelNames: ["source"],
         });
 
+        // ******** soil
+
+        this.prometheus_Gauge_SoilMoisturePercent = new Gauge({
+            name: "soil_moisture_percent",
+            help: "This indicator shows the soil moisture percentage (0-100).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_SoilMoistureRaw = new Gauge({
+            name: "soil_moisture_raw",
+            help: "This indicator shows the raw soil moisture sensor value.",
+            labelNames: ["source"],
+        });
+
         // ******** system info
 
         this.prometheus_Gauge_CpuTemp = new Gauge({
@@ -1313,6 +1762,80 @@ export class PrometheusWriter {
             help: "Sensor uptime in seconds from V3 health messages.",
             labelNames: ["source"],
         });
+
+        // ******** V4 health
+
+        this.prometheus_Gauge_MinHeapFreeBytes = new Gauge({
+            name: "heap_min_free_bytes",
+            help: "Lowest free heap memory in bytes observed since boot.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_DevicesActive = new Gauge({
+            name: "sensor_devices_active",
+            help: "Number of active sensor devices.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_DevicesConfigured = new Gauge({
+            name: "sensor_devices_configured",
+            help: "Number of configured sensor devices.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_NetworkStackReady = new Gauge({
+            name: "sensor_network_stack_ready",
+            help: "Network stack status (1 = ready, 0 = not ready).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_WifiConnected = new Gauge({
+            name: "sensor_wifi_connected",
+            help: "WiFi connection status (1 = connected, 0 = not connected).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_MqttConnected = new Gauge({
+            name: "sensor_mqtt_connected",
+            help: "MQTT connection status (1 = connected, 0 = not connected).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_Core1Active = new Gauge({
+            name: "sensor_core_1_active",
+            help: "Core 1 (sensor core) status (1 = active, 0 = inactive).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_OutboundQueueDepth = new Gauge({
+            name: "sensor_outbound_queue_depth",
+            help: "Depth of the outbound MQTT publish queue.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_OutboundEvicted = new Gauge({
+            name: "sensor_outbound_evicted",
+            help: "Total outbound messages evicted from the queue.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_OutboundRejected = new Gauge({
+            name: "sensor_outbound_rejected",
+            help: "Total outbound messages rejected by the queue.",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_UtcValid = new Gauge({
+            name: "sensor_utc_valid",
+            help: "UTC time sync status (1 = valid, 0 = not valid).",
+            labelNames: ["source"],
+        });
+
+        this.prometheus_Gauge_UtcSyncAgeSec = new Gauge({
+            name: "sensor_utc_sync_age_sec",
+            help: "Age of the last successful UTC time sync in seconds.",
+            labelNames: ["source"],
+        });
     }
 
     private cmPerSecToMph(cmSec: number): number {
@@ -1326,5 +1849,11 @@ export class PrometheusWriter {
         const pascalToInHg = 1 / 3386.39; // Conversion factor
 
         return pa * pascalToInHg;
+    }
+
+    private metersToFeet(meters: number): number {
+        const metersToFeet = 3.28084; // Conversion factor
+
+        return meters * metersToFeet;
     }
 }

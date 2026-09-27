@@ -1,5 +1,10 @@
 # Sensor Telemetry Services
 
+Series 1 — Sensor Telemetry Services
+
+**Release:** Tin Hawk — firmware 2.3.0.
+
+
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.1+-blue.svg)](https://typescriptlang.org/)
@@ -224,6 +229,45 @@ Log messages must include `"message-type": "log"` and can be sent in two formats
 {"message-type":"log","payload":{"source":"Water-Level-1","level":"critical","message":"Threshold exceeded","event":"threshold_exceeded"}}
 ```
 
+## V3 Per-Device Telemetry
+
+V3 telemetry messages (`message_schema_version: 3`) are per-device rather than per-section: each carries a top-level `device` field and a `payload` with only that device's readings. Known device types are mapped to the metric category they feed:
+
+| V3 device | Metric category | Payload fields |
+|-----------|-----------------|----------------|
+| `bme280` | air | `temperature_c`, `humidity_percent`, `pressure_pa`, `altitude_m` (nullable) |
+| `sht35` | air | `temperature_c`, `humidity_percent` |
+| `ds18b20` | water | `temperature_c` |
+| `ltr390` | light | `lux`, `uv_index` |
+| `yl69_fc28` | soil | `relative_moisture_percent`, `raw` (+ `digital_state`, nullable, not published) |
+| `plantmate_soil` | soil | `relative_moisture_percent`, `raw` |
+
+Notes:
+
+- The SHT35 has no barometric pressure sensor, so `air_pressure` is not set for sources reporting SHT35 telemetry.
+- BME280 `altitude_m` is `null` when the adjusted pressure is non-positive; `air_altitude_ft` is only set when a finite altitude is present.
+- Soil messages are skipped (with a warning) when `relative_moisture_percent` is missing or out of the 0-100 range; `raw` is validated against the 16-bit ADC range (0-65535).
+- Unknown device types are dropped with a warning in the logs.
+- V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path.
+- V3 health messages additionally populate the v4 health gauges (`heap_min_free_bytes`, `sensor_devices_active`, `sensor_devices_configured`, `sensor_network_stack_ready`, `sensor_wifi_connected`, `sensor_mqtt_connected`, `sensor_core_1_active`, `sensor_outbound_queue_depth`, `sensor_outbound_evicted`, `sensor_outbound_rejected`, `sensor_utc_valid`, `sensor_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
+
+Example V3 SHT35 telemetry message:
+
+```json
+{
+  "message_type": "telemetry",
+  "message_schema_version": 3,
+  "device": "sht35",
+  "source": "Air-3",
+  "firmware_version": "0.4.152",
+  "timestamp": "2026-09-22T05:22:45Z",
+  "payload": {
+    "temperature_c": 23.368432,
+    "humidity_percent": 65.41238
+  }
+}
+```
+
 ## Building
 
 ```bash
@@ -281,7 +325,10 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 |--------|------|--------|-------------|
 | `Air_Temperature` | Gauge | source | Temperature in Fahrenheit |
 | `Air_Humidity` | Gauge | source | Humidity percentage |
-| `Air_Pressure` | Gauge | source | Air pressure in in/Hg |
+| `Air_Pressure` | Gauge | source | Air pressure in in/Hg (only for sources with a barometer, e.g. BME280) |
+| `Air_Altitude` | Gauge | source | Barometric altitude in feet (only for BME280 sources reporting a finite `altitude_m`) |
+| `Soil_Moisture_Percent` | Gauge | source | Soil moisture percentage (0-100), from `yl69_fc28` / `plantmate_soil` |
+| `Soil_Moisture_Raw` | Gauge | source | Raw 16-bit soil moisture ADC reading (0-65535) |
 | `Light_UV_Index` | Gauge | source | UV Index |
 | `Light_LUX` | Gauge | source | Light level in LUX |
 | `Rain_In_H2O` | Gauge | source | Rain accumulation in inches |
@@ -289,6 +336,23 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `Wind_Gusts` | Gauge | source | Wind gusts in mph |
 | `Water_Temperature` | Gauge | source | Water temperature in Fahrenheit |
 | `Lightning` | Gauge | source | Lightning strike count |
+| `Cpu_Temperature` | Gauge | source | CPU temperature in Celsius (health messages) |
+| `Heap_Free_Bytes` | Gauge | source | Free heap memory in bytes (health messages) |
+| `Wifi_RSSI_DBM` | Gauge | source | WiFi signal strength in dBm (health messages) |
+| `Sensor_Health_Up` | Gauge | source | Sensor health status from V3 health messages (1 = healthy, 0 = degraded) |
+| `Sensor_Uptime` | Gauge | source | Sensor uptime in seconds from V3 health messages |
+| `Heap_Min_Free_Bytes` | Gauge | source | Lowest free heap memory in bytes observed since boot |
+| `Sensor_Devices_Active` | Gauge | source | Number of active sensor devices |
+| `Sensor_Devices_Configured` | Gauge | source | Number of configured sensor devices |
+| `Sensor_Network_Stack_Ready` | Gauge | source | Network stack status (1 = ready, 0 = not ready) |
+| `Sensor_Wifi_Connected` | Gauge | source | WiFi connection status (1 = connected, 0 = not connected) |
+| `Sensor_Mqtt_Connected` | Gauge | source | MQTT connection status (1 = connected, 0 = not connected) |
+| `Sensor_Core_1_Active` | Gauge | source | Core 1 (sensor core) status (1 = active, 0 = inactive) |
+| `Sensor_Outbound_Queue_Depth` | Gauge | source | Depth of the outbound MQTT publish queue |
+| `Sensor_Outbound_Evicted` | Gauge | source | Total outbound messages evicted from the queue |
+| `Sensor_Outbound_Rejected` | Gauge | source | Total outbound messages rejected by the queue |
+| `Sensor_Utc_Valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
+| `Sensor_Utc_Sync_Age` | Gauge | source | Age of the last successful UTC time sync in seconds |
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
 
 ## Source Label Sanitization

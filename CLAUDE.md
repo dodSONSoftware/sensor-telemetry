@@ -26,11 +26,14 @@ V3 telemetry messages are per-device rather than per-section: each carries a top
 
 | V3 device | Metric category | Payload fields |
 |-----------|-----------------|----------------|
-| `bme280` | air | `temperature_c`, `humidity_percent`, `pressure_pa` |
+| `bme280` | air | `temperature_c`, `humidity_percent`, `pressure_pa`, `altitude_m` (nullable — null when adjusted pressure is non-positive) |
+| `sht35` | air | `temperature_c`, `humidity_percent` (no pressure sensor — pressure gauge is left untouched) |
 | `ds18b20` | water | `temperature_c` |
 | `ltr390` | light | `lux`, `uv_index` (+ `als_raw`, `uv_raw`, not published) |
+| `yl69_fc28` | soil | `relative_moisture_percent`, `raw` (+ `digital_state`, nullable, not published) |
+| `plantmate_soil` | soil | `relative_moisture_percent`, `raw` |
 
-Unknown device types are dropped with a warning. V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path. V3 health messages (`iot/v3/health` or `message_type: "health"`) populate the system-info gauges plus `sensor_health_up` and `sensor_uptime_seconds`.
+Unknown device types are dropped with a warning. V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path. V3 health messages (`iot/v3/health` or `message_type: "health"`) populate the system-info gauges plus `sensor_health_up`, `sensor_uptime_seconds`, and the v4 health gauges (`heap_min_free_bytes`, `sensor_devices_active`, `sensor_devices_configured`, `sensor_network_stack_ready`, `sensor_wifi_connected`, `sensor_mqtt_connected`, `sensor_core_1_active`, `sensor_outbound_queue_depth`, `sensor_outbound_evicted`, `sensor_outbound_rejected`, `sensor_utc_valid`, `sensor_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning (not published as a metric).
 
 ### Configuration
 
@@ -44,6 +47,9 @@ Unknown device types are dropped with a warning. V2 section-based payloads (`pay
 | Air_Temperature | Temperature in Fahrenheit |
 | Air_Humidity | Humidity percentage |
 | Air_Pressure | Air pressure in in/Hg |
+| Air_Altitude | Barometric altitude in feet (bme280 only) |
+| Soil_Moisture_Percent | Soil moisture percentage (0-100) |
+| Soil_Moisture_Raw | Raw 16-bit soil moisture ADC reading |
 | Light_UV_Index | UV Index |
 | Light_LUX | Light level in LUX |
 | Rain_In_H2O | Rain accumulation in inches |

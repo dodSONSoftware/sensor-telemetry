@@ -522,6 +522,21 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     /**
+     * Get a boolean value from an object using snake_case field names (V3 format).
+     * Returns true/false only for actual boolean values; anything else (including
+     * null) is treated as absent so malformed values never become 0/1 gauges.
+     */
+    private getBoolField(obj: any, ...fieldNames: string[]): boolean | undefined {
+        for (const fieldName of fieldNames) {
+            const value = obj[fieldName];
+            if (typeof value === "boolean") {
+                return value;
+            }
+        }
+        return undefined;
+    }
+
+    /**
      * Get a value from log data using snake_case field names (V2 format).
      */
     private getLogField(logData: any, ...fieldNames: string[]): any {
@@ -718,8 +733,11 @@ export class MqttNetworking implements IMqttNetworking {
     // names surface in the logs instead of being mislabeled.
     private static readonly V3_DEVICE_CATEGORIES: Record<string, string> = {
         bme280: "air",
+        sht35: "air",
         ds18b20: "water",
         ltr390: "light",
+        yl69_fc28: "soil",
+        plantmate_soil: "soil",
     };
 
     /**
@@ -777,8 +795,11 @@ export class MqttNetworking implements IMqttNetworking {
         // section envelope they expect (e.g. { air: {...} }).
         switch (category) {
         case "air":
+            // BME280 reports barometric pressure; the SHT35 has no pressure
+            // sensor, so pressure is only required for devices that carry it.
+            const pressureRequired = device === "bme280";
             if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
-                this.getNumericField(devicePayload, "pressure_pa", "pressure_pascal") !== undefined) {
+                (!pressureRequired || this.getNumericField(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
                 this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
             }
             break;
@@ -792,6 +813,15 @@ export class MqttNetworking implements IMqttNetworking {
         case "light":
             if (this.is_telemetry_valid(devicePayload, ["lux", "uv_index"], source)) {
                 this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
+            }
+            break;
+
+        case "soil":
+            // yl69_fc28 / plantmate_soil: relative_moisture_percent is the
+            // calibrated reading; raw (16-bit ADC) is optional and
+            // digital_state is ignored (nullable, not a useful gauge).
+            if (this.is_telemetry_valid(devicePayload, ["relative_moisture_percent"], source)) {
+                this.promWriter.publish_soil({ soil: devicePayload }, source, firmwareVersion);
             }
             break;
         }
@@ -832,10 +862,80 @@ export class MqttNetworking implements IMqttNetworking {
             this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
         }
 
+        // V4 health numeric gauges (all optional; null/missing are skipped)
+        const minHeapFreeBytes = this.getNumericField(payload, "minimum_free_heap_bytes");
+        if (minHeapFreeBytes !== undefined) {
+            this.promWriter.set_min_heap_free_bytes(source, minHeapFreeBytes);
+        }
+        const devicesActive = this.getNumericField(payload, "devices_active");
+        if (devicesActive !== undefined) {
+            this.promWriter.set_devices_active(source, devicesActive);
+        }
+        const devicesConfigured = this.getNumericField(payload, "devices_configured");
+        if (devicesConfigured !== undefined) {
+            this.promWriter.set_devices_configured(source, devicesConfigured);
+        }
+        const outboundQueueDepth = this.getNumericField(payload, "outbound_queue_depth");
+        if (outboundQueueDepth !== undefined) {
+            this.promWriter.set_outbound_queue_depth(source, outboundQueueDepth);
+        }
+        const outboundEvicted = this.getNumericField(payload, "outbound_evicted");
+        if (outboundEvicted !== undefined) {
+            this.promWriter.set_outbound_evicted(source, outboundEvicted);
+        }
+        const outboundRejected = this.getNumericField(payload, "outbound_rejected");
+        if (outboundRejected !== undefined) {
+            this.promWriter.set_outbound_rejected(source, outboundRejected);
+        }
+        const utcSyncAgeSec = this.getNumericField(payload, "utc_sync_age_sec");
+        if (utcSyncAgeSec !== undefined) {
+            this.promWriter.set_utc_sync_age_sec(source, utcSyncAgeSec);
+        }
+
+        // V4 health boolean gauges (true/false only; anything else is skipped)
+        const networkStackReady = this.getBoolField(payload, "network_stack_ready");
+        if (networkStackReady !== undefined) {
+            this.promWriter.set_network_stack_ready(source, networkStackReady ? 1 : 0);
+        }
+        const wifiConnected = this.getBoolField(payload, "wifi_connected");
+        if (wifiConnected !== undefined) {
+            this.promWriter.set_wifi_connected(source, wifiConnected ? 1 : 0);
+        }
+        const mqttConnected = this.getBoolField(payload, "mqtt_connected");
+        if (mqttConnected !== undefined) {
+            this.promWriter.set_mqtt_connected(source, mqttConnected ? 1 : 0);
+        }
+        const core1Active = this.getBoolField(payload, "core_1_active");
+        if (core1Active !== undefined) {
+            this.promWriter.set_core_1_active(source, core1Active ? 1 : 0);
+        }
+        const utcValid = this.getBoolField(payload, "utc_valid");
+        if (utcValid !== undefined) {
+            this.promWriter.set_utc_valid(source, utcValid ? 1 : 0);
+        }
+
         // V3-only gauges
         const status = payload["status"];
         if (status !== undefined) {
             this.promWriter.set_health_up(source, String(status) === "healthy" ? 1 : 0);
+        }
+
+        // V4: degraded_reasons is a string array (e.g. "low_free_heap",
+        // "mqtt_not_connected") — arrays don't map cleanly to Prometheus
+        // labels, so surface it as a structured warn log for Loki instead.
+        const degradedReasons = Array.isArray(payload["degraded_reasons"]) ? payload["degraded_reasons"] : undefined;
+        if (degradedReasons !== undefined && degradedReasons.length > 0) {
+            this.logger.write_warn(
+                "networking/handleHealth",
+                `Source: ${source} reports degraded health: ${degradedReasons.join(", ")}`,
+                {
+                    event: "v3_health_degraded",
+                    logType: "sensor",
+                    source,
+                    status,
+                    degraded_reasons: degradedReasons,
+                }
+            );
         }
         // uptime_ms sits at the top level of V3 messages (fallback to payload)
         let uptimeMs = this.getNumericField(json_doc, "uptime_ms");
@@ -854,6 +954,7 @@ export class MqttNetworking implements IMqttNetworking {
                 logType: "sensor",
                 source,
                 status,
+                degraded_reasons: degradedReasons,
             }
         );
     }

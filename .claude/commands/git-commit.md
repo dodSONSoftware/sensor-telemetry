@@ -153,14 +153,145 @@ After successful commit, return:
 Notable changes: Users can now authenticate via JWT tokens. Breaking: /api/* routes require Authorization header.
 ```
 
-## IMPROVEMENTS OVER ORIGINAL
+## RELEASE CODENAME SCHEME
 
-| Original Issue | Fix Applied |
-|----------------|-------------|
-| Version bump ignored `feat:` | Parse conventional commits to determine bump level |
-| No prerelease support | Use `semver` library for proper version manipulation |
-| No rename detection | Add `--diff-filter=R` handling |
-| No error recovery | Try/catch with rollback on failure |
-| Monolithic design | Clear phase separation with pre-flight checks |
-| No breaking change detection | Detect `!` and `BREAKING CHANGE:` footer |
-| Manual version math | Use semver library or validated logic |
+The release codename stored in `FIRMWARE_NAME` in `version.py` is derived from `FIRMWARE_VERSION` (`MAJOR.MINOR.PATCH`). The mapping is deterministic:
+
+- **MAJOR** selects the **Animal**
+- **MINOR** selects the **Material**
+- **PATCH** does not affect the codename
+- Display the codename as:
+
+```text
+<Material> <Animal>
+```
+
+### Version Mapping
+
+```text
+MAJOR.MINOR.PATCH
+  │     │
+  │     └── Material
+  └──────── Animal
+```
+
+Example:
+
+```text
+2.3.14
+│ │
+│ └── 3 → Tin
+└──── 2 → Hawk
+
+Tin Hawk
+```
+
+### Major Version → Animal
+
+| Major | Animal |
+|---:|---|
+| `0` | Owl |
+| `1` | Fox |
+| `2` | Hawk |
+| `3` | Badger |
+| `4` | Falcon |
+| `5` | Wolf |
+| `6` | Eagle |
+| `7` | Jaguar |
+| `8` | Wolverine |
+| `9` | Tiger |
+| `10` | Grizzly |
+
+The animal identifies the major-version generation and remains unchanged for all minor and patch releases within that generation.
+
+### Minor Version → Material
+
+| Minor | Material |
+|---:|---|
+| `0` | Iron |
+| `1` | Zinc |
+| `2` | Aluminum |
+| `3` | Tin |
+| `4` | Bronze |
+| `5` | Brass |
+| `6` | Copper |
+| `7` | Nickel |
+| `8` | Steel |
+| `9` | Mercury |
+| `10` | Titanium |
+| `11` | Cobalt |
+| `12` | Carbon |
+| `13` | Graphite |
+| `14` | Silicon |
+| `15` | Ceramic |
+| `16` | Quartz |
+| `17` | Onyx |
+| `18` | Obsidian |
+| `19` | Garnet |
+| `20` | Amethyst |
+| `21` | Topaz |
+| `22` | Granite |
+| `23` | Opal |
+| `24` | Jade |
+| `25` | Turquoise |
+| `26` | Pearl |
+| `27` | Emerald |
+| `28` | Sapphire |
+| `29` | Ruby |
+| `30` | Silver |
+| `31` | Gold |
+| `32` | Platinum |
+| `33` | Amber |
+| `34` | Marble |
+| `35` | Diamond |
+
+### Rules
+
+1. Parse the version as `MAJOR.MINOR.PATCH`.
+2. Look up `MAJOR` in the Animal table.
+3. Look up `MINOR` in the Material table.
+4. Ignore `PATCH` when generating the codename.
+5. Return the name in exactly this order:
+
+   ```text
+   Material Animal
+   ```
+
+6. Do not invent or substitute names.
+7. Do not reorder the words.
+8. Do not alter capitalization.
+9. If `MAJOR` or `MINOR` is outside the defined tables, do not extrapolate.
+10. Use `Unknown` for any out-of-range component.
+
+Examples of out-of-range components:
+
+```text
+11.3.0  → Tin Unknown
+2.36.0  → Unknown Hawk
+11.36.0 → Unknown Unknown
+```
+
+### Examples
+
+```text
+0.0.0    → Iron Owl
+0.10.7   → Titanium Owl
+1.6.3    → Copper Fox
+2.3.14   → Tin Hawk
+3.16.2   → Quartz Badger
+4.11.0   → Cobalt Falcon
+5.18.9   → Obsidian Wolf
+6.28.1   → Sapphire Eagle
+7.29.4   → Ruby Jaguar
+8.30.0   → Silver Wolverine
+9.31.12  → Gold Tiger
+10.35.0  → Diamond Grizzly
+```
+
+Patch releases retain the same name:
+
+```text
+2.3.0  → Tin Hawk
+2.3.1  → Tin Hawk
+2.3.99 → Tin Hawk
+```
