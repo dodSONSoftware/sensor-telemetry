@@ -1714,37 +1714,37 @@ export class PrometheusWriter {
         // ******** system info
 
         this.prometheus_Gauge_CpuTemp = new Gauge({
-            name: "cpu_temperature",
+            name: "sensor_health_cpu_temperature_c",
             help: "CPU temperature in Celsius.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_HeapFreeBytes = new Gauge({
-            name: "heap_free_bytes",
+            name: "sensor_health_heap_free_bytes",
             help: "Free heap memory in bytes.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_HeapUsedPercent = new Gauge({
-            name: "heap_used_percent",
+            name: "sensor_health_heap_used_percent",
             help: "Percentage of heap memory used.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_SensorReadFailures = new Gauge({
-            name: "sensor_read_failures_total",
+            name: "sensor_health_read_failures_total",
             help: "Total number of sensor read failures.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_SensorReadCounter = new Gauge({
-            name: "sensor_read_counter_total",
+            name: "sensor_health_read_counter_total",
             help: "Total number of successful sensor reads.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_WifiRssiDbm = new Gauge({
-            name: "wifi_rssi_dbm",
+            name: "sensor_health_wifi_rssi_dbm",
             help: "WiFi signal strength in dBm.",
             labelNames: ["source"],
         });
@@ -1758,7 +1758,7 @@ export class PrometheusWriter {
         });
 
         this.prometheus_Gauge_SensorUptime = new Gauge({
-            name: "sensor_uptime_seconds",
+            name: "sensor_health_uptime_seconds",
             help: "Sensor uptime in seconds from V3 health messages.",
             labelNames: ["source"],
         });
@@ -1766,73 +1766,73 @@ export class PrometheusWriter {
         // ******** V4 health
 
         this.prometheus_Gauge_MinHeapFreeBytes = new Gauge({
-            name: "heap_min_free_bytes",
+            name: "sensor_health_heap_min_free_bytes",
             help: "Lowest free heap memory in bytes observed since boot.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_DevicesActive = new Gauge({
-            name: "sensor_devices_active",
+            name: "sensor_health_devices_active",
             help: "Number of active sensor devices.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_DevicesConfigured = new Gauge({
-            name: "sensor_devices_configured",
+            name: "sensor_health_devices_configured",
             help: "Number of configured sensor devices.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_NetworkStackReady = new Gauge({
-            name: "sensor_network_stack_ready",
+            name: "sensor_health_network_stack_ready",
             help: "Network stack status (1 = ready, 0 = not ready).",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_WifiConnected = new Gauge({
-            name: "sensor_wifi_connected",
+            name: "sensor_health_wifi_connected",
             help: "WiFi connection status (1 = connected, 0 = not connected).",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_MqttConnected = new Gauge({
-            name: "sensor_mqtt_connected",
+            name: "sensor_health_mqtt_connected",
             help: "MQTT connection status (1 = connected, 0 = not connected).",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_Core1Active = new Gauge({
-            name: "sensor_core_1_active",
+            name: "sensor_health_core_1_active",
             help: "Core 1 (sensor core) status (1 = active, 0 = inactive).",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_OutboundQueueDepth = new Gauge({
-            name: "sensor_outbound_queue_depth",
+            name: "sensor_health_outbound_queue_depth",
             help: "Depth of the outbound MQTT publish queue.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_OutboundEvicted = new Gauge({
-            name: "sensor_outbound_evicted",
+            name: "sensor_health_outbound_evicted",
             help: "Total outbound messages evicted from the queue.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_OutboundRejected = new Gauge({
-            name: "sensor_outbound_rejected",
+            name: "sensor_health_outbound_rejected",
             help: "Total outbound messages rejected by the queue.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_UtcValid = new Gauge({
-            name: "sensor_utc_valid",
+            name: "sensor_health_utc_valid",
             help: "UTC time sync status (1 = valid, 0 = not valid).",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_UtcSyncAgeSec = new Gauge({
-            name: "sensor_utc_sync_age_sec",
+            name: "sensor_health_utc_sync_age_sec",
             help: "Age of the last successful UTC time sync in seconds.",
             labelNames: ["source"],
         });

@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Tin Hawk — firmware 2.3.0.
+**Release:** Tin Hawk — firmware 2.4.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -249,7 +249,8 @@ Notes:
 - Soil messages are skipped (with a warning) when `relative_moisture_percent` is missing or out of the 0-100 range; `raw` is validated against the 16-bit ADC range (0-65535).
 - Unknown device types are dropped with a warning in the logs.
 - V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path.
-- V3 health messages additionally populate the v4 health gauges (`heap_min_free_bytes`, `sensor_devices_active`, `sensor_devices_configured`, `sensor_network_stack_ready`, `sensor_wifi_connected`, `sensor_mqtt_connected`, `sensor_core_1_active`, `sensor_outbound_queue_depth`, `sensor_outbound_evicted`, `sensor_outbound_rejected`, `sensor_utc_valid`, `sensor_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
+- V3 health messages additionally populate the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
+- All health/diagnostic metrics share the `sensor_health_` prefix (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, `sensor_health_heap_used_percent`, `sensor_health_read_failures_total`, `sensor_health_read_counter_total`, and `sensor_health_wifi_rssi_dbm`); physical sensor readings do not.
 
 Example V3 SHT35 telemetry message:
 
