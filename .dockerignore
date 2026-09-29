@@ -1,0 +1,14 @@
+node_modules
+tests
+*.test.ts
+*.md
+.vscode
+.git
+dist
+eslint.config.mjs
+jest.config.ts
+jest.setup.ts
+tsconfig.jest.json
+.nyc_output
+coverage
+*.log

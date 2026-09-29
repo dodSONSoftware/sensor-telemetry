@@ -4,6 +4,7 @@
  */
 
 import http from "http";
+import { timingSafeEqual } from "crypto";
 import { register, Gauge, Counter } from "prom-client";
 import { createRequire } from "module";
 import type { ILogger, IMqttNetworking } from "./Interfaces";
@@ -74,10 +75,18 @@ export class PrometheusWriter {
     private mqttNetworking?: IMqttNetworking;
     // ---- optional callback for config changes
     private configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void;
+    // ---- optional shared secret protecting /write-config and /reload-config.
+    // Read from the environment (not config.yml, which /read-config would
+    // expose) at construction. When unset, the endpoints remain open for
+    // trusted-LAN deployments and a warning is logged at startup.
+    private readonly configToken: string | undefined;
 
     // ******** constants
     private readonly MAX_SOURCE_LENGTH: number;
     private readonly VALID_CHARS: RegExp;
+    // Cap for /write-config request bodies. A valid config is < 2 KiB, so
+    // anything larger is a misbehaving or hostile client, not a config.
+    private static readonly MAX_CONFIG_BODY_BYTES = 64 * 1024;
 
     // ******** ctor
 
@@ -117,6 +126,17 @@ export class PrometheusWriter {
 
         // Set config change callback early (before server starts accepting requests)
         this.configChangeCallback = configChangeCallback;
+        this.configToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN || undefined;
+        if (this.configToken === undefined) {
+            logger.write_warn(
+                "prometheus/constructor",
+                "SENSOR_TELEMETRY_CONFIG_TOKEN is not set — /write-config and /reload-config are unauthenticated",
+                {
+                    event: "config_token_not_set",
+                    logType: "service",
+                }
+            );
+        }
 
         // create prometheus gauges
         this.create_prometheus_gauges();
@@ -165,8 +185,18 @@ export class PrometheusWriter {
             } else if (req.url === "/read-config") {
                 await this.handleReadConfig(req, res);
             } else if (req.url === "/write-config") {
+                if (req.method !== "POST") {
+                    this.sendJson(res, 405, { success: false, message: "method not allowed; use POST" });
+                    return;
+                }
+                if (!this.verifyConfigToken(req, res)) {
+                    return;
+                }
                 await this.handleWriteConfig(req, res);
             } else if (req.url === "/reload-config") {
+                if (!this.verifyConfigToken(req, res)) {
+                    return;
+                }
                 await this.handleReloadConfig(req, res);
             } else {
                 res.statusCode = 404;
@@ -236,26 +266,11 @@ export class PrometheusWriter {
         });
     }
 
-    // ******** public methods for config management
-
-    /** Get current config */
-    getConfig(): z.infer<typeof configSchema> {
-        return { ...this.config };
-    }
-
-    /** Set config source path */
-    setConfigSource(source: string): void {
-        this.configSource = source;
-    }
+    // ******** public methods
 
     /** Set MQTT networking reference for health checks */
     setMqttNetworking(networking: IMqttNetworking): void {
         this.mqttNetworking = networking;
-    }
-
-    /** Set callback to invoke when config is updated via /write-config */
-    setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void {
-        this.configChangeCallback = callback;
     }
 
     // ******** private methods for HTTP handlers
@@ -267,6 +282,38 @@ export class PrometheusWriter {
         res.end(JSON.stringify(data));
     }
 
+    /**
+     * Verify the shared secret protecting /write-config and /reload-config.
+     * Returns true (no-op) when no token is configured; otherwise the
+     * request must carry a matching x-config-token header, compared in
+     * constant time. Responds with 401 and returns false on failure.
+     */
+    private verifyConfigToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+        if (this.configToken === undefined) {
+            return true;
+        }
+        const header = req.headers["x-config-token"];
+        const provided = Array.isArray(header) ? (header[0] ?? "") : (header ?? "");
+        const expected = Buffer.from(this.configToken, "utf8");
+        const actual = Buffer.from(provided, "utf8");
+        if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+            this.logger.write_warn(
+                "prometheus/configTokenRejected",
+                "Rejected config request with missing or invalid x-config-token",
+                {
+                    event: "config_token_rejected",
+                    logType: "audit",
+                    method: req.method || "UNKNOWN",
+                    url: req.url || "/",
+                    statusCode: 401,
+                }
+            );
+            this.sendJson(res, 401, { success: false, message: "missing or invalid x-config-token" });
+            return false;
+        }
+        return true;
+    }
+
     private handleAbout(_req: http.IncomingMessage, res: http.ServerResponse): void {
         const mqttStatus = this.mqttNetworking?.is_connected() ? "connected" : "disconnected";
         const aboutInfo = {
@@ -274,7 +321,7 @@ export class PrometheusWriter {
                 name: "Sensor Telemetry Services",
                 version: version ?? "unknown",
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
-                description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports both V1 and V2 telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, wind speed and gusts, rainfall, UV index, light intensity, lightning strikes, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values, including heat index, are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
+                description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports V1, V2, and V3 (per-device) telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, wind speed and gusts, rainfall, UV index, light intensity, lightning strikes, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
                 copyright: "Copyright © 2026 dodson Software ( dodson labs )",
                 license: "MIT License"
             },
@@ -342,17 +389,17 @@ export class PrometheusWriter {
                 name: "Write Config",
                 route: "/write-config",
                 verb: "POST",
-                requestBody: "JSON object with keys: logLevel (string), alwaysLogErrors (boolean), apiPort (positive integer), intervalSecs (positive integer), devices (array of objects with source, ipAddress, deviceType)",
-                responseBody: "{ success: boolean, message: string, config: object }",
-                description: "Updates the configuration and reloads it."
+                requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (positive integer, optional), sensorSourceValidCharsRegex (string, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional). Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
+                responseBody: "{ success: boolean, message: string }",
+                description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, or sensorSourceValidCharsRegex take effect on the next restart."
             },
             {
                 name: "Reload Config",
                 route: "/reload-config",
                 verb: "GET",
-                requestBody: "None",
+                requestBody: "None. Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
                 responseBody: "{ success: true, message: \"Configuration reloaded successfully\", config: object }",
-                description: "Reloads the configuration from disk without changing the payload."
+                description: "Reloads the configuration from disk and applies the runtime-effective keys; other keys take effect on the next restart."
             }
         ];
         this.sendJson(res, 200, { endpoints });
@@ -360,10 +407,15 @@ export class PrometheusWriter {
 
     private async handleReadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
+            // Pure read: report what is on disk without mutating in-memory
+            // state. Silently overwriting this.config here could roll back a
+            // newer in-memory config (e.g. after a failed disk write) and
+            // would desynchronize MqttNetworking, which is only updated via
+            // the config change callback. Use /reload-config to apply disk
+            // contents to the running service.
             const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
-                this.config = { ...validatedConfig };
                 this.sendJson(res, 200, validatedConfig);
             } else {
                 this.sendJson(res, 500, {
@@ -381,10 +433,41 @@ export class PrometheusWriter {
     }
 
     private async handleWriteConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-        let body = "";
-        req.on("data", chunk => { body += chunk; });
+        // Accumulate raw bytes and decode once at the end: decoding each TCP
+        // chunk independently corrupts multi-byte UTF-8 sequences that
+        // straddle chunk boundaries (each half becomes a U+FFFD replacement
+        // character) before JSON.parse ever sees them.
+        const chunks: Buffer[] = [];
+        let receivedBytes = 0;
+        let rejected = false;
+        req.on("data", (chunk: Buffer) => {
+            if (rejected) return;
+            receivedBytes += chunk.length;
+            if (receivedBytes > PrometheusWriter.MAX_CONFIG_BODY_BYTES) {
+                rejected = true;
+                this.logger.write_warn(
+                    "prometheus/writeConfigBodyTooLarge",
+                    `Rejected /write-config body exceeding ${PrometheusWriter.MAX_CONFIG_BODY_BYTES} bytes`,
+                    {
+                        event: "config_body_too_large",
+                        logType: "audit",
+                        statusCode: 413,
+                    }
+                );
+                this.sendJson(res, 413, {
+                    success: false,
+                    message: `request body too large (max ${PrometheusWriter.MAX_CONFIG_BODY_BYTES} bytes)`,
+                });
+                // Stop accumulating; remaining chunks are dropped (see the
+                // `rejected` guard above) so memory stays bounded.
+                return;
+            }
+            chunks.push(chunk);
+        });
         req.on("end", async () => {
+            if (rejected) return;
             try {
+                const body = Buffer.concat(chunks).toString("utf8");
                 const newConfigRaw = JSON.parse(body);
                 const validatedConfig = validateConfig(newConfigRaw);
 
@@ -532,18 +615,25 @@ export class PrometheusWriter {
 
     close() {
         this._ready = false;
-        if (this.server) {
-            this.server.close(() => {
-                this.logger.write_info(
-                    "prometheus/serverClosed",
-                    "Prometheus metrics server closed.",
-                    {
-                        event: "prometheus_server_closed",
-                        logType: "service",
-                    }
-                );
-            });
+        if (!this.server) {
+            // close() must be idempotent: a second shutdown signal while the
+            // first is still in flight would otherwise call server.close()
+            // on a server that is already closing and throw
+            // ERR_SERVER_NOT_RUNNING.
+            return;
         }
+        const server = this.server;
+        this.server = undefined;
+        server.close(() => {
+            this.logger.write_info(
+                "prometheus/serverClosed",
+                "Prometheus metrics server closed.",
+                {
+                    event: "prometheus_server_closed",
+                    logType: "service",
+                }
+            );
+        });
     }
 
     /**
@@ -554,6 +644,13 @@ export class PrometheusWriter {
         for (const fieldName of fieldNames) {
             const value = obj[fieldName];
             if (value !== undefined && value !== null) {
+                // Empty/whitespace strings are the protocol's "unset" marker
+                // (V1/V2 use them for missing values); Number("") would coerce
+                // them to 0 and publish a false zero reading, so treat them
+                // as absent and try the next alias.
+                if (typeof value === "string" && value.trim() === "") {
+                    continue;
+                }
                 const numValue = Number(value);
                 if (Number.isFinite(numValue)) {
                     return numValue;
@@ -583,10 +680,14 @@ export class PrometheusWriter {
         // Use V2 snake_case field names
         const temp_f =
             (this.getNumericField(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
+        // A missing or non-numeric temperature means the reading is broken;
+        // publishing the other gauges from the same message would leave a
+        // mix of fresh and stale values for the source, so reject the whole
+        // message rather than just the temperature gauge.
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
                 "prometheus/publishAirInvalidTemp",
-                `Source: ${sanitized}, invalid temperature_c, skipping Air_Temperature gauge`,
+                `Source: ${sanitized}, invalid temperature_c, skipping message`,
                 {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
@@ -595,6 +696,7 @@ export class PrometheusWriter {
                     value: air["temperature_c"],
                 }
             );
+            return;
         } else if (temp_f < -100 || temp_f > 200) {
             this.logger.write_warn(
                 "prometheus/publishAirTempOutOfRange",

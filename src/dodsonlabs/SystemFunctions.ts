@@ -35,30 +35,6 @@ export interface ReadFileResult<T> {
   error: string | null;
 }
 
-export function write_file(
-  filename: string,
-  content: string,
-  logger?: ILogger
-): boolean {
-  try {
-    fs.writeFileSync(filename, content);
-    return true;
-  } catch (error) {
-    const msg = `write_file: failed to write '${filename}': ${(error as Error).message}`;
-    if (logger) {
-      logger.write_error("SystemFunctions/write_file", msg, {
-        event: "file_write_failed",
-        logType: "service",
-        filename,
-        error,
-      });
-    } else {
-      console.error(msg);
-    }
-    return false;
-  }
-}
-
 export function read_file(
   filename: string,
   logger?: ILogger
@@ -79,32 +55,6 @@ export function read_file(
       console.error(msg);
     }
     return null;
-  }
-}
-
-export function read_file_json<T>(
-  filename: string,
-  logger?: ILogger
-): ReadFileResult<T> {
-  const data = read_file(filename, logger);
-  if (data == null) {
-    return { data: null, error: `read_file_json: could not read '${filename}'` };
-  }
-  try {
-    return { data: JSON.parse(data), error: null };
-  } catch (error) {
-    const msg = `read_file_json: failed to parse '${filename}': ${(error as Error).message}`;
-    if (logger) {
-      logger.write_error("SystemFunctions/read_file_json", msg, {
-        event: "json_parse_failed",
-        logType: "service",
-        filename,
-        error,
-      });
-    } else {
-      console.error(msg);
-    }
-    return { data: null, error: msg };
   }
 }
 
@@ -132,6 +82,57 @@ export function read_file_yaml<T>(
     }
     return { data: null, error: msg };
   }
+}
+
+// **** configuration file resolution
+
+/**
+ * Candidate locations for config.yml, tried in order:
+ *  - /app/configs/config.yml — Docker container mount (see docker-compose.yml)
+ *  - ./dist/config.yml       — build output (npm run build copies it there)
+ *  - ./config.yml            — repo root, the single source of truth
+ */
+export const CONFIG_FILE_CANDIDATES: string[] = [
+  "/app/configs/config.yml",
+  "./dist/config.yml",
+  "./config.yml",
+];
+
+/** Result of resolving a YAML file from a list of candidate paths. */
+export interface ResolveYamlResult<T> {
+  /** Parsed YAML data, or null if no candidate could be read. */
+  data: T | null;
+  /** The candidate path that was read successfully, or null if all failed. */
+  source: string | null;
+  /** Error text combining every failed read, or null on success. */
+  error: string | null;
+}
+
+/**
+ * Try each candidate path in order and return the first one that can be
+ * read and parsed as YAML. Relative paths resolve against the process
+ * working directory, so callers can mix container paths and CWD-relative
+ * fallbacks.
+ */
+export function read_file_yaml_first<T>(
+  candidates: readonly string[],
+  logger?: ILogger
+): ResolveYamlResult<T> {
+  const errors: string[] = [];
+  for (const candidate of candidates) {
+    const result = read_file_yaml<T>(candidate, logger);
+    if (result.data !== null) {
+      return { data: result.data, source: candidate, error: null };
+    }
+    if (result.error !== null) {
+      errors.push(result.error);
+    }
+  }
+  return {
+    data: null,
+    source: null,
+    error: errors.length > 0 ? errors.join("; ") : null,
+  };
 }
 
 export function write_file_yaml(
@@ -186,18 +187,6 @@ export function convert_from_log_level_string_to_enum(
   }
 }
 
-// **** sleep functions
-
-export async function sleep(delayMS: number): Promise<void> {
-  if (typeof delayMS !== "number" || delayMS < 0) {
-    throw new Error("delayMS must be a non-negative number");
-  }
-  if (delayMS === 0) {
-    return Promise.resolve(); // Resolves immediately
-  }
-  return new Promise((resolve) => setTimeout(resolve, delayMS)); // Normal sleep
-}
-
 // **** general functions
 
 export function randomInt(min: number, max: number): number {
@@ -208,49 +197,6 @@ export function randomInt(min: number, max: number): number {
 
 export function get_timestamp_iso(): string {
   return new Date().toISOString().slice(0, -1);
-}
-
-export function get_timestamp(include_ms: boolean): string {
-  // init
-  const dt = new Date();
-
-  // get date and time components
-  const year = String(dt.getFullYear());
-  const month = String(dt.getMonth() + 1).padStart(2, "0");
-  const day = String(dt.getDate()).padStart(2, "0");
-  const h = String(dt.getHours()).padStart(2, "0");
-  const m = String(dt.getMinutes()).padStart(2, "0");
-  const s = String(dt.getSeconds()).padStart(2, "0");
-  const ms = String(dt.getMilliseconds()).padStart(3, "0");
-
-  // get the timestamp
-  let dude = `${year}-${month}-${day} ${h}:${m}:${s}`;
-
-  // check if including milliseconds
-  if (include_ms) {
-    dude = `${dude}.${ms}`;
-  }
-
-  // return results
-  return dude;
-}
-
-/**
- * @param start_time - Populate with a Date.now()
- * @returns Returns a string formatted to show the elapsed time
- */
-export function elapsed_time(start_time: Date | undefined): string {
-  let start_time_value = Date.now();
-
-  if (start_time !== undefined) {
-    start_time_value = start_time.valueOf();
-  }
-
-  return formatElapsedTime(Date.now() - start_time_value);
-}
-
-export function elapsed_time_seconds(start_date: Date): number {
-  return (Date.now() - start_date.valueOf()) / 1000;
 }
 
 export function formatElapsedTime(ms: number): string {

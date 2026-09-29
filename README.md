@@ -2,13 +2,13 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Tin Hawk — firmware 2.4.0.
+**Release:** Brass Hawk — firmware 2.5.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.1+-blue.svg)](https://typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22.22.0-green.svg)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A lightweight Node.js service that listens on MQTT channels for sensor telemetry data and publishes it to Prometheus metrics.
 

@@ -93,6 +93,7 @@ Rules:
 - Overview is brief summary
 - One-line descriptions per file/group of changes
 - If breaking change, add `BREAKING CHANGE:` footer with migration notes
+- Always add `Authored-By: dodson Software and AI` at the end of the commit message
 
 ### 5. STAGE ALL CHANGES
 
@@ -151,6 +152,8 @@ After successful commit, return:
 - README.md: add authentication section with usage examples
 
 Notable changes: Users can now authenticate via JWT tokens. Breaking: /api/* routes require Authorization header.
+
+Authored-By: dodson Software and AI
 ```
 
 ## RELEASE CODENAME SCHEME

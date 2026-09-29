@@ -5,7 +5,12 @@
 
 import { aboutDude, createLogger, logger } from "./common/global";
 import type { Logger } from "./dodsonlabs/Logger";
-import { ensureError, formatElapsedTime, read_file_yaml } from "./dodsonlabs/SystemFunctions";
+import {
+  CONFIG_FILE_CANDIDATES,
+  ensureError,
+  formatElapsedTime,
+  read_file_yaml_first,
+} from "./dodsonlabs/SystemFunctions";
 import { validateConfig, type configSchema } from "./schemas/config";
 import type { z } from "zod";
 import { MqttNetworking } from "./dodsonlabs/MqttNetworking";
@@ -25,20 +30,16 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
 // **** start up code
 
 (async () => {
-  // read the configuration file (try container mount first, then CWD-relative)
-  let configResult = read_file_yaml<z.infer<typeof configSchema>>(
-    "/app/configs/config.yml"
+  // read the configuration file (try container mount, then build output, then repo root)
+  const configResult = read_file_yaml_first<z.infer<typeof configSchema>>(
+    CONFIG_FILE_CANDIDATES
   );
-  let configSource = "/app/configs/config.yml";
-  if (configResult.data === null) {
-    configResult = read_file_yaml<z.infer<typeof configSchema>>("./dist/config.yml");
-    configSource = "./dist/config.yml";
-  }
-  if (configResult.data === null) {
+  if (configResult.data === null || configResult.source === null) {
     // eslint-disable-next-line no-console
     console.error(`ERROR: Could not read config.yml — ${configResult.error ?? "unknown error"} — cannot start without configuration.`);
     process.exit(1);
   }
+  const configSource = configResult.source;
 
   // validate and type the config with Zod
   const config = validate_config(configResult.data);
@@ -136,11 +137,30 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
 
   const start_time = Date.now();
 
-  async function shutdown(signal: string): Promise<void> {
+  // Only the first signal owns the shutdown: a second signal during the
+  // close window (up to 5 s) must not re-enter the close path or re-exit
+  // with its own code, which could mask a crash's exit 1 as a clean 0.
+  let shuttingDown = false;
+
+  // exitCode 0 = graceful stop requested by the operator; 1 = the process
+  // is exiting because of a fatal error, so orchestrators and monitoring
+  // can distinguish a crash from a clean shutdown.
+  async function shutdown(signal: string, exitCode = 0): Promise<void> {
+    if (shuttingDown) {
+      appLogger.write_warn("index.ts/shutdownIgnored", `Received ${signal} during an in-flight shutdown; ignoring.`, {
+        event: "shutdown_ignored",
+        logType: "service",
+        signal,
+      });
+      return;
+    }
+    shuttingDown = true;
+
     appLogger.write_info("index.ts/shutdown", `Received ${signal}. Starting graceful shutdown...`, {
       event: "shutdown_initiated",
       logType: "service",
       signal,
+      exitCode,
     });
 
     try {
@@ -154,6 +174,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
           event: "graceful_shutdown_completed",
           logType: "service",
           uptimeMs: Math.trunc(Date.now() - start_time),
+          exitCode,
         }
       );
     } catch (err) {
@@ -167,12 +188,12 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         }
       );
     } finally {
-      process.exit(0);
+      process.exit(exitCode);
     }
   }
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM", 0));
+  process.on("SIGINT", () => shutdown("SIGINT", 0));
   process.on("uncaughtException", (err) => {
     appLogger.write_critical(
       "process/uncaughtException",
@@ -186,7 +207,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         error: err,
       }
     );
-    shutdown("uncaughtException");
+    shutdown("uncaughtException", 1);
   });
   process.on("unhandledRejection", (reason, _promise) => {
     appLogger.write_critical(
@@ -201,6 +222,6 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         error: reason,
       }
     );
-    shutdown("unhandledRejection");
+    shutdown("unhandledRejection", 1);
   });
 })();

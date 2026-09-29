@@ -14,13 +14,6 @@ import type { z } from "zod";
 export class MqttNetworking implements IMqttNetworking {
 
     // ********
-    // ******** CONSTANTS
-
-    // Heat index calculation threshold (Celsius)
-    // Below this temperature, feels-like equals actual temperature
-    private static readonly HEAT_INDEX_THRESHOLD_C: number = 20;
-
-    // ********
     // ******** CTOR
 
     constructor(
@@ -70,39 +63,6 @@ export class MqttNetworking implements IMqttNetworking {
     // ********
     // ******** PUBLIC METHODS
 
-    /**
-     * Calculate heat index (feels like temperature) from temperature and humidity.
-     * Uses the Rothfusz regression formula.
-     * @param tempC Temperature in Celsius
-     * @param humidity Relative humidity (0-100)
-     * @returns Heat index in Celsius (4 decimal places), or original temp if conditions are not suitable
-     */
-    public calculateHeatIndex(tempC: number | undefined, humidity: number | undefined): number | undefined {
-        if (tempC === undefined || humidity === undefined) {
-            return undefined;
-        }
-
-        // Heat index is only calculated for temperatures >= 20°C (68°F)
-        // Below this, the air temperature is a good approximation of feels like
-        if (tempC < MqttNetworking.HEAT_INDEX_THRESHOLD_C) {
-            return tempC;
-        }
-
-        // Convert Celsius to Fahrenheit for the formula
-        const tempF = tempC * 9 / 5 + 32;
-
-        // Rothfusz regression formula
-        let hi = 0.5 * (tempF + 61.0 + ((tempF - 68.0) * 1.2) + (humidity * 0.094));
-
-        // Apply adjustment for high humidity and high temperature
-        if (hi > 79) {
-            hi += -0.1 * (humidity - 85) * (107 - tempF) * 0.0001;
-        }
-
-        // Return result in Celsius
-        return (hi - 32) * 5 / 9;
-    }
-
     // ********
     // ******** PRIVATE PROPERTIES
 
@@ -121,6 +81,11 @@ export class MqttNetworking implements IMqttNetworking {
     // ----
     private forward_sensor_logs: boolean;
     private forward_sensor_logs_level: LogLevel;
+    // ----
+    // Cached close promise: close() must be idempotent, so a second signal
+    // during an in-flight close reuses the first close instead of re-entering
+    // the client's end() path.
+    private closePromise: Promise<void> | undefined;
 
     // ********
     // ******** PRIVATE FUNCTIONS
@@ -161,24 +126,18 @@ export class MqttNetworking implements IMqttNetworking {
         return this.promWriter.is_ready();
     }
 
-    /**
-     * Get the PrometheusWriter instance for config management.
-     */
-    public getPrometheusWriter(): PrometheusWriter | undefined {
-        return this.promWriter;
-    }
-
-    /**
-     * Set callback to invoke when config is updated via /write-config.
-     */
-    public setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void {
-        // Register with PrometheusWriter if already created
-        if (this.promWriter) {
-            this.promWriter.setConfigChangeCallback(callback);
-        }
-    }
-
     public async close(timeout_ms: number = 5000): Promise<void> {
+        if (this.closePromise) {
+            // A second close while one is still in flight (e.g. a repeated
+            // shutdown signal): reuse the first close's promise rather than
+            // re-entering the client's end() path.
+            return this.closePromise;
+        }
+        this.closePromise = this.perform_close(timeout_ms);
+        return this.closePromise;
+    }
+
+    private async perform_close(timeout_ms: number): Promise<void> {
         this.logger.write_info(
             "networking/close",
             `Shutting down MQTT client (timeout: ${timeout_ms}ms)...`,
@@ -207,8 +166,9 @@ export class MqttNetworking implements IMqttNetworking {
             });
         });
 
+        let timeoutHandle: NodeJS.Timeout | undefined;
         const timeoutPromise = new Promise<void>((resolve) => {
-            setTimeout(() => {
+            timeoutHandle = setTimeout(() => {
                 this.logger.write_error(
                     "networking/close_timeout",
                     `MQTT client close timed out after ${timeout_ms}ms, forcing disconnect.`,
@@ -224,14 +184,40 @@ export class MqttNetworking implements IMqttNetworking {
             }, timeout_ms);
         });
 
-        await Promise.race([closePromise, timeoutPromise]);
+        try {
+            await Promise.race([closePromise, timeoutPromise]);
+        } finally {
+            // Clear the pending timer if the normal close won the race, so it
+            // cannot fire later and log a false "close timed out" error.
+            if (timeoutHandle) {
+                clearTimeout(timeoutHandle);
+            }
+        }
     }
 
     /**
      * Update configuration at runtime.
+     * Only logLevel and the forward_sensor_logs settings take effect at
+     * runtime; the MQTT connection (broker, topics), the HTTP port, and the
+     * PrometheusWriter's source-label sanitization constants (captured in
+     * its constructor) require a restart.
      * @param newConfig - New configuration object
      */
     public updateConfig(newConfig: z.infer<typeof configSchema>): void {
+        // Keys that are captured at construction and cannot be hot-reloaded.
+        const restartOnlyKeys: Array<keyof z.infer<typeof configSchema>> = [
+            "mqttBrokerIpAddress",
+            "mqttTopicTelemetry",
+            "mqttTopicLog",
+            "mqttTopicHealth",
+            "apiPort",
+            "sensorSourceMaxLength",
+            "sensorSourceValidCharsRegex",
+        ];
+        const restartOnlyChanged = restartOnlyKeys.filter(
+            (key) => !Object.is(this.configuration[key], newConfig[key])
+        );
+
         this.configuration = { ...newConfig };
 
         // Update forward_sensor_logs settings
@@ -253,6 +239,19 @@ export class MqttNetworking implements IMqttNetworking {
                 forwardSensorLogs: this.forward_sensor_logs,
             }
         );
+
+        if (restartOnlyChanged.length > 0) {
+            this.logger.write_warn(
+                "networking/updateConfig",
+                `Configuration keys ${restartOnlyChanged.join(", ")} changed but take effect on the next restart; the running service keeps their previous values`,
+                {
+                    event: "configuration_restart_only_keys",
+                    logType: "audit",
+                    source: this.originator,
+                    keys: restartOnlyChanged,
+                }
+            );
+        }
     }
 
     // ****************************************************************
@@ -507,6 +506,13 @@ export class MqttNetworking implements IMqttNetworking {
         for (const fieldName of fieldNames) {
             const value = obj[fieldName];
             if (value !== undefined && value !== null) {
+                // Empty/whitespace strings are the protocol's "unset" marker
+                // (V1/V2 use them for missing values); Number("") would coerce
+                // them to 0 and publish a false zero reading, so treat them
+                // as absent and try the next alias.
+                if (typeof value === "string" && value.trim() === "") {
+                    continue;
+                }
                 const numValue = Number(value);
                 if (Number.isFinite(numValue)) {
                     // Truncate to integer for millisecond time fields

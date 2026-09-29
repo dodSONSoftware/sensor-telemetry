@@ -10,7 +10,6 @@ import type {
   ILogger,
   LogMetadata,
   CriticalLogMetadata,
-  SerializedError,
 } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
@@ -116,49 +115,26 @@ function normalizeOriginator(originator: string): { module?: string; function?: 
   return { module: originator };
 }
 
-// **** Error Serialization ****
-
-/**
- * Serialize an error-like value into a standardized format.
- */
-export function serializeError(error: unknown): SerializedError {
-  if (error instanceof Error) {
-    const code =
-      "code" in error && typeof error.code === "string"
-        ? (error.code as string)
-        : undefined;
-
-    return {
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
-      code,
-    };
-  }
-
-  // Handle non-Error thrown values
-  if (typeof error === "string") {
-    return {
-      name: "UnknownError",
-      message: error,
-    };
-  }
-
-  return {
-    name: "UnknownError",
-    message: "A non-Error value was thrown",
-  };
-}
-
 // **** Supported Log Levels ****
 
 export type SupportedLogLevel = "error" | "warn" | "info" | "debug";
 
 /**
+ * A schema-accepted log level paired with the winston level it filters at.
+ * "critical" filters at winston's "error" level because critical entries
+ * are emitted at winston's error level (see write_critical).
+ */
+type ResolvedLogLevel = {
+  name: string;
+  winstonLevel: SupportedLogLevel;
+};
+
+/**
  * Validate and convert a log level string to supported format.
+ * "critical" is accepted and mapped to the winston level "error".
  * Returns null if the level is invalid.
  */
-function validateLogLevel(level: string): SupportedLogLevel | null {
+function validateLogLevel(level: string): ResolvedLogLevel | null {
   const normalized = level?.toLowerCase().trim();
   if (
     normalized === "error" ||
@@ -166,7 +142,10 @@ function validateLogLevel(level: string): SupportedLogLevel | null {
     normalized === "info" ||
     normalized === "debug"
   ) {
-    return normalized as SupportedLogLevel;
+    return { name: normalized, winstonLevel: normalized as SupportedLogLevel };
+  }
+  if (normalized === "critical") {
+    return { name: "critical", winstonLevel: "error" };
   }
   return null;
 }
@@ -177,22 +156,26 @@ export class Logger implements ILogger {
   private readonly logger: winston.Logger;
   private globalLogLevelValue: LogLevel;
   private globalLogLevelName: string;
+  private winstonLevel: SupportedLogLevel;
 
   constructor(config: z.infer<typeof configSchema>) {
     // Validate initial log level
     const validatedLevel = validateLogLevel(config.logLevel);
     if (validatedLevel === null) {
-      // Fallback to info with warning - but config schema already validates this
+      // Fallback to info. The config schema already restricts this value, so
+      // this only guards against construction with unvalidated input.
+      this.winstonLevel = "info";
       this.globalLogLevelValue = LogLevel.Info;
       this.globalLogLevelName = "info";
     } else {
-      this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel);
-      this.globalLogLevelName = validatedLevel;
+      this.winstonLevel = validatedLevel.winstonLevel;
+      this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel.name);
+      this.globalLogLevelName = validatedLevel.name;
     }
 
     // Create Winston logger with JSON format
     this.logger = winston.createLogger({
-      level: this.globalLogLevelName,
+      level: this.winstonLevel,
       defaultMeta: {
         service: "sensor-telemetry",
         environment: process.env.NODE_ENV ?? "development",
@@ -223,7 +206,7 @@ export class Logger implements ILogger {
 
   /**
    * Update the log level at runtime.
-   * @param level - New log level string ("error", "warn", "info", "debug")
+   * @param level - New log level string ("error", "warn", "info", "debug", "critical")
    * @returns true if the level was changed, false if invalid
    */
   public setLogLevel(level: string): boolean {
@@ -239,22 +222,23 @@ export class Logger implements ILogger {
     }
 
     const previousLevel = this.globalLogLevelName;
-    this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel);
-    this.globalLogLevelName = validatedLevel;
+    this.winstonLevel = validatedLevel.winstonLevel;
+    this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel.name);
+    this.globalLogLevelName = validatedLevel.name;
 
     // Update Winston logger level
-    this.logger.level = validatedLevel;
+    this.logger.level = validatedLevel.winstonLevel;
 
     // Update transport levels
     for (const transport of this.logger.transports) {
-      transport.level = validatedLevel;
+      transport.level = validatedLevel.winstonLevel;
     }
 
     this.logger.info("Log level changed", {
       event: "log_level_changed",
       logType: "service",
       previousLevel,
-      newLevel: validatedLevel,
+      newLevel: validatedLevel.name,
     });
 
     return true;

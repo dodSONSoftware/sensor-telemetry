@@ -37,8 +37,9 @@ Unknown device types are dropped with a warning. V2 section-based payloads (`pay
 
 ### Configuration
 
-- **config.yml** (project root) — Single source of truth for runtime configuration (YAML). Copied to `dist/` by `npm run build`. In Docker it is not shipped in the image — the container reads a mounted file at `/app/configs/config.yml` instead (see docker-compose.yml).
+- **config.yml** (project root) — Single source of truth for runtime configuration (YAML). Copied to `dist/` by `npm run build`. At startup the service tries `CONFIG_FILE_CANDIDATES` in order: `/app/configs/config.yml` (Docker mount — the container does not ship the file in the image, see docker-compose.yml), `./dist/config.yml` (build output), then `./config.yml` (repo root).
 - **schemas/config.ts** — Zod schema for configuration validation
+- **SENSOR_TELEMETRY_CONFIG_TOKEN** (env var) — Optional shared secret protecting `/write-config` and `/reload-config`. When set, requests must carry a matching `x-config-token` header (constant-time compare); when unset the endpoints remain open and a warning is logged at startup.
 
 ## Supported Sensor Types
 
@@ -65,13 +66,16 @@ npm run build     # Compile TypeScript + copy config.yml to dist/
 npm start         # Run production service
 npm run dev       # Development mode with ts-node
 npm run lint      # Run ESLint
+npm test          # Run Jest test suite
+npm run test:watch # Watch mode for tests
+npm run test:coverage # Run tests with coverage report
 ```
 
 ## Configuration Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `logLevel` | Logging verbosity (error, warn, info, debug) | info |
+| `logLevel` | Logging verbosity (error, warn, info, debug, critical — critical filters at winston error level) | info |
 | `prometheusPort` | Port for Prometheus metrics endpoint | 3301 |
 | `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
@@ -80,7 +84,7 @@ npm run lint      # Run ESLint
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
 | `forwardSensorLogs` | Forward sensor logs to main logger | false |
-| `forwardSensorLogsLevel` | Log level for forwarded sensor logs | info |
+| `forwardSensorLogsLevel` | Log level for forwarded sensor logs (error, warn, info, debug, critical) | info |
 
 ## Prometheus Metrics Endpoint
 
@@ -103,6 +107,8 @@ The service handles SIGTERM and SIGINT signals gracefully:
 2. Closes MQTT connection with configurable timeout
 3. Shuts down Prometheus server
 4. Logs uptime statistics
+
+Shutdown is idempotent: a repeated signal during an in-flight close is ignored (the MQTT close promise and HTTP server close are cached), and fatal errors (`uncaughtException`/`unhandledRejection`) exit with code 1 so orchestrators can distinguish a crash from a clean stop.
 
 ## Building & Deployment
 
@@ -139,6 +145,11 @@ src/
 │   └── SystemFunctions.ts # Utilities
 └── schemas/
     └── config.ts          # Zod config validation
+
+tests/
+└── __tests__/             # Jest suites (ts-jest, CommonJS via tsconfig.jest.json)
+    ├── dodsonlabs/        # MqttNetworking, PrometheusWriter, Logger, SystemFunctions
+    └── schemas/           # config schema validation
 ```
 
 ## Dependencies

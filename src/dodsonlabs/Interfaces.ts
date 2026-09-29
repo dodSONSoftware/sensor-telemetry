@@ -3,9 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { z } from "zod";
-import type { configSchema } from "../schemas/config";
-
 // **** Common
 
 export interface SystemInfo {
@@ -139,16 +136,6 @@ export interface CriticalLogMetadata extends LogMetadata {
 }
 
 /**
- * Serialized error representation.
- */
-export interface SerializedError {
-  name: string;
-  message: string;
-  stack?: string;
-  code?: string;
-}
-
-/**
  * Logger interface for structured logging.
  */
 export interface ILogger {
@@ -234,9 +221,4 @@ export interface ILogger {
 export interface IMqttNetworking {
   is_connected(): boolean;
   close(): Promise<void>;
-  /**
-   * Set callback to invoke when config is updated via /write-config.
-   * @param callback - Function to call with new configuration
-   */
-  setConfigChangeCallback(callback: (newConfig: z.infer<typeof configSchema>) => void): void;
 }

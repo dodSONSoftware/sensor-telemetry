@@ -1,6 +1,6 @@
 {
   "name": "sensor-telemetry",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "MQTT-to-Prometheus telemetry bridge for IoT sensors",
   "author": "dodson labs",
   "license": "MIT",
@@ -10,7 +10,10 @@
     "start": "node ./dist/index.js",
     "dev": "ts-node src/index.ts",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "mqtt": "^5.14.1",
@@ -20,12 +23,15 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/mqtt": "^2.5.0",
     "@types/node": "^22.0.0",
     "@types/js-yaml": "^4.0.9",
     "@typescript-eslint/eslint-plugin": "^8.60.1",
     "@typescript-eslint/parser": "^8.60.1",
     "eslint": "^9.39.4",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.11",
     "ts-node": "^10.9.1",
     "typescript": "^5.1.6"
   },
