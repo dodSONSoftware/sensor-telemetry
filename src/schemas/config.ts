@@ -7,7 +7,11 @@ import { z } from "zod";
 
 /**
  * Zod schema for config.yml - telemetry-only version.
- * All keys are required and must match their expected types.
+ * All non-optional keys are required and must match their expected types.
+ * The object is strict: unknown keys (e.g. a misspelled optional key like
+ * `forwardSensorLog`) fail validation instead of being silently stripped,
+ * which would otherwise boot the service on a default the operator did not
+ * ask for.
  */
 export const configSchema = z.object({
     logLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
@@ -51,7 +55,7 @@ export const configSchema = z.object({
     forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
         error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",
     }).optional(),
-});
+}).strict();
 
 function isValidPort(port: string): boolean {
     if (!/^\d{1,5}$/.test(port)) {

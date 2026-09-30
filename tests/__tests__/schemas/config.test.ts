@@ -82,6 +82,27 @@ describe("validateConfig", () => {
       validateConfig({ ...validConfig, forwardSensorLogsLevel: "loud" })
     ).toThrow(/forwardSensorLogsLevel/);
   });
+
+  it("rejects unknown configuration keys", () => {
+    // Previously Zod silently stripped unrecognized keys, so a typo like
+    // `forwardSensorLog` booted the service on the default (forwarding on)
+    // with no validation failure.
+    expect(() =>
+      validateConfig({
+        ...validConfig,
+        forwardSensorLog: true,
+      })
+    ).toThrow(/forwardSensorLog|unrecognized/i);
+  });
+
+  it("does not silently ignore misspelled optional keys", () => {
+    expect(() =>
+      validateConfig({
+        ...validConfig,
+        forwardSensorLogsLevelTypo: "debug",
+      })
+    ).toThrow();
+  });
 });
 
 describe("mqttBrokerIpAddress format validation (regression P3)", () => {

@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Steel Hawk — firmware 2.8.0.
+**Release:** Steel Hawk — firmware 2.8.1.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -136,6 +136,10 @@ forwardSensorLogsLevel: debug
 | `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; values beyond the cap map to a fallback label | 1024 |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
+
+### Strict Configuration Validation
+
+The configuration schema is strict: unknown keys fail validation with an `Unrecognized key` error instead of being silently discarded. This applies at startup and to `/write-config` and `/reload-config` alike. A misspelled optional key (e.g. `forwardSensorLog` for `forwardSensorLogs`) therefore fails loudly rather than booting the service on the default the operator did not ask for. If an obsolete key remains in a deployed `config.yml` after an upgrade, remove it before starting the service.
 
 ## Environment Variables
 
