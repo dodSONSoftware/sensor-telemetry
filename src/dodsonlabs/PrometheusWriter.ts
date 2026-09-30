@@ -152,8 +152,14 @@ export class PrometheusWriter {
         // --------------------------------
         // setup http server
         const server = http.createServer(async (req, res) => {
+            // Route on the path only: req.url includes any query string
+            // (e.g. /health?probe=20260929), and exact-string matching
+            // against it 404s well-formed requests. The full req.url is
+            // still logged where it matters for diagnostics.
+            const path = (req.url ?? "/").split("?")[0];
+
             // Suppress logging for successful /metrics and /health requests
-            if (req.url !== "/metrics" && req.url !== "/health") {
+            if (path !== "/metrics" && path !== "/health") {
                 this.logger.write_debug(
                     "prometheus/httpRequest",
                     "HTTP request received",
@@ -166,10 +172,10 @@ export class PrometheusWriter {
                 );
             }
 
-            if (req.url === "/metrics") {
+            if (path === "/metrics") {
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
-            } else if (req.url === "/health") {
+            } else if (path === "/health") {
                 const mqttStatus = this.mqttNetworking?.is_connected() ? "connected" : "disconnected";
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
@@ -178,13 +184,13 @@ export class PrometheusWriter {
                     mqtt: mqttStatus,
                     timestamp: new Date().toISOString()
                 }));
-            } else if (req.url === "/about") {
+            } else if (path === "/about") {
                 this.handleAbout(req, res);
-            } else if (req.url === "/endpoints") {
+            } else if (path === "/endpoints") {
                 this.handleEndpoints(req, res);
-            } else if (req.url === "/read-config") {
+            } else if (path === "/read-config") {
                 await this.handleReadConfig(req, res);
-            } else if (req.url === "/write-config") {
+            } else if (path === "/write-config") {
                 if (req.method !== "POST") {
                     this.sendJson(res, 405, { success: false, message: "method not allowed; use POST" });
                     return;
@@ -193,7 +199,7 @@ export class PrometheusWriter {
                     return;
                 }
                 await this.handleWriteConfig(req, res);
-            } else if (req.url === "/reload-config") {
+            } else if (path === "/reload-config") {
                 if (!this.verifyConfigToken(req, res)) {
                     return;
                 }
@@ -489,28 +495,7 @@ export class PrometheusWriter {
                 }
 
                 // Apply log level change if it differs
-                if (oldLogLevel !== newLogLevel && this.logger.setLogLevel) {
-                    this.logger.write_info(
-                        "prometheus/logLevelChanging",
-                        `Log level changing from "${oldLogLevel}" to "${newLogLevel}"`,
-                        {
-                            event: "log_level_change_initiated",
-                            logType: "audit",
-                            previousLevel: oldLogLevel,
-                            newLevel: newLogLevel,
-                        }
-                    );
-                    this.logger.setLogLevel(newLogLevel);
-                    this.logger.write_info(
-                        "prometheus/logLevelChanged",
-                        `New log level is now: ${this.logger.global_log_level_string()}`,
-                        {
-                            event: "log_level_changed",
-                            logType: "audit",
-                            newLevel: this.logger.global_log_level_string(),
-                        }
-                    );
-                }
+                this.applyLogLevelChange(oldLogLevel, newLogLevel);
 
                 // Notify callback of config change
                 if (this.configChangeCallback) {
@@ -536,7 +521,12 @@ export class PrometheusWriter {
             const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
+                const oldLogLevel = this.config.logLevel;
                 this.config = { ...validatedConfig };
+
+                // Apply log level change if the on-disk level differs from
+                // the running one, matching /write-config's behavior.
+                this.applyLogLevelChange(oldLogLevel, validatedConfig.logLevel);
 
                 // Notify callback of config change
                 if (this.configChangeCallback) {
@@ -563,6 +553,37 @@ export class PrometheusWriter {
     }
 
     // ******** private methods
+
+    /**
+     * Apply a log-level change to the running logger, auditing the
+     * transition. Shared by /write-config and /reload-config so both paths
+     * honor logLevel's documented runtime effectiveness.
+     */
+    private applyLogLevelChange(oldLogLevel: string, newLogLevel: string): void {
+        if (oldLogLevel === newLogLevel || !this.logger.setLogLevel) {
+            return;
+        }
+        this.logger.write_info(
+            "prometheus/logLevelChanging",
+            `Log level changing from "${oldLogLevel}" to "${newLogLevel}"`,
+            {
+                event: "log_level_change_initiated",
+                logType: "audit",
+                previousLevel: oldLogLevel,
+                newLevel: newLogLevel,
+            }
+        );
+        this.logger.setLogLevel(newLogLevel);
+        this.logger.write_info(
+            "prometheus/logLevelChanged",
+            `New log level is now: ${this.logger.global_log_level_string()}`,
+            {
+                event: "log_level_changed",
+                logType: "audit",
+                newLevel: this.logger.global_log_level_string(),
+            }
+        );
+    }
 
     /**
      * Sanitize source name for Prometheus gauge labels.

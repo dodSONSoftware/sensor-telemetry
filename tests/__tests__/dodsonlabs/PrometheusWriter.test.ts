@@ -281,6 +281,100 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("/reload-config", () => {
+    it("applies logLevel changes found on disk to the running logger", async () => {
+      // Drive the running level from "info" (the constructor config and all
+      // prior tests use it) to "warn" via the write path, so the reload
+      // below has a definite change to apply.
+      logger.setLogLevel.mockClear();
+      const writeRes = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        // Connection: close keeps undici's keep-alive pool from holding a
+        // socket open, which would block server.close() in afterAll.
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
+      });
+      const writeResponse = await writeRes.json();
+      expect(writeRes.status).toBe(200);
+      expect(writeResponse.success).toBe(true);
+      expect(logger.setLogLevel).toHaveBeenCalledWith("warn");
+
+      // Operator edits logLevel on disk (the Docker-mount scenario) and asks
+      // the service to reload it: the disk level must reach the running
+      // logger, not just the in-memory config.
+      logger.setLogLevel.mockClear();
+      fs.writeFileSync(
+        configSource,
+        yaml.dump({ ...baseConfig, apiPort: port, logLevel: "debug" })
+      );
+
+      const reloadRes = await fetch(`http://127.0.0.1:${port}/reload-config`, {
+        headers: { Connection: "close" },
+      });
+      const reloadResponse = await reloadRes.json();
+
+      expect(reloadRes.status).toBe(200);
+      expect(reloadResponse.success).toBe(true);
+      expect(logger.setLogLevel).toHaveBeenCalledWith("debug");
+    });
+
+    it("does not re-apply the log level when the on-disk value is unchanged", async () => {
+      logger.setLogLevel.mockClear();
+
+      const reloadRes = await fetch(`http://127.0.0.1:${port}/reload-config`, {
+        headers: { Connection: "close" },
+      });
+      expect(reloadRes.status).toBe(200);
+
+      // The previous test left disk and the running level both at "debug",
+      // so a no-op reload must not touch the logger.
+      expect(logger.setLogLevel).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("query-string routing", () => {
+    // req.url includes the query string, so matching routes against it
+    // 404s well-formed requests like /health?probe=20260929 and emits a
+    // route_not_found warn per hit.
+    it("routes /health?x=1 to the health handler instead of 404", async () => {
+      logger.write_warn.mockClear();
+
+      const res = await fetch(`http://127.0.0.1:${port}/health?x=1`, {
+        // Connection: close keeps undici's keep-alive pool from holding a
+        // socket open, which would block server.close() in afterAll.
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status: string };
+      expect(body.status).toBe("healthy");
+
+      // A query string on a valid route is not a routing failure.
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "route_not_found"
+        )
+      ).toBe(false);
+    });
+
+    it("routes /metrics with a query string to the metrics handler", async () => {
+      logger.write_warn.mockClear();
+
+      const res = await fetch(`http://127.0.0.1:${port}/metrics?probe=20260929`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("# HELP");
+
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "route_not_found"
+        )
+      ).toBe(false);
+    });
+  });
+
   describe("publish_air message gating", () => {
     it("does not publish humidity or altitude when temperature_c is missing", async () => {
       const source = "gate-air-invalid";
