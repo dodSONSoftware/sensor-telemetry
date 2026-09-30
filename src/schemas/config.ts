@@ -16,7 +16,8 @@ export const configSchema = z.object({
     apiPort: z.number({
         error: "apiPort must be a number",
     }).int("apiPort must be an integer")
-        .positive("apiPort must be greater than 0"),
+        .positive("apiPort must be greater than 0")
+        .max(65535, "apiPort must be at most 65535"),
     mqttBrokerIpAddress: z.string({
         error: "mqttBrokerIpAddress must be a string",
     }).min(1, "mqttBrokerIpAddress must not be empty"),

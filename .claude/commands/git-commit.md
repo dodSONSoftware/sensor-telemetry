@@ -81,19 +81,20 @@ node -p "require('$PACKAGE_JSON').version"
 Format the commit message:
 
 ```
-[X.Y.Z] <type>: <overview>
+[X.Y.Z, <Material Animal>] <type>: <overview>
 
 - <change 1>
 - <change 2>
 ```
 
 Rules:
-- Version in square brackets on first line (e.g., `[4.5.0]`)
+- Version and release codename in square brackets on first line, comma-separated (e.g., `[4.5.0, Brass Falcon]`); derive the codename from the new version using the release codename scheme at the end of this file
 - Conventional commit type (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `perf:`, `ci:`, `build:`, `style:`)
 - Overview is brief summary
 - One-line descriptions per file/group of changes
 - If breaking change, add `BREAKING CHANGE:` footer with migration notes
 - Always add `Authored-By: dodson Software and AI` at the end of the commit message
+- Do NOT include a `Co-Authored-By: Claude Code <noreply@anthropic.com>` line (or any other `Co-Authored-By` tagline)
 
 ### 5. STAGE ALL CHANGES
 
@@ -105,7 +106,7 @@ git add .
 
 ```bash
 git commit -m "$(cat <<'EOF'
-[X.Y.Z] <type>: <overview>
+[X.Y.Z, <Material Animal>] <type>: <overview>
 
 - <change 1>
 - <change 2>
@@ -143,7 +144,7 @@ After successful commit, return:
 ## EXAMPLE OUTPUT
 
 ```
-[4.5.0] feat: add user authentication
+[4.5.0, Brass Falcon] feat: add user authentication
 
 - src/middleware/auth.ts: implement JWT-based auth middleware
 - src/controllers/userController.ts: add login/register endpoints
@@ -158,7 +159,7 @@ Authored-By: dodson Software and AI
 
 ## RELEASE CODENAME SCHEME
 
-The release codename stored in `FIRMWARE_NAME` in `version.py` is derived from `FIRMWARE_VERSION` (`MAJOR.MINOR.PATCH`). The mapping is deterministic:
+The release codename is derived from the version (`MAJOR.MINOR.PATCH`). It appears in the commit subject (inside the square brackets on the first line) and in the README release line. The mapping is deterministic:
 
 - **MAJOR** selects the **Animal**
 - **MINOR** selects the **Material**

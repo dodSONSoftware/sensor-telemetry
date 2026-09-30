@@ -47,6 +47,19 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ ...validConfig, apiPort: 3.5 })).toThrow(/apiPort/);
   });
 
+  it("rejects an apiPort above the maximum TCP port", () => {
+    expect(() => validateConfig({ ...validConfig, apiPort: 65536 })).toThrow(
+      /apiPort/
+    );
+    expect(() => validateConfig({ ...validConfig, apiPort: 999999 })).toThrow(
+      /apiPort/
+    );
+  });
+
+  it("accepts apiPort at the maximum TCP port", () => {
+    expect(() => validateConfig({ ...validConfig, apiPort: 65535 })).not.toThrow();
+  });
+
   it("rejects an empty broker address or telemetry topic", () => {
     expect(() =>
       validateConfig({ ...validConfig, mqttBrokerIpAddress: "" })
