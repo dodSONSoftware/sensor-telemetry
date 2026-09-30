@@ -8,6 +8,7 @@ import os from "os";
 import path from "path";
 import {
   CONFIG_FILE_CANDIDATES,
+  get_numeric_field,
   read_file_yaml_first,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
@@ -212,5 +213,71 @@ describe("write_file_yaml", () => {
     expect(result).toBe(false);
     expect(fs.readFileSync(file, "utf8")).toBe(original);
     expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+});
+
+describe("get_numeric_field", () => {
+  it("returns finite numbers as-is", () => {
+    expect(get_numeric_field({ temperature_c: 21.5 }, "temperature_c")).toBe(
+      21.5
+    );
+    expect(get_numeric_field({ raw: 0 }, "raw")).toBe(0);
+  });
+
+  it("parses numeric strings (V1/V2 compatibility)", () => {
+    expect(get_numeric_field({ temperature_c: "21.5" }, "temperature_c")).toBe(
+      21.5
+    );
+    expect(get_numeric_field({ raw: " 4096 " }, "raw")).toBe(4096);
+  });
+
+  it("treats empty/whitespace strings as absent and tries the next alias", () => {
+    expect(
+      get_numeric_field({ a: "", b: "7" }, "a", "b")
+    ).toBe(7);
+    expect(
+      get_numeric_field({ a: "   " }, "a")
+    ).toBeUndefined();
+  });
+
+  it("rejects non-number/non-string values that Number() would coerce", () => {
+    // Number(false) === 0, Number(true) === 1, Number([]) === 0,
+    // Number([7]) === 7 — all of these must be absent, not coerced.
+    expect(
+      get_numeric_field({ relative_moisture_percent: false }, "relative_moisture_percent")
+    ).toBeUndefined();
+    expect(get_numeric_field({ relative_moisture_percent: true }, "relative_moisture_percent")).toBeUndefined();
+    expect(
+      get_numeric_field({ relative_moisture_percent: [] }, "relative_moisture_percent")
+    ).toBeUndefined();
+    expect(
+      get_numeric_field({ relative_moisture_percent: [7] }, "relative_moisture_percent")
+    ).toBeUndefined();
+    expect(
+      get_numeric_field({ relative_moisture_percent: { v: 7 } }, "relative_moisture_percent")
+    ).toBeUndefined();
+  });
+
+  it("treats non-finite numbers as absent and tries the next alias", () => {
+    expect(get_numeric_field({ a: NaN, b: 3 }, "a", "b")).toBe(3);
+    expect(get_numeric_field({ a: Infinity, b: 3 }, "a", "b")).toBe(3);
+    expect(get_numeric_field({ a: "abc" }, "a")).toBeUndefined();
+  });
+
+  it("treats null/undefined as absent and tries the next alias", () => {
+    expect(get_numeric_field({ a: null, b: 4 }, "a", "b")).toBe(4);
+    expect(get_numeric_field({ a: undefined, b: 4 }, "a", "b")).toBe(4);
+    expect(get_numeric_field({ a: 5 }, "b")).toBeUndefined();
+  });
+
+  it("skips a non-numeric value and falls through to a later alias", () => {
+    expect(
+      get_numeric_field({ a: false, b: "12" }, "a", "b")
+    ).toBe(12);
+  });
+
+  it("truncates fields named time/Time/millis/Millis to integers", () => {
+    expect(get_numeric_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234);
+    expect(get_numeric_field({ durationMillis: 87.4 }, "durationMillis")).toBe(87);
   });
 });

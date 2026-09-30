@@ -255,11 +255,17 @@ export function randomInt(min: number, max: number): number {
  * Get a numeric value from an object using the first field name that holds
  * a usable value (pass snake_case/camelCase aliases in either order).
  *
+ * - Only numbers and numeric strings are accepted. MQTT payloads are
+ *   untrusted: Number() on anything else would let false/true become 0/1,
+ *   an empty array become 0, and a single-element array masquerade as its
+ *   element — publishing a plausible but wrong reading instead of dropping
+ *   malformed telemetry. Non-number/string values are treated as absent
+ *   and the next alias is tried.
  * - Empty/whitespace strings are the protocol's "unset" marker (V1/V2 use
  *   them for missing values); Number("") would coerce them to 0 and publish
  *   a false zero reading, so they are treated as absent and the next alias
  *   is tried.
- * - Values that do not coerce to a finite number are likewise absent.
+ * - Values that do not parse to a finite number are likewise absent.
  * - Fields whose name contains time/Time/millis/Millis (e.g. uptime_ms) are
  *   truncated to integer milliseconds.
  *
@@ -271,9 +277,16 @@ export function get_numeric_field(
 ): number | undefined {
   for (const fieldName of fieldNames) {
     const value = obj[fieldName];
-    if (value === undefined || value === null) continue;
-    if (typeof value === "string" && value.trim() === "") continue;
-    const numValue = Number(value);
+    let numValue: number;
+    if (typeof value === "number") {
+      numValue = value;
+    } else if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed === "") continue;
+      numValue = Number(trimmed);
+    } else {
+      continue;
+    }
     if (!Number.isFinite(numValue)) continue;
     if (
       fieldName.includes("time") ||
