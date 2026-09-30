@@ -9,9 +9,18 @@ import os from "os";
 import path from "path";
 import * as yaml from "js-yaml";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
+import { write_file_yaml } from "../../../src/dodsonlabs/SystemFunctions";
 import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
+
+// Fail the disk write on demand (chmod-based failures are unreliable when
+// the suite runs as root). Default behavior is the real write, and
+// everything else in SystemFunctions stays real.
+jest.mock("../../../src/dodsonlabs/SystemFunctions", () => {
+  const actual = jest.requireActual("../../../src/dodsonlabs/SystemFunctions");
+  return { ...actual, write_file_yaml: jest.fn(actual.write_file_yaml) };
+});
 
 interface MockLogger {
   global_log_level: jest.Mock;
@@ -278,6 +287,52 @@ describe("PrometheusWriter", () => {
       const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
       expect(onDisk.mqttTopicTelemetry).toBe(baseConfig.mqttTopicTelemetry);
       expect(onDisk.mqttTopicLog).toBe("iot/v3/log");
+    });
+
+    it("returns 500 and leaves the in-memory config unchanged when the disk write fails", async () => {
+      // A failed persistence must be a no-op: /read-config and /reload-config
+      // both treat the disk as authoritative, so committing the candidate to
+      // this.config before the write would leave the process split-brain
+      // (new memory, stale disk) even though the response reports 500.
+      (write_file_yaml as unknown as jest.Mock).mockReturnValueOnce(false);
+
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        // Connection: close keeps undici's keep-alive pool from holding a
+        // socket open, which would block server.close() in afterAll.
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
+      });
+      const response = await res.json();
+
+      expect(res.status).toBe(500);
+      expect(response.success).toBe(false);
+
+      // Disk is untouched.
+      const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
+      expect(onDisk.logLevel).toBe("info");
+
+      // The in-memory commit is observable through the next write: if the
+      // failed request had already set this.config.logLevel to "warn", the
+      // retry would see no level change and skip setLogLevel entirely.
+      logger.setLogLevel.mockClear();
+      const retry = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
+      });
+      const retryResponse = await retry.json();
+      expect(retry.status).toBe(200);
+      expect(retryResponse.success).toBe(true);
+      expect(logger.setLogLevel).toHaveBeenCalledWith("warn");
+
+      // Restore the "info" baseline the /reload-config tests depend on.
+      const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
+      });
+      expect(restore.status).toBe(200);
     });
   });
 

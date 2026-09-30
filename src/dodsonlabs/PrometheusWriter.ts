@@ -530,18 +530,23 @@ export class PrometheusWriter {
                 const oldLogLevel = this.config.logLevel;
                 const newLogLevel = validatedConfig.logLevel;
 
-                // Update internal config
-                this.config = { ...validatedConfig };
-
-                // Write to disk
-                const writeSuccess = write_file_yaml(this.configSource, this.config, this.logger);
+                // Persist before committing: the on-disk file is the
+                // authoritative config (/read-config and /reload-config both
+                // read it), so a failed write must leave every in-memory
+                // copy untouched. Committing this.config first would split
+                // the process (new memory, stale disk) even though the
+                // response reports 500.
+                const writeSuccess = write_file_yaml(this.configSource, validatedConfig, this.logger);
                 if (!writeSuccess) {
                     this.sendJson(res, 500, {
                         success: false,
-                        message: "Configuration updated in memory but failed to write to disk"
+                        message: "Failed to persist configuration; no changes were applied"
                     });
                     return;
                 }
+
+                // Disk write succeeded — commit the runtime state.
+                this.config = { ...validatedConfig };
 
                 // Apply log level change if it differs
                 this.applyLogLevelChange(oldLogLevel, newLogLevel);
