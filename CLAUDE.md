@@ -78,7 +78,7 @@ npm run test:coverage # Run tests with coverage report
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug, critical — critical filters at winston error level) | info |
 | `apiPort` | Port for Prometheus metrics endpoint | required |
-| `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
+| `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, each with an optional `:port` (1-65535); no scheme (`mqtt://`) — the value is appended to `mqtt://` in `MqttNetworking`. Validated at config load because an unparseable value (e.g. out-of-range port) would otherwise throw synchronously from `mqtt.connect` inside the `MqttNetworking` constructor, which runs before index.ts's structured startup try | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages | - |
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |

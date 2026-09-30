@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Nickel Hawk — firmware 2.7.3.
+**Release:** Nickel Hawk — firmware 2.7.4.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -127,7 +127,7 @@ forwardSensorLogsLevel: debug
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug) | info |
 | `apiPort` | Port for Prometheus metrics endpoint | required |
-| `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
+| `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, with an optional `:port` (1-65535); no scheme — validated at config load so an unparseable value fails as a clean config error instead of a synchronous throw from `mqtt.connect` | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |

@@ -584,6 +584,12 @@ export class MqttNetworking implements IMqttNetworking {
      * Supports both snake_case and camelCase for backward compatibility.
      */
     private getField(obj: any, ...fieldNames: string[]): any {
+        // A missing object (e.g. optional payload.system_info) is absent data,
+        // not an error — return undefined so callers' fallbacks apply instead
+        // of a TypeError dropping the whole message.
+        if (obj === undefined || obj === null) {
+            return undefined;
+        }
         for (const fieldName of fieldNames) {
             const value = obj[fieldName];
             if (value !== undefined && value !== null) {
@@ -599,6 +605,9 @@ export class MqttNetworking implements IMqttNetworking {
      * null) is treated as absent so malformed values never become 0/1 gauges.
      */
     private getBoolField(obj: any, ...fieldNames: string[]): boolean | undefined {
+        if (obj === undefined || obj === null) {
+            return undefined;
+        }
         for (const fieldName of fieldNames) {
             const value = obj[fieldName];
             if (typeof value === "boolean") {

@@ -5,14 +5,14 @@
 
 import { validateConfig } from "../../../src/schemas/config";
 
-describe("validateConfig", () => {
-  const validConfig = {
-    logLevel: "info",
-    apiPort: 3301,
-    mqttBrokerIpAddress: "10.0.0.1",
-    mqttTopicTelemetry: "iot/v3/telemetry",
-  };
+const validConfig = {
+  logLevel: "info",
+  apiPort: 3301,
+  mqttBrokerIpAddress: "10.0.0.1",
+  mqttTopicTelemetry: "iot/v3/telemetry",
+};
 
+describe("validateConfig", () => {
   it("accepts a minimal valid config", () => {
     expect(validateConfig(validConfig)).toEqual(validConfig);
   });
@@ -81,5 +81,45 @@ describe("validateConfig", () => {
     expect(() =>
       validateConfig({ ...validConfig, forwardSensorLogsLevel: "loud" })
     ).toThrow(/forwardSensorLogsLevel/);
+  });
+});
+
+describe("mqttBrokerIpAddress format validation (regression P3)", () => {
+  // The MqttNetworking constructor (and thus mqtt.connect) runs before
+  // index.ts's structured startup try. A value that makes mqtt.connect
+  // throw synchronously — an out-of-range port — escaped as an unhandled
+  // rejection instead of a clean config error. The schema now validates
+  // exactly the forms the app supports (host, IP, bracketed IPv6, each
+  // optionally with :port), so those failures surface at config load.
+  const withBroker = (mqttBrokerIpAddress: string) =>
+    validateConfig({ ...validConfig, mqttBrokerIpAddress });
+
+  it.each([
+    ["10.0.0.1", "bare IP"],
+    ["broker", "bare hostname"],
+    ["a_broker.local", "hostname with underscore and dot"],
+    ["10.0.0.1:1883", "IP with port"],
+    ["broker:8883", "hostname with port"],
+    ["10.0.0.1:1", "port at the lower bound"],
+    ["10.0.0.1:65535", "port at the upper bound"],
+    ["[::1]", "bracketed IPv6 literal"],
+    ["[::1]:1883", "bracketed IPv6 literal with port"],
+  ])("accepts %s (%s)", (address, _label) => {
+    expect(() => withBroker(address)).not.toThrow();
+  });
+
+  it.each([
+    ["10.0.0.1:70000", "out-of-range port"],
+    ["10.0.0.1:65536", "port one above the maximum"],
+    ["10.0.0.1:0", "port zero"],
+    ["host:abc", "non-numeric port"],
+    ["host:", "empty port"],
+    ["host:1883:1884", "extra colon"],
+    ["mqtt://10.0.0.1:1883", "scheme prefix"],
+    ["::1", "unbracketed IPv6 literal"],
+    ["[::1", "unbalanced bracket"],
+    ["host with space", "whitespace in hostname"],
+  ])("rejects %s (%s)", (address, _label) => {
+    expect(() => withBroker(address)).toThrow(/mqttBrokerIpAddress/);
   });
 });

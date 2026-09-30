@@ -467,6 +467,97 @@ describe("non-string source coercion (regression P3-4)", () => {
   });
 });
 
+describe("missing system_info (regression P2-1)", () => {
+  // V3 per-device telemetry does not carry payload.system_info, and V2
+  // messages may omit it too. getFirmwareVersion passed that undefined
+  // system_info to getField, which indexed obj[fieldName] without guarding
+  // the object — a legitimate reading threw a TypeError before the
+  // publisher ran and was dropped. The firmware extraction must fall back
+  // to "unknown" (or to system_info.firmware_version when present) instead.
+  const airPayload = {
+    temperature_c: 25,
+    humidity_percent: 45,
+    pressure_pa: 100000,
+  };
+
+  it("publishes V3 telemetry with no system_info, falling back to 'unknown' firmware", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      payload: airPayload,
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      { air: airPayload },
+      "v3-src",
+      "unknown"
+    );
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_handling_error"
+      )
+    ).toBe(false);
+  });
+
+  it("publishes V3 telemetry using system_info.firmware_version as the fallback", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      payload: { ...airPayload, system_info: { firmware_version: "3.1.0" } },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      expect.anything(),
+      "v3-src",
+      "3.1.0"
+    );
+  });
+
+  it("publishes V2 section telemetry using system_info.firmware_version as the fallback", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      source: "v2-src",
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+        system_info: { firmware_version: "2.0.1" },
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      expect.anything(),
+      "v2-src",
+      "2.0.1"
+    );
+  });
+
+  it("publishes V2 section telemetry with no firmware version as 'unknown'", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      source: "v2-src",
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      expect.anything(),
+      "v2-src",
+      "unknown"
+    );
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_handling_error"
+      )
+    ).toBe(false);
+  });
+});
+
 describe("subscription SUBACK handling (regression P2-3)", () => {
   // Fire the constructor's "connect" handler so on_connect() issues the
   // subscribe() calls, then capture the (topic, callback) pairs the fake
