@@ -83,7 +83,7 @@ npm run test:coverage # Run tests with coverage report
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
-| `forwardSensorLogs` | Forward sensor logs to main logger | false |
+| `forwardSensorLogs` | Forward sensor logs to main logger | true |
 | `forwardSensorLogsLevel` | Log level for forwarded sensor logs (error, warn, info, debug, critical) | info |
 
 ## Prometheus Metrics Endpoint
