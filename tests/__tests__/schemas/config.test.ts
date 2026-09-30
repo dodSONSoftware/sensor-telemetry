@@ -144,3 +144,33 @@ describe("mqttBrokerIpAddress format validation (regression P3)", () => {
     expect(() => withBroker(address)).toThrow(/mqttBrokerIpAddress/);
   });
 });
+
+describe("sensorSourceValidCharsRegex constructibility (regression P2-1)", () => {
+  // The value is escaped into a negated character class in the
+  // PrometheusWriter constructor, which runs before index.ts's structured
+  // startup try. A value that passed the old string-only check but made
+  // new RegExp() throw (e.g. "z-a" — an out-of-order range) could be
+  // persisted via /write-config, which reported success, then crash-looped
+  // every restart. The schema now validates constructibility with the same
+  // buildSourceValidCharsRegex the writer uses.
+  const withChars = (sensorSourceValidCharsRegex: string) =>
+    validateConfig({ ...validConfig, sensorSourceValidCharsRegex });
+
+  it.each([
+    ["a-zA-Z0-9._-", "default whitelist with ranges"],
+    ["abc123_-", "letters, digits, trailing hyphen"],
+    ["a-z", "single range"],
+    ["Z-a", "ascending range"],
+    ["-", "lone hyphen (literal, not a range)"],
+  ])("accepts %s (%s)", (chars, _label) => {
+    expect(() => withChars(chars)).not.toThrow();
+  });
+
+  it.each([
+    ["z-a", "out-of-order range"],
+    ["z-A", "descending range across letter cases"],
+    ["a--b", "hyphen forming an out-of-order range with its neighbor"],
+  ])("rejects %s (%s)", (chars, _label) => {
+    expect(() => withChars(chars)).toThrow(/sensorSourceValidCharsRegex/);
+  });
+});

@@ -288,6 +288,43 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
     });
   });
 
+  describe("/write-config regex constructibility (regression P2-1)", () => {
+    // "z-a" passes a plain string check but cannot build a character class
+    // (out-of-order range). Before the constructibility refine it reached
+    // validate → persist → commit → HTTP 200, then threw in the
+    // PrometheusWriter constructor on the next restart — a crash loop with
+    // restart: unless-stopped.
+    it("returns 400 and leaves the on-disk config unchanged for a non-constructible value", async () => {
+      configChangeCallback.mockClear();
+      const before = fs.readFileSync(configSource, "utf8");
+
+      const { status, body } = await post(
+        "/write-config",
+        { ...VALID_CONFIG, apiPort: port, sensorSourceValidCharsRegex: "z-a" },
+        { "x-config-token": TOKEN }
+      );
+
+      expect(status).toBe(400);
+      expect(body.success).toBe(false);
+      expect(String(body.message)).toContain("sensorSourceValidCharsRegex");
+      // validateConfig threw before write_file_yaml, so the persisted file
+      // is byte-for-byte unchanged (write_file_yaml was never called).
+      expect(fs.readFileSync(configSource, "utf8")).toBe(before);
+      expect(configChangeCallback).not.toHaveBeenCalled();
+    });
+
+    it("still accepts a constructible value", async () => {
+      const { status, body } = await post(
+        "/write-config",
+        { ...VALID_CONFIG, apiPort: port, sensorSourceValidCharsRegex: "a-zA-Z0-9._-" },
+        { "x-config-token": TOKEN }
+      );
+
+      expect(status).toBe(200);
+      expect(body).toEqual({ success: true, message: "Configuration updated successfully" });
+    });
+  });
+
   describe("/reload-config failure paths (token present)", () => {
     // All three use the real file system and real js-yaml: no module mocks,
     // each exercises a distinct branch of handleReloadConfig.

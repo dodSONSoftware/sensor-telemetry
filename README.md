@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Steel Hawk — firmware 2.8.1.
+**Release:** Steel Hawk — firmware 2.8.2.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -132,7 +132,7 @@ forwardSensorLogsLevel: debug
 | `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
-| `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
+| `sensorSourceValidCharsRegex` | Valid characters for source names — the value is escaped into a negated character class, so it must form a valid one: `z-a` (an out-of-order range) is rejected at config load so `/write-config` cannot persist a value that crash-loops the next restart | a-zA-Z0-9._- |
 | `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; values beyond the cap map to a fallback label | 1024 |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |

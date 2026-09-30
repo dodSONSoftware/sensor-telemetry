@@ -249,6 +249,26 @@ export function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * Build the regex that strips invalid characters from sensor source /
+ * firmware label values: every character of `validChars` is escaped and
+ * placed in a negated character class (`[^...]+`, global flag), so the
+ * configured string is interpreted as a literal whitelist — except `-`,
+ * which is deliberately NOT escaped because it is the range separator the
+ * whitelist syntax relies on (`a-zA-Z0-9._-` must keep its ranges).
+ *
+ * Leaving `-` unescaped means some values produce an invalid character
+ * class — `z-a` is an out-of-order range — and `new RegExp` throws a
+ * SyntaxError. The config schema validates constructibility with this same
+ * function, so a value that reaches PrometheusWriter's constructor cannot
+ * throw at startup; this function is the single source of truth for the
+ * construction rule so the two can never drift apart.
+ */
+export function buildSourceValidCharsRegex(validChars: string): RegExp {
+  const escaped = validChars.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  return new RegExp(`[^${escaped}]+`, "g");
+}
+
 // **** payload field extraction
 
 /**

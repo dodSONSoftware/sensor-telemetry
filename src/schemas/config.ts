@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { buildSourceValidCharsRegex } from "../dodsonlabs/SystemFunctions";
 
 /**
  * Zod schema for config.yml - telemetry-only version.
@@ -45,7 +46,26 @@ export const configSchema = z.object({
         .optional(),
     sensorSourceValidCharsRegex: z.string({
         error: "sensorSourceValidCharsRegex must be a string",
-    }).min(1, "sensorSourceValidCharsRegex must not be empty").optional(),
+    }).min(1, "sensorSourceValidCharsRegex must not be empty")
+        // The value is escaped into a negated character class at
+        // construction time (buildSourceValidCharsRegex); a value that
+        // cannot build one (e.g. "z-a", an out-of-order range) would throw
+        // in the PrometheusWriter constructor — before index.ts's
+        // structured startup try — so persisting it via /write-config
+        // would crash-loop the next restart. Validate constructibility
+        // here, using the same function the writer uses, so every path
+        // (startup, /write-config, /reload-config) rejects it.
+        .refine(
+            (value) => {
+                try {
+                    buildSourceValidCharsRegex(value);
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
+            "sensorSourceValidCharsRegex must form a valid character class when escaped into [^...] — e.g. 'z-a' is an out-of-order range"
+        ).optional(),
     sensorSourceCardinalityCap: z.number({
         error: "sensorSourceCardinalityCap must be a number",
     }).int("sensorSourceCardinalityCap must be an integer")

@@ -11,7 +11,7 @@ import type { ILogger, IMqttNetworking } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { ensureError, get_numeric_field, read_file_yaml, write_file_yaml } from "./SystemFunctions";
+import { buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, write_file_yaml } from "./SystemFunctions";
 
 // Load version from package.json at module load time
 const pkgRequire = createRequire(__filename);
@@ -154,10 +154,11 @@ export class PrometheusWriter {
         this.prometheus_port = config.apiPort;
         this.MAX_SOURCE_LENGTH = config.sensorSourceMaxLength ?? 30;
         const validChars = config.sensorSourceValidCharsRegex ?? "a-zA-Z0-9._-";
-        // Escape regex metacharacters in the valid chars pattern to prevent syntax errors
-        const escapedValidChars = validChars.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-        // Use global flag to replace ALL invalid characters, not just the first match
-        this.VALID_CHARS = new RegExp(`[^${escapedValidChars}]+`, "g");
+        // Shared with the schema's constructibility check: a value the
+        // schema admitted cannot throw here, and the escape rule lives in
+        // exactly one place (SystemFunctions.buildSourceValidCharsRegex).
+        // Global flag: replaces ALL invalid characters, not just the first.
+        this.VALID_CHARS = buildSourceValidCharsRegex(validChars);
         this.sourceCardinalityCap = config.sensorSourceCardinalityCap ?? 1024;
 
         // save config and source for endpoint access

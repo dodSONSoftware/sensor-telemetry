@@ -7,6 +7,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
+  buildSourceValidCharsRegex,
   CONFIG_FILE_CANDIDATES,
   get_numeric_field,
   get_timestamp_iso,
@@ -293,5 +294,35 @@ describe("get_numeric_field", () => {
   it("truncates fields named time/Time/millis/Millis to integers", () => {
     expect(get_numeric_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234);
     expect(get_numeric_field({ durationMillis: 87.4 }, "durationMillis")).toBe(87);
+  });
+});
+
+describe("buildSourceValidCharsRegex", () => {
+  // Single source of truth for the source-label sanitization regex: the
+  // schema's constructibility check and the PrometheusWriter constructor
+  // both call this, so the escape rule can never drift between them.
+  it("builds a negated character class with the global flag", () => {
+    const re = buildSourceValidCharsRegex("a-zA-Z0-9._-");
+    expect(re.flags).toContain("g");
+    // Whitelisted characters survive, everything else is stripped.
+    expect("sensor_01-A".replace(re, "")).toBe("sensor_01-A");
+    expect("s$en^sor!@#".replace(re, "")).toBe("sensor");
+  });
+
+  it("escapes metacharacters so configured chars match literally", () => {
+    // An unescaped ']' in the whitelist would close the character class
+    // early and leave the rest of the pattern to be interpreted as regex
+    // outside the class — escaping keeps it a literal whitelist member.
+    const re = buildSourceValidCharsRegex("a]b");
+    expect("a]b".replace(re, "")).toBe("a]b");
+    expect("a x] y b z".replace(re, "")).toBe("a]b");
+  });
+
+  it.each([
+    ["z-a", "out-of-order range"],
+    ["z-A", "descending range across letter cases"],
+    ["a--b", "hyphen forming an out-of-order range with its neighbor"],
+  ])("throws for %s (%s) instead of returning a broken regex", (chars, _label) => {
+    expect(() => buildSourceValidCharsRegex(chars)).toThrow(SyntaxError);
   });
 });
