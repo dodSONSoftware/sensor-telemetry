@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Nickel Hawk — firmware 2.7.1.
+**Release:** Nickel Hawk — firmware 2.7.2.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -372,6 +372,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 ## Source Label Sanitization
 
 Source names are sanitized before being used as Prometheus labels:
+0. Non-string values from the payload (e.g. a numeric `source`) are coerced to their string form at extraction, so `123` becomes the usable label `"123"` instead of being dropped
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
 3. Sources that sanitize to an empty string (e.g. composed entirely of invalid characters) fall back to the `unknown` label, so distinct sources never collide on `source=""`

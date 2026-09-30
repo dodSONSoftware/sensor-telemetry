@@ -821,7 +821,10 @@ export class MqttNetworking implements IMqttNetworking {
      * Routes the device payload to the matching PrometheusWriter publisher.
      */
     private handle_v3_device_telemetry(json_doc: any, device: string): void {
-        const source = json_doc?.["source"] ?? "unknown";
+        // Coerce the untrusted payload value: firmware may emit source as a
+        // number, which would throw in sanitizeSource's .replace and drop the
+        // message. String(123) = "123" — a usable, distinct label.
+        const source = String(json_doc?.["source"] ?? "unknown");
         const devicePayload = json_doc?.["payload"];
         if (devicePayload === undefined || devicePayload === null) {
             this.logger.write_error(
@@ -909,7 +912,10 @@ export class MqttNetworking implements IMqttNetworking {
      * sensor_health_up / sensor_uptime_seconds gauges.
      */
     private handle_mqtt_message_health(json_doc: any): void {
-        const source = json_doc?.["source"] ?? "unknown";
+        // Coerce the untrusted payload value: firmware may emit source as a
+        // number, which would throw in sanitizeSource's .replace and drop the
+        // message. String(123) = "123" — a usable, distinct label.
+        const source = String(json_doc?.["source"] ?? "unknown");
         const payload = json_doc?.["payload"];
         if (payload === undefined || payload === null) {
             this.logger.write_error(
@@ -1089,7 +1095,10 @@ export class MqttNetworking implements IMqttNetworking {
         }
 
         // process telemetry
-        const source = json_doc?.["source"] ?? "unknown";
+        // Coerce the untrusted payload value: firmware may emit source as a
+        // number, which would throw in sanitizeSource's .replace and drop the
+        // message. String(123) = "123" — a usable, distinct label.
+        const source = String(json_doc?.["source"] ?? "unknown");
         const firmwareVersion = this.getFirmwareVersion(json_doc);
 
         // Debug log for telemetry processing

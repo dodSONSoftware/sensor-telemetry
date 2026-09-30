@@ -408,6 +408,65 @@ describe("MqttNetworking V3 health field mapping", () => {
   });
 });
 
+describe("non-string source coercion (regression P3-4)", () => {
+  const fw = "1.2.3";
+
+  // A numeric source must be coerced to its string form at extraction
+  // instead of throwing in sanitizeSource's .replace and being dropped
+  // with an error log. Covers all three extraction sites: V3 per-device
+  // telemetry, V2 section telemetry, and V3 health.
+  it("publishes V3 telemetry from a numeric source as its string form", () => {
+    const airPayload = { temperature_c: 25, humidity_percent: 45, pressure_pa: 100000 };
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: 123,
+      firmware_version: fw,
+      payload: airPayload,
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      { air: airPayload },
+      "123",
+      fw
+    );
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_handling_error"
+      )
+    ).toBe(false);
+  });
+
+  it("publishes V2 section telemetry from a numeric source as its string form", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      source: 42,
+      firmware_version: fw,
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      expect.anything(),
+      "42",
+      fw
+    );
+  });
+
+  it("publishes V3 health from a numeric source as its string form", () => {
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: 7,
+      payload: { status: "healthy" },
+    });
+
+    expect(prom.set_health_up).toHaveBeenCalledWith("7", 1);
+  });
+});
+
 describe("subscription SUBACK handling (regression P2-3)", () => {
   // Fire the constructor's "connect" handler so on_connect() issues the
   // subscribe() calls, then capture the (topic, callback) pairs the fake

@@ -100,6 +100,7 @@ Also available:
 ## Source Label Sanitization
 
 Source names from MQTT payloads are sanitized before being used as Prometheus labels:
+0. Non-string values (e.g. a numeric `source` from firmware) are coerced to their string form at extraction in `MqttNetworking` (matching `device` and `firmware_version`), so `123` becomes the usable label `"123"` instead of throwing in `sanitizeSource` and dropping the message
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
 3. Sources that sanitize to an empty string fall back to the `unknown` label so distinct sources never collide on `source=""`; `sensorSourceValidCharsRegex` must be non-empty (the schema rejects `""`, which would otherwise defeat the `??` default and blank every label)
