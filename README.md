@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Brass Hawk — firmware 2.5.1.
+**Release:** Brass Hawk — firmware 2.5.3.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -361,6 +361,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 Source names are sanitized before being used as Prometheus labels:
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
+3. Sources that sanitize to an empty string (e.g. composed entirely of invalid characters) fall back to the `unknown` label, so distinct sources never collide on `source=""`
 
 ## Graceful Shutdown
 

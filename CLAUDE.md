@@ -99,6 +99,7 @@ Also available:
 Source names from MQTT payloads are sanitized before being used as Prometheus labels:
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
+3. Sources that sanitize to an empty string fall back to the `unknown` label so distinct sources never collide on `source=""`; `sensorSourceValidCharsRegex` must be non-empty (the schema rejects `""`, which would otherwise defeat the `??` default and blank every label)
 
 ## Graceful Shutdown
 

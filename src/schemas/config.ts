@@ -35,7 +35,9 @@ export const configSchema = z.object({
     }).int("sensorSourceMaxLength must be an integer")
         .positive("sensorSourceMaxLength must be greater than 0")
         .optional(),
-    sensorSourceValidCharsRegex: z.string().optional(),
+    sensorSourceValidCharsRegex: z.string({
+        error: "sensorSourceValidCharsRegex must be a string",
+    }).min(1, "sensorSourceValidCharsRegex must not be empty").optional(),
     forwardSensorLogs: z.boolean().optional(),
     forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
         error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",

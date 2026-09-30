@@ -590,6 +590,8 @@ export class PrometheusWriter {
      * - Normalizes Unicode dashes to ASCII hyphens (preserves canonical source identity)
      * - Strips invalid characters (keeps only configured valid chars)
      * - Truncates to MAX_SOURCE_LENGTH
+     * - Falls back to "unknown" when stripping leaves nothing, so distinct
+     *   all-invalid sources do not collide on an empty label
      * - Logs only when sanitization actually modifies the source beyond normalization
      */
     private sanitizeSource(source: string): string {
@@ -608,6 +610,24 @@ export class PrometheusWriter {
         // Truncate if too long
         if (sanitized.length > this.MAX_SOURCE_LENGTH) {
             sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
+        }
+
+        // A source composed entirely of invalid characters would otherwise
+        // collapse to "" and collide with every other all-invalid source on
+        // a single empty label. Warn (not debug) because this is a data
+        // collision that must be visible at the default log level.
+        if (sanitized === "") {
+            this.logger.write_warn(
+                "prometheus/sourceSanitized",
+                `Source '${normalized}' contains no valid characters — using 'unknown' label`,
+                {
+                    event: "sensor_source_sanitized",
+                    logType: "sensor",
+                    originalSource: normalized,
+                    sanitizedSource: "unknown",
+                }
+            );
+            return "unknown";
         }
 
         // Log only if sanitization actually modified the source (beyond normalization)

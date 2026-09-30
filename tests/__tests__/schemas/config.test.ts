@@ -69,6 +69,14 @@ describe("validateConfig", () => {
     ).toThrow(/mqttTopicTelemetry/);
   });
 
+  it("rejects an empty sensorSourceValidCharsRegex", () => {
+    // An explicit "" is not nullish, so without min(1) the ?? default in
+    // PrometheusWriter is bypassed and every source sanitizes to "".
+    expect(() =>
+      validateConfig({ ...validConfig, sensorSourceValidCharsRegex: "" })
+    ).toThrow(/sensorSourceValidCharsRegex/);
+  });
+
   it("rejects an invalid forwardSensorLogsLevel", () => {
     expect(() =>
       validateConfig({ ...validConfig, forwardSensorLogsLevel: "loud" })

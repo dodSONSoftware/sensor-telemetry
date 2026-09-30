@@ -420,6 +420,40 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("source label sanitization", () => {
+    it("maps an all-invalid source to the 'unknown' label instead of an empty label", async () => {
+      // The shared writer uses the default char set (a-zA-Z0-9._-), so "###"
+      // strips to nothing. Pre-fix that produced source="" and every
+      // all-invalid source collided on one empty label.
+      writer.publish_air(
+        {
+          air: {
+            temperature_c: 25,
+            humidity_percent: 42,
+            pressure_pa: 100000,
+            altitude_m: 100,
+          },
+        },
+        "###",
+        "1.0.0"
+      );
+
+      // The collision is audited as a warning (visible at the default level).
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) =>
+            call[2]?.event === "sensor_source_sanitized" &&
+            call[2]?.originalSource === "###" &&
+            call[2]?.sanitizedSource === "unknown"
+        )
+      ).toBe(true);
+
+      const metrics = await getMetrics();
+      expect(metrics).toContain(`air_temperature{source="unknown"}`);
+      expect(metrics).not.toContain(`air_temperature{source=""}`);
+    });
+  });
+
   // Declared last because it consumes the shared writer: close() stops the
   // metrics server, so this must run after every describe that still needs
   // it. afterAll's own close() is then a no-op by design.
