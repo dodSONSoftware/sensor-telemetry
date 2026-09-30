@@ -218,4 +218,19 @@ describe("PrometheusWriter label cardinality cap", () => {
     );
     expect(counterValue("sensor_firmware_versions_rejected_total", metrics)).toBe(2);
   });
+
+  it("admits sensor_last_seen_timestamp_seconds sources through the same cap", async () => {
+    // The freshness metric must not bypass source admission: it shares the
+    // admittedSources set (and overflow counter) with every other sensor
+    // metric, so a source beyond the cap maps to the same fallback label.
+    writer.mark_source_seen("alpha");
+    writer.mark_source_seen("freshness-overflow");
+    const metrics = await getMetrics();
+
+    expect(labelValues("sensor_last_seen_timestamp_seconds", "source", metrics)).toEqual(
+      new Set(["alpha", "unknown_source"])
+    );
+    // 3 rejections from the source tests plus this one.
+    expect(counterValue("sensor_sources_rejected_total", metrics)).toBe(4);
+  });
 });

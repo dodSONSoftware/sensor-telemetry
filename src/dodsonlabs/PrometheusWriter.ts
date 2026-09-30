@@ -64,6 +64,8 @@ export class PrometheusWriter {
     private prometheus_Gauge_OutboundRejected: Gauge | undefined;
     private prometheus_Gauge_UtcValid: Gauge | undefined;
     private prometheus_Gauge_UtcSyncAgeSec: Gauge | undefined;
+    // ---- sensor freshness (last accepted telemetry or health message)
+    private prometheus_Gauge_SensorLastSeenTimestamp: Gauge | undefined;
 
     // ******** service diagnostics (this service's own MQTT subscriptions)
 
@@ -2151,6 +2153,37 @@ export class PrometheusWriter {
         );
     }
 
+    // ******** public methods for sensor freshness
+
+    /**
+     * Record that the sensor source accepted a telemetry or health message.
+     *
+     * The value is "last accepted message time", NOT "last time an
+     * individual gauge changed": a source that keeps reporting the same
+     * reading stays fresh, and a malformed message that MqttNetworking
+     * drops does not count as activity. MqttNetworking calls this exactly
+     * once per accepted message — a single health message sets 10+ gauges
+     * but must stamp the timestamp only once.
+     *
+     * The source is admitted through admitSource() like every other sensor
+     * metric, so this label obeys the same sanitization and cardinality
+     * rules (cap overflow maps to 'unknown_source') rather than keeping a
+     * second, independent source-label policy.
+     */
+    public mark_source_seen(source: string): void {
+        const sanitized = this.admitSource(source);
+        this.prometheus_Gauge_SensorLastSeenTimestamp!.setToCurrentTime({ source: sanitized });
+        this.logger.write_debug(
+            "prometheus/markSourceSeen",
+            `Source: ${sanitized} marked seen`,
+            {
+                event: "sensor_marked_seen",
+                logType: "sensor",
+                source: sanitized,
+            }
+        );
+    }
+
     // ******** private methods
 
     private create_prometheus_gauges() {
@@ -2369,6 +2402,20 @@ export class PrometheusWriter {
         this.prometheus_Gauge_UtcSyncAgeSec = new Gauge({
             name: "sensor_health_utc_sync_age_sec",
             help: "Age of the last successful UTC time sync in seconds.",
+            labelNames: ["source"],
+        });
+
+        // ******** sensor freshness
+
+        // Unix timestamp of the most recent ACCEPTED telemetry or health
+        // message per source, updated by mark_source_seen() once per
+        // accepted message (never per gauge). Consumers compute sensor age
+        // as time() - sensor_last_seen_timestamp_seconds; the exporter
+        // deliberately reports the fact without expiring or deleting stale
+        // series — staleness thresholds belong in Prometheus/Grafana.
+        this.prometheus_Gauge_SensorLastSeenTimestamp = new Gauge({
+            name: "sensor_last_seen_timestamp_seconds",
+            help: "Unix timestamp in seconds of the most recent accepted telemetry or health message from the sensor source.",
             labelNames: ["source"],
         });
 

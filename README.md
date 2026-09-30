@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Nickel Hawk — firmware 2.7.7.
+**Release:** Steel Hawk — firmware 2.8.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -364,6 +364,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `Sensor_Outbound_Rejected` | Gauge | source | Total outbound messages rejected by the queue |
 | `Sensor_Utc_Valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
 | `Sensor_Utc_Sync_Age` | Gauge | source | Age of the last successful UTC time sync in seconds |
+| `sensor_last_seen_timestamp_seconds` | Gauge | source | Unix timestamp (seconds) of the most recent **accepted** telemetry or health message from the source — stamped once per accepted message, not per gauge. Sensor age: `time() - sensor_last_seen_timestamp_seconds`; staleness thresholds belong in Prometheus/Grafana alerting, and the service does not remove series from offline sources |
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
 | `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
 | `sensor_firmware_versions_rejected_total` | Counter | — | Firmware version values mapped to the `unknown_firmware` fallback because the firmware version cardinality cap was reached |

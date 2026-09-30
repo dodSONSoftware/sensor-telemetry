@@ -8,6 +8,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import * as yaml from "js-yaml";
+import { register } from "prom-client";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import { write_file_yaml } from "../../../src/dodsonlabs/SystemFunctions";
 import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
@@ -1004,6 +1005,79 @@ describe("PrometheusWriter", () => {
 
     it("truncates a source longer than the max length (30) to 30 chars", () => {
       expect(sanitize("a".repeat(40))).toBe("a".repeat(30));
+    });
+  });
+
+  describe("sensor_last_seen_timestamp_seconds (sensor freshness)", () => {
+    // Read directly from prom-client's global registry (the same one the
+    // shared writer writes to) rather than scraping /metrics: the
+    // fake-timer test below must not perform an HTTP request, which would
+    // need real timers to complete.
+    async function readLastSeen(source: string): Promise<number | undefined> {
+      const metric = register.getSingleMetric("sensor_last_seen_timestamp_seconds");
+      if (!metric) {
+        throw new Error("sensor_last_seen_timestamp_seconds is not registered");
+      }
+      // Gauge.get() resolves to { help, name, type, values, aggregator };
+      // the series live under values.
+      const { values } = (await metric.get()) as unknown as {
+        values: Array<{ labels: Record<string, string>; value: number }>;
+      };
+      return values.find((entry) => entry.labels.source === source)?.value;
+    }
+
+    it("exposes no series until a source is marked seen, then one series at the current time", async () => {
+      const source = "freshness-1";
+      expect(await getMetrics()).not.toContain(
+        `sensor_last_seen_timestamp_seconds{source="${source}"}`
+      );
+
+      writer.mark_source_seen(source);
+
+      const line = (await getMetrics())
+        .split("\n")
+        .find((l) => l.startsWith(`sensor_last_seen_timestamp_seconds{source="${source}"}`));
+      expect(line).toBeDefined();
+      const value = Number(line!.split(/\s+/).pop());
+      // setToCurrentTime() stamps now/1000 — tolerate the sub-second
+      // elapsed between the stamp and the scrape.
+      const nowSec = Math.floor(Date.now() / 1000);
+      expect(nowSec - value).toBeLessThanOrEqual(1);
+    });
+
+    it("stamps the current time and advances it when the source reports again", async () => {
+      jest.useFakeTimers();
+      try {
+        const source = "freshness-timers";
+
+        jest.setSystemTime(new Date("2026-09-30T12:00:00Z"));
+        writer.mark_source_seen(source);
+        const first = await readLastSeen(source);
+        // Derive the expectation from the faked clock rather than
+        // hardcoding the epoch.
+        expect(first).toBe(Math.floor(Date.now() / 1000));
+
+        jest.setSystemTime(new Date("2026-09-30T12:01:00Z"));
+        writer.mark_source_seen(source);
+        const second = await readLastSeen(source);
+        expect(second).toBe(Math.floor(Date.now() / 1000));
+        expect(second).toBe(first! + 60);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it("sanitizes the source label like every other sensor metric", async () => {
+      // Whitespace and '#' are invalid under the default charset, so the
+      // freshness label must go through the same admitSource() pipeline as
+      // the other sensor metrics rather than minting a raw label.
+      writer.mark_source_seen("Bad Source###");
+
+      const metrics = await getMetrics();
+      expect(metrics).toContain(
+        `sensor_last_seen_timestamp_seconds{source="BadSource"}`
+      );
+      expect(metrics).not.toContain(`source="Bad Source`);
     });
   });
 

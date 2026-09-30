@@ -558,6 +558,111 @@ describe("missing system_info (regression P2-1)", () => {
   });
 });
 
+describe("sensor freshness (mark_source_seen)", () => {
+  // The freshness gauge must advance exactly once per ACCEPTED message:
+  // never per gauge (a health message sets 10+ gauges), and never for
+  // dropped/malformed data.
+  const fw = "1.2.3";
+
+  it("marks the source seen exactly once per accepted V3 health message", () => {
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+      payload: {
+        status: "healthy",
+        cpu_temperature_c: 55,
+        free_heap_bytes: 123456,
+        wifi_rssi_dbm: -60,
+        devices_active: 4,
+      },
+    });
+
+    // Several gauges were set from this one message — the timestamp stamp
+    // must have been exactly one.
+    expect(prom.set_health_up).toHaveBeenCalledTimes(1);
+    expect(prom.set_cpu_temp).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
+  });
+
+  it("does not mark the source seen when the V3 health message has no payload", () => {
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+    });
+
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("marks the source seen once per accepted V3 device telemetry message", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "yl69_fc28",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { relative_moisture_percent: 42 },
+    });
+
+    expect(prom.publish_soil).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
+  });
+
+  it("does not mark the source seen when V3 telemetry fails validation", () => {
+    // humidity_percent is required for air devices; the message is dropped
+    // and must not claim the source is fresh.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("does not mark the source seen for an unknown V3 device", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "mystery9000",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25 },
+    });
+
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("marks the source seen for a V2 message carrying a recognized section", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      source: "v2-src",
+      firmware_version: fw,
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+        system_info: {},
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v2-src");
+  });
+
+  it("does not mark the source seen for a V2 message with no recognized section", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      source: "v2-src",
+      firmware_version: fw,
+      payload: { something_else: 1 },
+    });
+
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+});
+
 describe("subscription SUBACK handling (regression P2-3)", () => {
   // Fire the constructor's "connect" handler so on_connect() issues the
   // subscribe() calls, then capture the (topic, callback) pairs the fake

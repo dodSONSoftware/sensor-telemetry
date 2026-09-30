@@ -884,6 +884,11 @@ export class MqttNetworking implements IMqttNetworking {
 
         // Reuse the V2 publishers by wrapping the device payload in the
         // section envelope they expect (e.g. { air: {...} }).
+        // `accepted` tracks whether the message was admitted (known device
+        // type AND its required fields valid): only then does the source
+        // count as "seen" for the freshness gauge — a dropped reading is
+        // not sensor activity.
+        let accepted = false;
         switch (category) {
         case "air":
             // BME280 reports barometric pressure; the SHT35 has no pressure
@@ -892,18 +897,21 @@ export class MqttNetworking implements IMqttNetworking {
             if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
                 (!pressureRequired || sysFunc.get_numeric_field(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
                 this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
+                accepted = true;
             }
             break;
 
         case "water":
             if (this.is_telemetry_valid(devicePayload, ["temperature_c"], source)) {
                 this.promWriter.publish_water({ water: devicePayload }, source, firmwareVersion);
+                accepted = true;
             }
             break;
 
         case "light":
             if (this.is_telemetry_valid(devicePayload, ["lux", "uv_index"], source)) {
                 this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
+                accepted = true;
             }
             break;
 
@@ -913,8 +921,13 @@ export class MqttNetworking implements IMqttNetworking {
             // digital_state is ignored (nullable, not a useful gauge).
             if (this.is_telemetry_valid(devicePayload, ["relative_moisture_percent"], source)) {
                 this.promWriter.publish_soil({ soil: devicePayload }, source, firmwareVersion);
+                accepted = true;
             }
             break;
+        }
+
+        if (accepted) {
+            this.promWriter.mark_source_seen(source);
         }
     }
 
@@ -1039,6 +1052,11 @@ export class MqttNetworking implements IMqttNetworking {
         if (uptimeMs !== undefined) {
             this.promWriter.set_uptime_seconds(source, uptimeMs / 1000);
         }
+
+        // Freshness: reaching here means the message carried a payload —
+        // accepted sensor activity, stamped once per message rather than
+        // once per gauge.
+        this.promWriter.mark_source_seen(source);
 
         this.logger.write_debug(
             "networking/handleHealth",
@@ -1167,6 +1185,23 @@ export class MqttNetworking implements IMqttNetworking {
 
         // Publish system info metrics (hardware, wifi, sensor health)
         this.publish_system_metrics(payload, source);
+
+        // Freshness: a structurally valid V2 message carrying at least one
+        // recognized section counts as an accepted sensor message, even if
+        // individual gauges were skipped for out-of-range values. The
+        // documented meaning is "last accepted message", not "last
+        // successfully updated measurement".
+        const hasRecognizedSection =
+            payload["air"] !== undefined ||
+            payload["light"] !== undefined ||
+            payload["rain"] !== undefined ||
+            payload["wind"] !== undefined ||
+            payload["water"] !== undefined ||
+            payload["lightning"] !== undefined ||
+            payload["system_info"] !== undefined;
+        if (hasRecognizedSection) {
+            this.promWriter.mark_source_seen(source);
+        }
     }
 
     // ******** private telemetry publish helpers
