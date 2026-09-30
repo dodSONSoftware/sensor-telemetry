@@ -213,6 +213,7 @@ export class MqttNetworking implements IMqttNetworking {
             "apiPort",
             "sensorSourceMaxLength",
             "sensorSourceValidCharsRegex",
+            "sensorSourceCardinalityCap",
         ];
         const restartOnlyChanged = restartOnlyKeys.filter(
             (key) => !Object.is(this.configuration[key], newConfig[key])
@@ -685,19 +686,23 @@ export class MqttNetworking implements IMqttNetworking {
     /**
      * Extract firmware version from telemetry message.
      * Supports both top-level firmware_version field and nested system_info.firmware_version.
+     * The value is admitted through PrometheusWriter at extraction time:
+     * firmware_version is a Prometheus counter label and MQTT payload values
+     * are untrusted, so charset/length sanitization and the distinct-value
+     * cardinality cap apply here rather than at each label site.
      */
     private getFirmwareVersion(json_doc: any): string {
         // Try top-level firmware_version first (V2 format)
         const fwTopLevel = this.getField(json_doc, "firmware_version");
         if (fwTopLevel !== undefined) {
-            return String(fwTopLevel);
+            return this.promWriter.admitFirmwareVersion(String(fwTopLevel));
         }
         // Fallback to system_info.firmware_version
         const payload = json_doc?.["payload"];
         const systemInfo = payload?.["system_info"];
         const fwSystem = this.getField(systemInfo, "firmware_version");
         if (fwSystem !== undefined) {
-            return String(fwSystem);
+            return this.promWriter.admitFirmwareVersion(String(fwSystem));
         }
         return "unknown";
     }

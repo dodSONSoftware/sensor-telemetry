@@ -91,3 +91,78 @@ describe("Logger log level handling", () => {
     expect(logger.global_log_level_string()).toBe("info");
   });
 });
+
+describe("Logger error serialization and secret redaction", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  /**
+   * Parse the single JSON object the json() format emits for one log call.
+   * The format chain ends in json(), which is single-line, so the captured
+   * text (after stripping the transport's trailing newline) parses whole.
+   */
+  function parseSingleLine(out: string): Record<string, unknown> {
+    return JSON.parse(out.trim());
+  }
+
+  it("preserves the stack trace on a write_error error: field without breaking redaction", async () => {
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_error("test/errorSerialization", "operation failed", {
+        event: "error_serialization",
+        logType: "service",
+        password: "hunter2",
+        error: new Error("boom in foo"),
+      });
+    });
+
+    // Regression guard for P2-1: the Error must not be flattened to {}.
+    expect(out).not.toContain('"error":{}');
+
+    record = parseSingleLine(out);
+    const error = record.error as { name?: string; message?: string; stack?: string };
+
+    expect(error).toBeDefined();
+    expect(error.name).toBe("Error");
+    expect(error.message).toBe("boom in foo");
+    expect(typeof error.stack).toBe("string");
+    expect(error.stack).toContain("boom in foo");
+    // A real stack trace carries at least one "at " frame, not just the
+    // "Error: <message>" first line.
+    expect(error.stack).toMatch(/at /);
+
+    // Redaction of sibling secret fields is unaffected by the Error handling.
+    expect(record.password).toBe("[REDACTED]");
+  });
+
+  it("preserves the stack trace on a write_critical error: field", async () => {
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_critical("test/criticalSerialization", "fatal async failure", {
+        event: "unhandled_rejection",
+        logType: "service",
+        severity: "critical",
+        fatal: true,
+        exitCode: 1,
+        error: new Error("async rejection detail"),
+      });
+    });
+
+    expect(out).not.toContain('"error":{}');
+
+    record = parseSingleLine(out);
+    const error = record.error as { name?: string; message?: string; stack?: string };
+
+    expect(error).toBeDefined();
+    expect(error.message).toBe("async rejection detail");
+    expect(typeof error.stack).toBe("string");
+    expect(error.stack).toContain("async rejection detail");
+    expect(error.stack).toMatch(/at /);
+  });
+});

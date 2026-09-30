@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Copper Hawk — firmware 2.6.5.
+**Release:** Nickel Hawk — firmware 2.7.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -87,7 +87,7 @@ Sensitive values are automatically redacted before logging:
 - `secret`, `clientSecret`
 - `apiKey`, `privateKey`
 
-Redaction is recursive and case-insensitive.
+Redaction is recursive and case-insensitive. Error objects passed in the `error:` log field are preserved with their `name`, `message`, and `stack`, so failure and crash stack traces are not lost in the log output.
 
 ### Runtime Log Level Changes
 
@@ -133,6 +133,7 @@ forwardSensorLogsLevel: debug
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
+| `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; values beyond the cap map to a fallback label | 1024 |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
 
@@ -364,6 +365,8 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `Sensor_Utc_Valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
 | `Sensor_Utc_Sync_Age` | Gauge | source | Age of the last successful UTC time sync in seconds |
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
+| `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
+| `sensor_firmware_versions_rejected_total` | Counter | — | Firmware version values mapped to the `unknown_firmware` fallback because the firmware version cardinality cap was reached |
 
 ## Source Label Sanitization
 
@@ -371,6 +374,8 @@ Source names are sanitized before being used as Prometheus labels:
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
 3. Sources that sanitize to an empty string (e.g. composed entirely of invalid characters) fall back to the `unknown` label, so distinct sources never collide on `source=""`
+
+Sanitization bounds each label *value* but not how many distinct values appear, so a distinct-value cap (`sensorSourceCardinalityCap`) bounds cardinality. Once the cap is reached, each new distinct source maps to the fixed `unknown_source` label (counted in `sensor_sources_rejected_total`) and each new distinct firmware version maps to `unknown_firmware` (counted in `sensor_firmware_versions_rejected_total`). This stops an MQTT publisher minting fresh random source or firmware values from growing the Prometheus series set without bound.
 
 ## Graceful Shutdown
 

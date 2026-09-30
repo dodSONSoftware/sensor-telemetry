@@ -4,6 +4,7 @@
  */
 
 import { MqttNetworking } from "../../../src/dodsonlabs/MqttNetworking";
+import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
@@ -23,6 +24,13 @@ jest.mock("mqtt", () => ({
 // server) never runs. The auto-mocked instance's publish_*/set_* methods
 // are jest.fn(), which is exactly what the routing assertions target.
 jest.mock("../../../src/dodsonlabs/PrometheusWriter");
+
+// The auto-mock's admitFirmwareVersion returns undefined by default, which
+// would mask the firmware strings the routing assertions check; make it a
+// pass-through so getFirmwareVersion's extraction is what's under test.
+jest
+  .mocked(PrometheusWriter.prototype.admitFirmwareVersion)
+  .mockImplementation((version: string) => version);
 
 function createMockMqttClient() {
   // on must stay a recording jest.fn(): the driver below finds the

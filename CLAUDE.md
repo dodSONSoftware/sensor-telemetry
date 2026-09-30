@@ -84,6 +84,7 @@ npm run test:coverage # Run tests with coverage report
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names | a-zA-Z0-9._- |
+| `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; overflow maps to a fallback label | 1024 |
 | `forwardSensorLogs` | Forward sensor logs to main logger | true |
 | `forwardSensorLogsLevel` | Log level for forwarded sensor logs (error, warn, info, debug, critical) | info |
 
@@ -102,6 +103,8 @@ Source names from MQTT payloads are sanitized before being used as Prometheus la
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
 3. Sources that sanitize to an empty string fall back to the `unknown` label so distinct sources never collide on `source=""`; `sensorSourceValidCharsRegex` must be non-empty (the schema rejects `""`, which would otherwise defeat the `??` default and blank every label)
+
+Sanitization bounds each label *value* but not how many distinct values appear, so a distinct-value cap (`sensorSourceCardinalityCap`) bounds cardinality: once the cap is reached, each new distinct source maps to the fixed `unknown_source` fallback label and increments `sensor_sources_rejected_total`, and each new distinct firmware version (admitted in `MqttNetworking.getFirmwareVersion`, which also strips invalid characters and truncates to the source length limit) maps to `unknown_firmware` and increments `sensor_firmware_versions_rejected_total`. Each rejection is counted; the warning fires once per cap. The cap is captured at construction, so changing it requires a restart (it is a `restartOnly` key in `updateConfig`).
 
 ## Graceful Shutdown
 

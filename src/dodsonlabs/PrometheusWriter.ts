@@ -66,6 +66,11 @@ export class PrometheusWriter {
     private prometheus_Gauge_UtcSyncAgeSec: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
+    // Cardinality-overflow counters: incremented each time a label value
+    // falls outside the distinct-value cap and is mapped to its fallback
+    // label, so the condition is visible in Prometheus itself.
+    private prometheus_counter_sources_rejected: Counter | undefined;
+    private prometheus_counter_firmware_versions_rejected: Counter | undefined;
     // ---- config storage for read/write/reload endpoints
     private config: z.infer<typeof configSchema>;
     private configSource: string;
@@ -90,6 +95,20 @@ export class PrometheusWriter {
     // ******** constants
     private readonly MAX_SOURCE_LENGTH: number;
     private readonly VALID_CHARS: RegExp;
+    // Distinct-label cardinality cap (config: sensorSourceCardinalityCap,
+    // default 1024). Sanitization bounds each label VALUE (length, charset);
+    // this bounds how many distinct values are admitted per label name.
+    // Values beyond the cap map to a fixed fallback label, so an MQTT
+    // publisher minting fresh random source or firmware_version values
+    // cannot grow the Prometheus series set without bound.
+    private readonly sourceCardinalityCap: number;
+    private readonly admittedSources = new Set<string>();
+    private readonly admittedFirmwareVersions = new Set<string>();
+    // Warn-once latches: a rejected value is counted on every occurrence,
+    // but the warning fires once per cap so a sustained flood stays a
+    // single warn line (the counters carry the ongoing signal).
+    private sourceCapExceededWarned = false;
+    private firmwareCapExceededWarned = false;
     // Cap for /write-config request bodies. A valid config is < 2 KiB, so
     // anything larger is a misbehaving or hostile client, not a config.
     private static readonly MAX_CONFIG_BODY_BYTES = 64 * 1024;
@@ -103,10 +122,18 @@ export class PrometheusWriter {
     // ******** ctor
 
     /**
-     * Configure Prometheus gauge label sanitization.
+     * Configure Prometheus label sanitization and cardinality.
      * - sensor-source-max-length: Maximum length for source labels (default: 30)
      * - sensor-source-valid-chars-regex: Character whitelist for source names (default: a-zA-Z0-9._-)
-     * These prevent unbounded Prometheus cardinality from arbitrary MQTT source names.
+     * - sensor-source-cardinality-cap: Maximum distinct source / firmware_version
+     *   label values admitted (default: 1024)
+     *
+     * Sanitization bounds each label's length and character set — it does NOT
+     * bound how many distinct values appear. The cardinality cap does that:
+     * once the cap is reached, each new distinct value maps to a fixed
+     * fallback label (unknown_source / unknown_firmware) and increments
+     * sensor_sources_rejected_total / sensor_firmware_versions_rejected_total
+     * so the overflow is visible in Prometheus itself.
      *
      * Note: The VALID_CHARS regex uses the global flag to replace ALL invalid characters,
      * not just the first match encountered.
@@ -125,6 +152,7 @@ export class PrometheusWriter {
         const escapedValidChars = validChars.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
         // Use global flag to replace ALL invalid characters, not just the first match
         this.VALID_CHARS = new RegExp(`[^${escapedValidChars}]+`, "g");
+        this.sourceCardinalityCap = config.sensorSourceCardinalityCap ?? 1024;
 
         // save config and source for endpoint access
         this.config = { ...config };
@@ -164,6 +192,16 @@ export class PrometheusWriter {
             name: "telemetry_messages_total",
             help: "Total number of telemetry messages received, labeled by sensor type and firmware version.",
             labelNames: ["source_type", "firmware_version"] as const,
+        });
+
+        // Cardinality-overflow counters (see admitSource / admitFirmwareVersion)
+        this.prometheus_counter_sources_rejected = new Counter({
+            name: "sensor_sources_rejected_total",
+            help: "Source label values mapped to the 'unknown_source' fallback label because the source cardinality cap was reached.",
+        });
+        this.prometheus_counter_firmware_versions_rejected = new Counter({
+            name: "sensor_firmware_versions_rejected_total",
+            help: "Firmware version label values mapped to the 'unknown_firmware' fallback label because the firmware version cardinality cap was reached.",
         });
 
         // --------------------------------
@@ -890,6 +928,104 @@ export class PrometheusWriter {
         return sanitized;
     }
 
+    /**
+     * Admit a source as a Prometheus label value.
+     * sanitizeSource() bounds each value's length and charset but not the
+     * number of distinct values, so this additionally caps distinct admitted
+     * values at sourceCardinalityCap. A sanitized source that would exceed
+     * the cap maps to the fixed "unknown_source" fallback label and is
+     * counted in sensor_sources_rejected_total instead of minting a new
+     * series. The warning fires once per cap; each rejection is counted.
+     */
+    private admitSource(source: string): string {
+        const sanitized = this.sanitizeSource(source);
+        if (this.admittedSources.has(sanitized)) {
+            return sanitized;
+        }
+        if (this.admittedSources.size < this.sourceCardinalityCap) {
+            this.admittedSources.add(sanitized);
+            return sanitized;
+        }
+        this.prometheus_counter_sources_rejected?.inc();
+        if (!this.sourceCapExceededWarned) {
+            this.sourceCapExceededWarned = true;
+            this.logger.write_warn(
+                "prometheus/sourceCapExceeded",
+                `Source cardinality cap (${this.sourceCardinalityCap}) reached — new distinct sources map to 'unknown_source'`,
+                {
+                    event: "sensor_source_cap_exceeded",
+                    logType: "audit",
+                    source: sanitized,
+                    cap: this.sourceCardinalityCap,
+                }
+            );
+        }
+        this.logger.write_debug(
+            "prometheus/sourceRejected",
+            `Source '${sanitized}' rejected by cardinality cap, using 'unknown_source' label`,
+            {
+                event: "sensor_source_rejected",
+                logType: "sensor",
+                source: sanitized,
+            }
+        );
+        return "unknown_source";
+    }
+
+    /**
+     * Admit a firmware version as a telemetry_messages_total label value.
+     * firmware_version comes straight from MQTT payloads, so apply the same
+     * bounds as source labels — invalid-character strip, truncation to
+     * MAX_SOURCE_LENGTH — plus the same distinct-value cap: values beyond
+     * the cap map to the fixed "unknown_firmware" label and increment
+     * sensor_firmware_versions_rejected_total.
+     */
+    public admitFirmwareVersion(firmwareVersion: string): string {
+        // No Unicode dash normalization: firmware identity is not
+        // cross-referenced with source identity, so plain strip/truncate
+        // is sufficient to bound the label value.
+        let sanitized = firmwareVersion.replace(this.VALID_CHARS, "");
+        if (sanitized.length > this.MAX_SOURCE_LENGTH) {
+            sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
+        }
+        // A firmware version made entirely of invalid characters collapses
+        // to "" — reuse the "unknown" label the missing-field path uses.
+        if (sanitized === "") {
+            sanitized = "unknown";
+        }
+        if (this.admittedFirmwareVersions.has(sanitized)) {
+            return sanitized;
+        }
+        if (this.admittedFirmwareVersions.size < this.sourceCardinalityCap) {
+            this.admittedFirmwareVersions.add(sanitized);
+            return sanitized;
+        }
+        this.prometheus_counter_firmware_versions_rejected?.inc();
+        if (!this.firmwareCapExceededWarned) {
+            this.firmwareCapExceededWarned = true;
+            this.logger.write_warn(
+                "prometheus/firmwareCapExceeded",
+                `Firmware version cardinality cap (${this.sourceCardinalityCap}) reached — new firmware versions map to 'unknown_firmware'`,
+                {
+                    event: "sensor_firmware_cap_exceeded",
+                    logType: "audit",
+                    firmwareVersion: sanitized,
+                    cap: this.sourceCardinalityCap,
+                }
+            );
+        }
+        this.logger.write_debug(
+            "prometheus/firmwareRejected",
+            `Firmware version '${sanitized}' rejected by cardinality cap, using 'unknown_firmware' label`,
+            {
+                event: "sensor_firmware_rejected",
+                logType: "sensor",
+                firmwareVersion: sanitized,
+            }
+        );
+        return "unknown_firmware";
+    }
+
     // ******** public methods
 
     is_ready(): boolean {
@@ -920,7 +1056,7 @@ export class PrometheusWriter {
     }
 
     publish_air(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const air = payload?.["air"];
         if (!air) {
             this.logger.write_warn(
@@ -1057,7 +1193,7 @@ export class PrometheusWriter {
     }
 
     publish_light(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const light = payload?.["light"];
         if (!light) {
             this.logger.write_warn(
@@ -1123,7 +1259,7 @@ export class PrometheusWriter {
     }
 
     publish_rain(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const rain = payload?.["rain"];
         if (!rain) {
             this.logger.write_warn(
@@ -1171,7 +1307,7 @@ export class PrometheusWriter {
     }
 
     publish_wind(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const wind = payload?.["wind"];
         if (!wind) {
             this.logger.write_warn(
@@ -1237,7 +1373,7 @@ export class PrometheusWriter {
     }
 
     publish_water(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const water = payload?.["water"];
         if (!water) {
             this.logger.write_warn(
@@ -1300,7 +1436,7 @@ export class PrometheusWriter {
     }
 
     publish_lightning(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const lightning = payload?.["lightning"];
         if (!lightning) {
             this.logger.write_warn(
@@ -1348,7 +1484,7 @@ export class PrometheusWriter {
     }
 
     publish_soil(payload: any, source: string, firmwareVersion: string) {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         const soil = payload?.["soil"];
         if (!soil) {
             this.logger.write_warn(
@@ -1448,7 +1584,7 @@ export class PrometheusWriter {
     // ******** public methods for system info metrics
 
     set_cpu_temp(source: string, tempC: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(tempC)) {
             this.logger.write_warn(
                 "prometheus/setCpuTempInvalid",
@@ -1478,7 +1614,7 @@ export class PrometheusWriter {
     }
 
     set_heap_free_bytes(source: string, bytes: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(bytes) || bytes < 0) {
             this.logger.write_warn(
                 "prometheus/setHeapFreeBytesInvalid",
@@ -1508,7 +1644,7 @@ export class PrometheusWriter {
     }
 
     set_heap_used_percent(source: string, percent: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
             this.logger.write_warn(
                 "prometheus/setHeapUsedPercentInvalid",
@@ -1540,7 +1676,7 @@ export class PrometheusWriter {
     }
 
     set_sensor_read_failures(source: string, failures: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(failures) || failures < 0) {
             this.logger.write_warn(
                 "prometheus/setSensorReadFailuresInvalid",
@@ -1570,7 +1706,7 @@ export class PrometheusWriter {
     }
 
     set_sensor_read_counter(source: string, counter: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(counter) || counter < 0) {
             this.logger.write_warn(
                 "prometheus/setSensorReadCounterInvalid",
@@ -1600,7 +1736,7 @@ export class PrometheusWriter {
     }
 
     set_wifi_rssi_dbm(source: string, rssi: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(rssi)) {
             this.logger.write_warn(
                 "prometheus/setWifiRssiDbmInvalid",
@@ -1635,7 +1771,7 @@ export class PrometheusWriter {
      * @param up - 1 if the sensor reports status "healthy", 0 otherwise
      */
     set_health_up(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_SensorHealthUp!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setHealthUp",
@@ -1656,7 +1792,7 @@ export class PrometheusWriter {
      * @param seconds - Uptime in seconds
      */
     set_uptime_seconds(source: string, seconds: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(seconds) || seconds < 0) {
             this.logger.write_warn(
                 "prometheus/setUptimeSecondsInvalid",
@@ -1688,7 +1824,7 @@ export class PrometheusWriter {
     // ******** public methods for V4 health metrics
 
     set_min_heap_free_bytes(source: string, bytes: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(bytes) || bytes < 0) {
             this.logger.write_warn(
                 "prometheus/setMinHeapFreeBytesInvalid",
@@ -1718,7 +1854,7 @@ export class PrometheusWriter {
     }
 
     set_devices_active(source: string, count: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setDevicesActiveInvalid",
@@ -1748,7 +1884,7 @@ export class PrometheusWriter {
     }
 
     set_devices_configured(source: string, count: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setDevicesConfiguredInvalid",
@@ -1778,7 +1914,7 @@ export class PrometheusWriter {
     }
 
     set_network_stack_ready(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_NetworkStackReady!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setNetworkStackReady",
@@ -1794,7 +1930,7 @@ export class PrometheusWriter {
     }
 
     set_wifi_connected(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_WifiConnected!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setWifiConnected",
@@ -1810,7 +1946,7 @@ export class PrometheusWriter {
     }
 
     set_mqtt_connected(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_MqttConnected!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setMqttConnected",
@@ -1826,7 +1962,7 @@ export class PrometheusWriter {
     }
 
     set_core_1_active(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_Core1Active!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setCore1Active",
@@ -1842,7 +1978,7 @@ export class PrometheusWriter {
     }
 
     set_outbound_queue_depth(source: string, depth: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(depth) || depth < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundQueueDepthInvalid",
@@ -1872,7 +2008,7 @@ export class PrometheusWriter {
     }
 
     set_outbound_evicted(source: string, count: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundEvictedInvalid",
@@ -1902,7 +2038,7 @@ export class PrometheusWriter {
     }
 
     set_outbound_rejected(source: string, count: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundRejectedInvalid",
@@ -1932,7 +2068,7 @@ export class PrometheusWriter {
     }
 
     set_utc_valid(source: string, up: 0 | 1): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         this.prometheus_Gauge_UtcValid!.set({ source: sanitized }, up);
         this.logger.write_debug(
             "prometheus/setUtcValid",
@@ -1948,7 +2084,7 @@ export class PrometheusWriter {
     }
 
     set_utc_sync_age_sec(source: string, seconds: number): void {
-        const sanitized = this.sanitizeSource(source);
+        const sanitized = this.admitSource(source);
         if (!Number.isFinite(seconds) || seconds < 0) {
             this.logger.write_warn(
                 "prometheus/setUtcSyncAgeSecInvalid",

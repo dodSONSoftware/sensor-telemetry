@@ -15,6 +15,9 @@ mqttTopicHealth: iot/v3/health
 # Optional: Prometheus source label sanitization
 sensorSourceMaxLength: 30
 sensorSourceValidCharsRegex: a-zA-Z0-9._-
+# Optional: max distinct source / firmware_version label values admitted as
+# Prometheus labels (values beyond the cap map to a fallback label)
+sensorSourceCardinalityCap: 1024
 
 # Forward sensor logs to application logger
 forwardSensorLogs: true

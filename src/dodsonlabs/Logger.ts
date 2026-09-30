@@ -59,6 +59,14 @@ function redactSensitiveValues(value: unknown): unknown {
     return value;
   }
 
+  // Error instances carry their state in non-enumerable message/stack
+  // properties, so the generic object branch below would flatten them to {}
+  // and drop the stack trace from the log line. Extract the fields explicitly
+  // so the stack survives into every `error:` log field.
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
+  }
+
   // Handle arrays
   if (Array.isArray(value)) {
     return value.map((item) => redactSensitiveValues(item));
@@ -188,9 +196,13 @@ export class Logger implements ILogger {
         json(),
       ),
       transports: [
-        new winston.transports.Console({
-          handleExceptions: true,
-        }),
+        // Deliberately no `handleExceptions: true` here: that would make
+        // winston install its own global uncaughtException handler, producing
+        // a second, non-app-formatted crash line and leaking a global listener
+        // per Logger. Crash logging is owned intentionally by the process-level
+        // handlers in index.ts (uncaughtException / unhandledRejection), which
+        // log via this Logger and own the exit code.
+        new winston.transports.Console(),
       ],
       exitOnError: false,
     });
