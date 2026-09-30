@@ -9,7 +9,7 @@ import os from "os";
 import path from "path";
 import * as yaml from "js-yaml";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
-import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
+import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
@@ -420,6 +420,66 @@ describe("PrometheusWriter", () => {
           (call) => call[2]?.event === "route_not_found"
         )
       ).toBe(false);
+    });
+  });
+
+  describe("/ready", () => {
+    // /ready reports readiness (can the service ingest telemetry right
+    // now), not liveness: /health stays 200 through a transient broker
+    // outage so the Docker healthcheck never restarts the container,
+    // while readiness-sensitive orchestrators probe /ready instead.
+    it("returns 503 and degraded when no MQTT client is connected", async () => {
+      // The shared writer has no networking attached, so is_connected() is
+      // undefined and the service is not ready to ingest.
+      const res = await fetch(`http://127.0.0.1:${port}/ready`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { status: string; mqtt: string };
+      expect(body.status).toBe("degraded");
+      expect(body.mqtt).toBe("disconnected");
+    });
+
+    it("returns 503 and degraded when the MQTT client is disconnected", async () => {
+      writer.setMqttNetworking({ is_connected: () => false } as unknown as IMqttNetworking);
+
+      const res = await fetch(`http://127.0.0.1:${port}/ready`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { status: string; mqtt: string };
+      expect(body.status).toBe("degraded");
+      expect(body.mqtt).toBe("disconnected");
+    });
+
+    it("returns 200 and ready when the MQTT client is connected", async () => {
+      writer.setMqttNetworking({ is_connected: () => true } as unknown as IMqttNetworking);
+
+      const res = await fetch(`http://127.0.0.1:${port}/ready`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status: string; mqtt: string };
+      expect(body.status).toBe("ready");
+      expect(body.mqtt).toBe("connected");
+    });
+
+    it("keeps /health at 200 while the MQTT client is disconnected", async () => {
+      // The whole point of the split: a readiness failure must not be
+      // reported as a liveness failure.
+      writer.setMqttNetworking({ is_connected: () => false } as unknown as IMqttNetworking);
+
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status: string; mqtt: string };
+      expect(body.status).toBe("healthy");
+      expect(body.mqtt).toBe("disconnected");
     });
   });
 

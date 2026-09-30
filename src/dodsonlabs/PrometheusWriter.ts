@@ -158,8 +158,9 @@ export class PrometheusWriter {
             // still logged where it matters for diagnostics.
             const path = (req.url ?? "/").split("?")[0];
 
-            // Suppress logging for successful /metrics and /health requests
-            if (path !== "/metrics" && path !== "/health") {
+            // Suppress logging for successful /metrics, /health, and /ready
+            // requests (all are polled by orchestrators at high frequency)
+            if (path !== "/metrics" && path !== "/health" && path !== "/ready") {
                 this.logger.write_debug(
                     "prometheus/httpRequest",
                     "HTTP request received",
@@ -176,12 +177,30 @@ export class PrometheusWriter {
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
             } else if (path === "/health") {
+                // Liveness only: stays 200 while the process is responsive so
+                // the Docker healthcheck does not restart the container on a
+                // transient broker outage (the MQTT layer reconnects on its
+                // own). Orchestration layers that need a readiness signal
+                // should probe /ready instead.
                 const mqttStatus = this.mqttNetworking?.is_connected() ? "connected" : "disconnected";
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(200);
                 res.end(JSON.stringify({
                     status: "healthy",
                     mqtt: mqttStatus,
+                    timestamp: new Date().toISOString()
+                }));
+            } else if (path === "/ready") {
+                // Readiness: can the service actually ingest telemetry right
+                // now? A disconnected (or not-yet-wired) MQTT client means
+                // "no", so report 503 to readiness-sensitive orchestrators
+                // while /health keeps reporting liveness independently.
+                const mqttReady = this.mqttNetworking?.is_connected() === true;
+                res.setHeader("Content-Type", "application/json");
+                res.writeHead(mqttReady ? 200 : 503);
+                res.end(JSON.stringify({
+                    status: mqttReady ? "ready" : "degraded",
+                    mqtt: mqttReady ? "connected" : "disconnected",
                     timestamp: new Date().toISOString()
                 }));
             } else if (path === "/about") {
@@ -360,7 +379,8 @@ export class PrometheusWriter {
             routes: [
                 { route: "/about", description: "Returns service information and available commands." },
                 { route: "/endpoints", description: "Returns detailed information about each API endpoint." },
-                { route: "/health", description: "Health check endpoint." },
+                { route: "/health", description: "Liveness check endpoint (always 200 while the process is responsive)." },
+                { route: "/ready", description: "Readiness check endpoint (503 when the MQTT client is not connected)." },
                 { route: "/metrics", description: "Prometheus metrics endpoint." },
                 { route: "/read-config", description: "Reads the current configuration." },
                 { route: "/write-config", description: "Updates the configuration and reloads it." },
@@ -394,7 +414,15 @@ export class PrometheusWriter {
                 verb: "GET",
                 requestBody: "None",
                 responseBody: "{ status: \"healthy\", mqtt: \"connected|disconnected\", timestamp: \"ISO-date-string\" }",
-                description: "Health check endpoint for container orchestration."
+                description: "Liveness check endpoint for container healthchecks: returns 200 while the process is responsive, regardless of MQTT state."
+            },
+            {
+                name: "Readiness",
+                route: "/ready",
+                verb: "GET",
+                requestBody: "None",
+                responseBody: "{ status: \"ready|degraded\", mqtt: \"connected|disconnected\", timestamp: \"ISO-date-string\" }",
+                description: "Readiness check endpoint: returns 200 when the MQTT client is connected and 503 (degraded) otherwise. Use for readiness-sensitive orchestration; /health remains the liveness signal."
             },
             {
                 name: "Metrics",

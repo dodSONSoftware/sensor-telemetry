@@ -91,7 +91,8 @@ npm run test:coverage # Run tests with coverage report
 Metrics are exposed at `/metrics` (default: `http://localhost:3301/metrics`).
 
 Also available:
-- `/health` — Health check endpoint
+- `/health` — Liveness check endpoint. Returns 200 while the process is responsive, regardless of MQTT state, so the Docker healthcheck does not restart the container on a transient broker outage (the MQTT layer reconnects on its own)
+- `/ready` — Readiness check endpoint. Returns 200 (`{ status: "ready" }`) when the MQTT client is connected and 503 (`{ status: "degraded" }`) otherwise. For readiness-sensitive orchestration (Kubernetes, load balancing); `/health` remains the liveness signal
 - `/metrics` — Prometheus metrics
 
 ## Source Label Sanitization

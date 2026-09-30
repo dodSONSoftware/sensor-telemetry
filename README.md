@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Brass Hawk — firmware 2.5.5.
+**Release:** Copper Hawk — firmware 2.6.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -375,7 +375,8 @@ The service handles SIGTERM and SIGINT signals gracefully:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check endpoint |
+| `/health` | GET | Liveness check endpoint (200 while the process is responsive, regardless of MQTT state) |
+| `/ready` | GET | Readiness check endpoint (200 when the MQTT client is connected, 503 degraded otherwise) |
 | `/metrics` | GET | Prometheus metrics endpoint |
 | `/about` | GET | Service information |
 | `/endpoints` | GET | List available endpoints |
