@@ -46,19 +46,19 @@ Unknown device types are dropped with a warning. V2 section-based payloads (`pay
 
 | Metric | Description |
 |--------|-------------|
-| Air_Temperature | Temperature in Fahrenheit |
-| Air_Humidity | Humidity percentage |
-| Air_Pressure | Air pressure in in/Hg |
-| Air_Altitude | Barometric altitude in feet (bme280 only) |
-| Soil_Moisture_Percent | Soil moisture percentage (0-100) |
-| Soil_Moisture_Raw | Raw 16-bit soil moisture ADC reading |
-| Light_UV_Index | UV Index |
-| Light_LUX | Light level in LUX |
-| Rain_In_H2O | Rain accumulation in inches |
-| Wind_Speed | Wind speed in mph |
-| Wind_Gusts | Wind gusts in mph |
-| Water_Temperature | Water temperature in Fahrenheit |
-| Lightning | Lightning strike count |
+| air_temperature | Temperature in Fahrenheit |
+| air_humidity | Humidity percentage |
+| air_pressure | Air pressure in in/Hg |
+| air_altitude_ft | Barometric altitude in feet (bme280 only) |
+| soil_moisture_percent | Soil moisture percentage (0-100) |
+| soil_moisture_raw | Raw 16-bit soil moisture ADC reading |
+| light_uv_index | UV Index |
+| light_lux | Light level in LUX |
+| rain_in_h2o | Rain accumulation in inches |
+| wind_speed | Wind speed in mph |
+| wind_gusts | Wind gusts in mph |
+| water_temperature | Water temperature in Fahrenheit |
+| lightning_strike_count | Lightning strike count |
 
 ## Commands
 

@@ -704,16 +704,16 @@ export class PrometheusWriter {
                 name: "Write Config",
                 route: "/write-config",
                 verb: "POST",
-                requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (positive integer, optional), sensorSourceValidCharsRegex (string, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional). Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
+                requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (positive integer, optional), sensorSourceValidCharsRegex (string, optional), sensorSourceCardinalityCap (positive integer, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional). Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
                 responseBody: "{ success: boolean, message: string }",
-                description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, or sensorSourceValidCharsRegex take effect on the next restart."
+                description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, sensorSourceValidCharsRegex, or sensorSourceCardinalityCap take effect on the next restart. When running in Docker, an apiPort change additionally requires updating the deployment configuration: the image healthcheck probes localhost:3301 and the compose port mapping is 3301:3301."
             },
             {
                 name: "Reload Config",
                 route: "/reload-config",
                 verb: "GET",
                 requestBody: "None. Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
-                responseBody: "{ success: true, message: \"Configuration reloaded successfully\", config: object }",
+                responseBody: "{ success: true, message: \"Configuration reloaded successfully\" }",
                 description: "Reloads the configuration from disk and applies the runtime-effective keys; other keys take effect on the next restart."
             }
         ];

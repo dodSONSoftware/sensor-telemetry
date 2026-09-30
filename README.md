@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.1.
+**Release:** Iron Badger — firmware 3.0.2.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -126,7 +126,7 @@ forwardSensorLogsLevel: debug
 | Option | Description | Default |
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug) | info |
-| `apiPort` | Port for Prometheus metrics endpoint | required |
+| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 3301 (image healthcheck probes `localhost:3301`, compose maps `3301:3301`), so changing this value in Docker also requires updating those deployment files | required |
 | `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, with an optional `:port` (1-65535); no scheme — validated at config load so an unparseable value fails as a clean config error instead of a synchronous throw from `mqtt.connect` | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
@@ -292,8 +292,9 @@ npm run build
 
 ## Running Locally
 
+`npm run build` compiles the service and copies `config.yml` into `dist/`:
+
 ```bash
-cp src/config.yml ./dist/
 cd dist
 node index.js
 ```
@@ -338,36 +339,39 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `Air_Temperature` | Gauge | source | Temperature in Fahrenheit |
-| `Air_Humidity` | Gauge | source | Humidity percentage |
-| `Air_Pressure` | Gauge | source | Air pressure in in/Hg (only for sources with a barometer, e.g. BME280) |
-| `Air_Altitude` | Gauge | source | Barometric altitude in feet (only for BME280 sources reporting a finite `altitude_m`) |
-| `Soil_Moisture_Percent` | Gauge | source | Soil moisture percentage (0-100), from `yl69_fc28` / `plantmate_soil` |
-| `Soil_Moisture_Raw` | Gauge | source | Raw 16-bit soil moisture ADC reading (0-65535) |
-| `Light_UV_Index` | Gauge | source | UV Index |
-| `Light_LUX` | Gauge | source | Light level in LUX |
-| `Rain_In_H2O` | Gauge | source | Rain accumulation in inches |
-| `Wind_Speed` | Gauge | source | Wind speed in mph |
-| `Wind_Gusts` | Gauge | source | Wind gusts in mph |
-| `Water_Temperature` | Gauge | source | Water temperature in Fahrenheit |
-| `Lightning` | Gauge | source | Lightning strike count |
-| `Cpu_Temperature` | Gauge | source | CPU temperature in Celsius (health messages) |
-| `Heap_Free_Bytes` | Gauge | source | Free heap memory in bytes (health messages) |
-| `Wifi_RSSI_DBM` | Gauge | source | WiFi signal strength in dBm (health messages) |
-| `Sensor_Health_Up` | Gauge | source | Sensor health status from V3 health messages (1 = healthy, 0 = degraded) |
-| `Sensor_Uptime` | Gauge | source | Sensor uptime in seconds from V3 health messages |
-| `Heap_Min_Free_Bytes` | Gauge | source | Lowest free heap memory in bytes observed since boot |
-| `Sensor_Devices_Active` | Gauge | source | Number of active sensor devices |
-| `Sensor_Devices_Configured` | Gauge | source | Number of configured sensor devices |
-| `Sensor_Network_Stack_Ready` | Gauge | source | Network stack status (1 = ready, 0 = not ready) |
-| `Sensor_Wifi_Connected` | Gauge | source | WiFi connection status (1 = connected, 0 = not connected) |
-| `Sensor_Mqtt_Connected` | Gauge | source | MQTT connection status (1 = connected, 0 = not connected) |
-| `Sensor_Core_1_Active` | Gauge | source | Core 1 (sensor core) status (1 = active, 0 = inactive) |
-| `Sensor_Outbound_Queue_Depth` | Gauge | source | Depth of the outbound MQTT publish queue |
-| `Sensor_Outbound_Evicted` | Gauge | source | Total outbound messages evicted from the queue |
-| `Sensor_Outbound_Rejected` | Gauge | source | Total outbound messages rejected by the queue |
-| `Sensor_Utc_Valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
-| `Sensor_Utc_Sync_Age` | Gauge | source | Age of the last successful UTC time sync in seconds |
+| `air_temperature` | Gauge | source | Temperature in Fahrenheit |
+| `air_humidity` | Gauge | source | Humidity percentage |
+| `air_pressure` | Gauge | source | Air pressure in in/Hg (only for sources with a barometer, e.g. BME280) |
+| `air_altitude_ft` | Gauge | source | Barometric altitude in feet (only for BME280 sources reporting a finite `altitude_m`) |
+| `soil_moisture_percent` | Gauge | source | Soil moisture percentage (0-100), from `yl69_fc28` / `plantmate_soil` |
+| `soil_moisture_raw` | Gauge | source | Raw 16-bit soil moisture ADC reading (0-65535) |
+| `light_uv_index` | Gauge | source | UV Index |
+| `light_lux` | Gauge | source | Light level in LUX |
+| `rain_in_h2o` | Gauge | source | Rain accumulation in inches |
+| `wind_speed` | Gauge | source | Wind speed in mph |
+| `wind_gusts` | Gauge | source | Wind gusts in mph |
+| `water_temperature` | Gauge | source | Water temperature in Fahrenheit |
+| `lightning_strike_count` | Gauge | source | Lightning strike count |
+| `sensor_health_cpu_temperature_c` | Gauge | source | CPU temperature in Celsius (health messages) |
+| `sensor_health_heap_free_bytes` | Gauge | source | Free heap memory in bytes (health messages) |
+| `sensor_health_heap_used_percent` | Gauge | source | Percentage of heap memory used (health messages) |
+| `sensor_health_read_failure_count` | Gauge | source | Total number of sensor read failures (health messages) |
+| `sensor_health_read_count` | Gauge | source | Total number of successful sensor reads (health messages) |
+| `sensor_health_wifi_rssi_dbm` | Gauge | source | WiFi signal strength in dBm (health messages) |
+| `sensor_health_up` | Gauge | source | Sensor health status from V3 health messages (1 = healthy, 0 = degraded) |
+| `sensor_health_uptime_seconds` | Gauge | source | Sensor uptime in seconds from V3 health messages |
+| `sensor_health_heap_min_free_bytes` | Gauge | source | Lowest free heap memory in bytes observed since boot |
+| `sensor_health_devices_active` | Gauge | source | Number of active sensor devices |
+| `sensor_health_devices_configured` | Gauge | source | Number of configured sensor devices |
+| `sensor_health_network_stack_ready` | Gauge | source | Network stack status (1 = ready, 0 = not ready) |
+| `sensor_health_wifi_connected` | Gauge | source | WiFi connection status (1 = connected, 0 = not connected) |
+| `sensor_health_mqtt_connected` | Gauge | source | MQTT connection status (1 = connected, 0 = not connected) |
+| `sensor_health_core_1_active` | Gauge | source | Core 1 (sensor core) status (1 = active, 0 = inactive) |
+| `sensor_health_outbound_queue_depth` | Gauge | source | Depth of the outbound MQTT publish queue |
+| `sensor_health_outbound_evicted` | Gauge | source | Total outbound messages evicted from the queue |
+| `sensor_health_outbound_rejected` | Gauge | source | Total outbound messages rejected by the queue |
+| `sensor_health_utc_valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
+| `sensor_health_utc_sync_age_sec` | Gauge | source | Age of the last successful UTC time sync in seconds |
 | `sensor_last_seen_timestamp_seconds` | Gauge | source | Unix timestamp (seconds) of the most recent **accepted** telemetry or health message from the source — stamped once per accepted message, not per gauge. Sensor age: `time() - sensor_last_seen_timestamp_seconds`; staleness thresholds belong in Prometheus/Grafana alerting, and the service does not remove series from offline sources |
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
 | `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
