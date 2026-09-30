@@ -35,7 +35,6 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     CONFIG_FILE_CANDIDATES
   );
   if (configResult.data === null || configResult.source === null) {
-    // eslint-disable-next-line no-console
     console.error(`ERROR: Could not read config.yml — ${configResult.error ?? "unknown error"} — cannot start without configuration.`);
     process.exit(1);
   }

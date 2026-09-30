@@ -13,7 +13,7 @@ import {
 
 const VALID_CONFIG_YAML = [
   "logLevel: info",
-  "prometheusPort: 3301",
+  "apiPort: 3301",
   'mqttBrokerIpAddress: "127.0.0.1"',
   "mqttTopicTelemetry: iot/telemetry",
 ].join("\n");
@@ -61,7 +61,7 @@ describe("read_file_yaml_first", () => {
     expect(result.source).toBe("./config.yml");
     expect(result.data).toEqual({
       logLevel: "info",
-      prometheusPort: 3301,
+      apiPort: 3301,
       mqttBrokerIpAddress: "127.0.0.1",
       mqttTopicTelemetry: "iot/telemetry",
     });

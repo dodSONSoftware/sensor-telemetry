@@ -76,7 +76,7 @@ npm run test:coverage # Run tests with coverage report
 | Option | Description | Default |
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug, critical — critical filters at winston error level) | info |
-| `prometheusPort` | Port for Prometheus metrics endpoint | 3301 |
+| `apiPort` | Port for Prometheus metrics endpoint | required |
 | `mqttBrokerIpAddress` | MQTT broker hostname/IP | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages | - |
