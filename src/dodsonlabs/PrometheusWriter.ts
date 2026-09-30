@@ -11,7 +11,7 @@ import type { ILogger, IMqttNetworking } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { ensureError, read_file_yaml, write_file_yaml } from "./SystemFunctions";
+import { ensureError, get_numeric_field, read_file_yaml, write_file_yaml } from "./SystemFunctions";
 
 // Load version from package.json at module load time
 const pkgRequire = createRequire(__filename);
@@ -677,30 +677,6 @@ export class PrometheusWriter {
         });
     }
 
-    /**
-     * Get a numeric value from an object using V2 snake_case field names.
-     * Returns undefined if not found or not a valid finite number.
-     */
-    private getNumericField(obj: any, ...fieldNames: string[]): number | undefined {
-        for (const fieldName of fieldNames) {
-            const value = obj[fieldName];
-            if (value !== undefined && value !== null) {
-                // Empty/whitespace strings are the protocol's "unset" marker
-                // (V1/V2 use them for missing values); Number("") would coerce
-                // them to 0 and publish a false zero reading, so treat them
-                // as absent and try the next alias.
-                if (typeof value === "string" && value.trim() === "") {
-                    continue;
-                }
-                const numValue = Number(value);
-                if (Number.isFinite(numValue)) {
-                    return numValue;
-                }
-            }
-        }
-        return undefined;
-    }
-
     publish_air(payload: any, source: string, firmwareVersion: string) {
         const sanitized = this.sanitizeSource(source);
         const air = payload?.["air"];
@@ -720,7 +696,7 @@ export class PrometheusWriter {
 
         // Use V2 snake_case field names
         const temp_f =
-            (this.getNumericField(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
+            (get_numeric_field(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
         // A missing or non-numeric temperature means the reading is broken;
         // publishing the other gauges from the same message would leave a
         // mix of fresh and stale values for the source, so reject the whole
@@ -757,9 +733,9 @@ export class PrometheusWriter {
             this.prometheus_Gauge_AirTemp!.set({ source: sanitized }, temp_f);
         }
 
-        const humidity = this.getNumericField(air, "humidity_percent");
+        const humidity = get_numeric_field(air, "humidity_percent");
         // V3 renamed the pressure field to pressure_pa; accept both
-        const pressure = this.pascalToInHg(this.getNumericField(air, "pressure_pa", "pressure_pascal") ?? NaN);
+        const pressure = this.pascalToInHg(get_numeric_field(air, "pressure_pa", "pressure_pascal") ?? NaN);
 
         this.logger.write_debug(
             "prometheus/publishAirData",
@@ -809,7 +785,7 @@ export class PrometheusWriter {
 
         // V3 bme280 messages carry altitude in meters (null when the adjusted
         // pressure is non-positive); only bme280 devices send it.
-        const altitudeM = this.getNumericField(air, "altitude_m");
+        const altitudeM = get_numeric_field(air, "altitude_m");
         const altitudeFt = altitudeM === undefined ? NaN : this.metersToFeet(altitudeM);
         if (Number.isFinite(altitudeFt)) {
             this.prometheus_Gauge_AirAltitude!.set({ source: sanitized }, altitudeFt);
@@ -856,7 +832,7 @@ export class PrometheusWriter {
         }
 
         // Use V2 snake_case field names
-        const uvIndex = this.getNumericField(light, "uv_index");
+        const uvIndex = get_numeric_field(light, "uv_index");
         if (uvIndex === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightInvalidUv",
@@ -873,7 +849,7 @@ export class PrometheusWriter {
             this.prometheus_Gauge_LightUvIndex!.set({ source: sanitized }, uvIndex);
         }
 
-        const lux = this.getNumericField(light, "lux");
+        const lux = get_numeric_field(light, "lux");
         if (lux === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightInvalidLux",
@@ -922,7 +898,7 @@ export class PrometheusWriter {
         }
 
         // Use V2 snake_case field names
-        const inches = this.getNumericField(rain, "in_h2o");
+        const inches = get_numeric_field(rain, "in_h2o");
         if (inches === undefined) {
             this.logger.write_warn(
                 "prometheus/publishRainInvalid",
@@ -970,7 +946,7 @@ export class PrometheusWriter {
         }
 
         // Use V2 snake_case field names
-        const speed = this.cmPerSecToMph(this.getNumericField(wind, "wind_speed_cm_sec") ?? NaN);
+        const speed = this.cmPerSecToMph(get_numeric_field(wind, "wind_speed_cm_sec") ?? NaN);
         if (!Number.isFinite(speed)) {
             this.logger.write_warn(
                 "prometheus/publishWindInvalidSpeed",
@@ -987,7 +963,7 @@ export class PrometheusWriter {
             this.prometheus_Gauge_WindSpeed!.set({ source: sanitized }, speed);
         }
 
-        const gusts = this.cmPerSecToMph(this.getNumericField(wind, "gusts_cm_sec") ?? NaN);
+        const gusts = this.cmPerSecToMph(get_numeric_field(wind, "gusts_cm_sec") ?? NaN);
         if (!Number.isFinite(gusts)) {
             this.logger.write_warn(
                 "prometheus/publishWindInvalidGusts",
@@ -1036,7 +1012,7 @@ export class PrometheusWriter {
         }
 
         // Use V2 snake_case field names
-        const temp_f = (this.getNumericField(water, "temperature_c") ?? NaN) * 9 / 5 + 32;
+        const temp_f = (get_numeric_field(water, "temperature_c") ?? NaN) * 9 / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
                 "prometheus/publishWaterInvalidTemp",
@@ -1099,7 +1075,7 @@ export class PrometheusWriter {
         }
 
         // Use V2 snake_case field names
-        const count = this.getNumericField(lightning, "lightning_count");
+        const count = get_numeric_field(lightning, "lightning_count");
         if (count === undefined) {
             this.logger.write_warn(
                 "prometheus/publishLightningInvalid",
@@ -1147,7 +1123,7 @@ export class PrometheusWriter {
         }
 
         // V3 snake_case field names (yl69_fc28 / plantmate_soil)
-        const percent = this.getNumericField(soil, "relative_moisture_percent");
+        const percent = get_numeric_field(soil, "relative_moisture_percent");
         if (percent === undefined) {
             this.logger.write_warn(
                 "prometheus/publishSoilInvalidPercent",
@@ -1190,7 +1166,7 @@ export class PrometheusWriter {
         }
 
         // raw is an optional uncalibrated 16-bit ADC value
-        const raw = this.getNumericField(soil, "raw");
+        const raw = get_numeric_field(soil, "raw");
         if (raw !== undefined) {
             if (raw < 0 || raw > 65535) {
                 this.logger.write_warn(

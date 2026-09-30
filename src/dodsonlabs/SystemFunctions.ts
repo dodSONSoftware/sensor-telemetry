@@ -234,6 +234,45 @@ export function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// **** payload field extraction
+
+/**
+ * Get a numeric value from an object using the first field name that holds
+ * a usable value (pass snake_case/camelCase aliases in either order).
+ *
+ * - Empty/whitespace strings are the protocol's "unset" marker (V1/V2 use
+ *   them for missing values); Number("") would coerce them to 0 and publish
+ *   a false zero reading, so they are treated as absent and the next alias
+ *   is tried.
+ * - Values that do not coerce to a finite number are likewise absent.
+ * - Fields whose name contains time/Time/millis/Millis (e.g. uptime_ms) are
+ *   truncated to integer milliseconds.
+ *
+ * Returns undefined if no field holds a valid finite number.
+ */
+export function get_numeric_field(
+  obj: any,
+  ...fieldNames: string[]
+): number | undefined {
+  for (const fieldName of fieldNames) {
+    const value = obj[fieldName];
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    const numValue = Number(value);
+    if (!Number.isFinite(numValue)) continue;
+    if (
+      fieldName.includes("time") ||
+      fieldName.includes("Time") ||
+      fieldName.includes("millis") ||
+      fieldName.includes("Millis")
+    ) {
+      return Math.trunc(numValue);
+    }
+    return numValue;
+  }
+  return undefined;
+}
+
 // **** time-related functions
 
 export function get_timestamp_iso(): string {

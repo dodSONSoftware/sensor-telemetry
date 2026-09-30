@@ -498,36 +498,6 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     /**
-     * Get a numeric value from an object using snake_case field names (V2 format).
-     * For time-related fields (milliseconds), truncates to integer.
-     * Returns undefined if not found or not a valid finite number.
-     */
-    private getNumericField(obj: any, ...fieldNames: string[]): number | undefined {
-        for (const fieldName of fieldNames) {
-            const value = obj[fieldName];
-            if (value !== undefined && value !== null) {
-                // Empty/whitespace strings are the protocol's "unset" marker
-                // (V1/V2 use them for missing values); Number("") would coerce
-                // them to 0 and publish a false zero reading, so treat them
-                // as absent and try the next alias.
-                if (typeof value === "string" && value.trim() === "") {
-                    continue;
-                }
-                const numValue = Number(value);
-                if (Number.isFinite(numValue)) {
-                    // Truncate to integer for millisecond time fields
-                    if (fieldName.includes('time') || fieldName.includes('Time') ||
-                        fieldName.includes('millis') || fieldName.includes('Millis')) {
-                        return Math.trunc(numValue);
-                    }
-                    return numValue;
-                }
-            }
-        }
-        return undefined;
-    }
-
-    /**
      * Get a boolean value from an object using snake_case field names (V3 format).
      * Returns true/false only for actual boolean values; anything else (including
      * null) is treated as absent so malformed values never become 0/1 gauges.
@@ -558,8 +528,8 @@ export class MqttNetworking implements IMqttNetworking {
         const schemaVersion = this.getField(json_doc, "message_schema_version", "schema_version");
         const runtimeId = this.getField(json_doc, "runtime_id");
         const firmwareVersion = this.getField(json_doc, "firmware_version");
-        const uptimeMs = this.getNumericField(json_doc, "uptime_ms");
-        const sequence = this.getNumericField(json_doc, "sequence");
+        const uptimeMs = sysFunc.get_numeric_field(json_doc, "uptime_ms");
+        const sequence = sysFunc.get_numeric_field(json_doc, "sequence");
 
         // Remove service-managed fields from log data (not metadata)
         delete logData["schema_version"];
@@ -618,9 +588,9 @@ export class MqttNetworking implements IMqttNetworking {
         if (targeted !== undefined) metadata.targeted = targeted;
         const responseTopic = this.getLogField(logData, "response_topic", "responseTopic");
         if (responseTopic !== undefined) metadata.responseTopic = responseTopic;
-        const payloadSize = this.getNumericField(logData, "payload_size", "payloadSize");
+        const payloadSize = sysFunc.get_numeric_field(logData, "payload_size", "payloadSize");
         if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
-        const durationMs = this.getNumericField(logData, "duration_ms", "durationMs");
+        const durationMs = sysFunc.get_numeric_field(logData, "duration_ms", "durationMs");
         if (durationMs !== undefined) metadata.durationMs = durationMs;
         const deviceIp = this.getLogField(logData, "device_ip", "deviceIp");
         if (deviceIp !== undefined) metadata.deviceIp = deviceIp;
@@ -805,7 +775,7 @@ export class MqttNetworking implements IMqttNetworking {
             // sensor, so pressure is only required for devices that carry it.
             const pressureRequired = device === "bme280";
             if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
-                (!pressureRequired || this.getNumericField(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
+                (!pressureRequired || sysFunc.get_numeric_field(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
                 this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
             }
             break;
@@ -855,45 +825,45 @@ export class MqttNetworking implements IMqttNetworking {
         }
 
         // Overlapping system-info gauges (V3 field names)
-        const cpuTempC = this.getNumericField(payload, "cpu_temperature_c", "cpu_temp_c");
+        const cpuTempC = sysFunc.get_numeric_field(payload, "cpu_temperature_c", "cpu_temp_c");
         if (cpuTempC !== undefined) {
             this.promWriter.set_cpu_temp(source, cpuTempC);
         }
-        const freeHeapBytes = this.getNumericField(payload, "free_heap_bytes");
+        const freeHeapBytes = sysFunc.get_numeric_field(payload, "free_heap_bytes");
         if (freeHeapBytes !== undefined) {
             this.promWriter.set_heap_free_bytes(source, freeHeapBytes);
         }
-        const wifiRssiDbm = this.getNumericField(payload, "wifi_rssi_dbm");
+        const wifiRssiDbm = sysFunc.get_numeric_field(payload, "wifi_rssi_dbm");
         if (wifiRssiDbm !== undefined) {
             this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
         }
 
         // V4 health numeric gauges (all optional; null/missing are skipped)
-        const minHeapFreeBytes = this.getNumericField(payload, "minimum_free_heap_bytes");
+        const minHeapFreeBytes = sysFunc.get_numeric_field(payload, "minimum_free_heap_bytes");
         if (minHeapFreeBytes !== undefined) {
             this.promWriter.set_min_heap_free_bytes(source, minHeapFreeBytes);
         }
-        const devicesActive = this.getNumericField(payload, "devices_active");
+        const devicesActive = sysFunc.get_numeric_field(payload, "devices_active");
         if (devicesActive !== undefined) {
             this.promWriter.set_devices_active(source, devicesActive);
         }
-        const devicesConfigured = this.getNumericField(payload, "devices_configured");
+        const devicesConfigured = sysFunc.get_numeric_field(payload, "devices_configured");
         if (devicesConfigured !== undefined) {
             this.promWriter.set_devices_configured(source, devicesConfigured);
         }
-        const outboundQueueDepth = this.getNumericField(payload, "outbound_queue_depth");
+        const outboundQueueDepth = sysFunc.get_numeric_field(payload, "outbound_queue_depth");
         if (outboundQueueDepth !== undefined) {
             this.promWriter.set_outbound_queue_depth(source, outboundQueueDepth);
         }
-        const outboundEvicted = this.getNumericField(payload, "outbound_evicted");
+        const outboundEvicted = sysFunc.get_numeric_field(payload, "outbound_evicted");
         if (outboundEvicted !== undefined) {
             this.promWriter.set_outbound_evicted(source, outboundEvicted);
         }
-        const outboundRejected = this.getNumericField(payload, "outbound_rejected");
+        const outboundRejected = sysFunc.get_numeric_field(payload, "outbound_rejected");
         if (outboundRejected !== undefined) {
             this.promWriter.set_outbound_rejected(source, outboundRejected);
         }
-        const utcSyncAgeSec = this.getNumericField(payload, "utc_sync_age_sec");
+        const utcSyncAgeSec = sysFunc.get_numeric_field(payload, "utc_sync_age_sec");
         if (utcSyncAgeSec !== undefined) {
             this.promWriter.set_utc_sync_age_sec(source, utcSyncAgeSec);
         }
@@ -944,9 +914,9 @@ export class MqttNetworking implements IMqttNetworking {
             );
         }
         // uptime_ms sits at the top level of V3 messages (fallback to payload)
-        let uptimeMs = this.getNumericField(json_doc, "uptime_ms");
+        let uptimeMs = sysFunc.get_numeric_field(json_doc, "uptime_ms");
         if (uptimeMs === undefined) {
-            uptimeMs = this.getNumericField(payload, "uptime_ms");
+            uptimeMs = sysFunc.get_numeric_field(payload, "uptime_ms");
         }
         if (uptimeMs !== undefined) {
             this.promWriter.set_uptime_seconds(source, uptimeMs / 1000);
@@ -1084,7 +1054,7 @@ export class MqttNetworking implements IMqttNetworking {
      *  Uses V2 snake_case field names. Returns true only if ALL fields are valid. */
     private is_telemetry_valid(section: any, fields: string[], source: string): boolean {
         for (const field of fields) {
-            const value = this.getNumericField(section, field);
+            const value = sysFunc.get_numeric_field(section, field);
             if (value === undefined) {
                 this.logger.write_warn(
                     "networking/isTelemetryValid",
@@ -1174,19 +1144,19 @@ export class MqttNetworking implements IMqttNetworking {
         const hardwareInfo = systemInfo?.["hardware_info"] || systemInfo?.["hardwareInfo"];
         if (hardwareInfo) {
             // CPU temperature
-            const cpuTempC = this.getNumericField(hardwareInfo, "cpu_temp_c", "cpuTemperatureC");
+            const cpuTempC = sysFunc.get_numeric_field(hardwareInfo, "cpu_temp_c", "cpuTemperatureC");
             if (cpuTempC !== undefined && Number.isFinite(cpuTempC)) {
                 this.promWriter.set_cpu_temp(source, cpuTempC);
             }
 
             // Heap free bytes
-            const heapFreeBytes = this.getNumericField(hardwareInfo, "heap_free_bytes", "heapFreeBytes");
+            const heapFreeBytes = sysFunc.get_numeric_field(hardwareInfo, "heap_free_bytes", "heapFreeBytes");
             if (heapFreeBytes !== undefined && Number.isFinite(heapFreeBytes)) {
                 this.promWriter.set_heap_free_bytes(source, heapFreeBytes);
             }
 
             // Heap used percent
-            const heapUsedPercent = this.getNumericField(hardwareInfo, "heap_used_percent", "heapUsedPercent");
+            const heapUsedPercent = sysFunc.get_numeric_field(hardwareInfo, "heap_used_percent", "heapUsedPercent");
             if (heapUsedPercent !== undefined && Number.isFinite(heapUsedPercent)) {
                 this.promWriter.set_heap_used_percent(source, heapUsedPercent);
             }
@@ -1196,7 +1166,7 @@ export class MqttNetworking implements IMqttNetworking {
         const wifiInfo = systemInfo?.["wifi_info"] || systemInfo?.["wifiInfo"];
         if (wifiInfo) {
             // WiFi RSSI
-            const wifiRssiDbm = this.getNumericField(wifiInfo, "wifi_rssi_dbm", "wifiRssiDbm");
+            const wifiRssiDbm = sysFunc.get_numeric_field(wifiInfo, "wifi_rssi_dbm", "wifiRssiDbm");
             if (wifiRssiDbm !== undefined && Number.isFinite(wifiRssiDbm)) {
                 this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
             }
@@ -1206,13 +1176,13 @@ export class MqttNetworking implements IMqttNetworking {
         const sensorInfo = systemInfo?.["sensor_info"] || systemInfo?.["sensorInfo"];
         if (sensorInfo) {
             // Sensor read failures
-            const sensorReadFailures = this.getNumericField(sensorInfo, "sensor_read_failures", "sensorReadFailures");
+            const sensorReadFailures = sysFunc.get_numeric_field(sensorInfo, "sensor_read_failures", "sensorReadFailures");
             if (sensorReadFailures !== undefined && Number.isFinite(sensorReadFailures)) {
                 this.promWriter.set_sensor_read_failures(source, sensorReadFailures);
             }
 
             // Sensor read counter
-            const sensorReadCounter = this.getNumericField(sensorInfo, "sensor_read_counter", "sensorReadCounter");
+            const sensorReadCounter = sysFunc.get_numeric_field(sensorInfo, "sensor_read_counter", "sensorReadCounter");
             if (sensorReadCounter !== undefined && Number.isFinite(sensorReadCounter)) {
                 this.promWriter.set_sensor_read_counter(source, sensorReadCounter);
             }
