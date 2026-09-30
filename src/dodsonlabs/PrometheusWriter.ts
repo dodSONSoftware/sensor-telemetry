@@ -64,6 +64,10 @@ export class PrometheusWriter {
     private prometheus_Gauge_OutboundRejected: Gauge | undefined;
     private prometheus_Gauge_UtcValid: Gauge | undefined;
     private prometheus_Gauge_UtcSyncAgeSec: Gauge | undefined;
+
+    // ******** service diagnostics (this service's own MQTT subscriptions)
+
+    private prometheus_Gauge_MqttSubscriptionActive: Gauge | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
     // Cardinality-overflow counters: incremented each time a label value
@@ -264,15 +268,22 @@ export class PrometheusWriter {
                 }));
             } else if (path === "/ready") {
                 // Readiness: can the service actually ingest telemetry right
-                // now? A disconnected (or not-yet-wired) MQTT client means
-                // "no", so report 503 to readiness-sensitive orchestrators
-                // while /health keeps reporting liveness independently.
-                const mqttReady = this.mqttNetworking?.is_connected() === true;
+                // now? The client must be connected AND the broker must have
+                // acknowledged the configured subscriptions — a broker can
+                // grant CONNECT while denying SUBSCRIBE (ACL, rejected topic
+                // filter), keeping the client "connected" while ingesting
+                // nothing, so connection state alone is not enough. Report
+                // 503 to readiness-sensitive orchestrators while /health
+                // keeps reporting liveness independently.
+                const connected = this.mqttNetworking?.is_connected() === true;
+                const subscriptionsActive = this.mqttNetworking?.subscriptions_active() === true;
+                const mqttReady = connected && subscriptionsActive;
                 res.setHeader("Content-Type", "application/json");
                 res.writeHead(mqttReady ? 200 : 503);
                 res.end(JSON.stringify({
                     status: mqttReady ? "ready" : "degraded",
-                    mqtt: mqttReady ? "connected" : "disconnected",
+                    mqtt: connected ? "connected" : "disconnected",
+                    subscriptions: subscriptionsActive ? "active" : "degraded",
                     timestamp: new Date().toISOString()
                 }));
             } else if (path === "/about") {
@@ -606,7 +617,7 @@ export class PrometheusWriter {
                 { route: "/about", description: "Returns service information and available commands." },
                 { route: "/endpoints", description: "Returns detailed information about each API endpoint." },
                 { route: "/health", description: "Liveness check endpoint (always 200 while the process is responsive)." },
-                { route: "/ready", description: "Readiness check endpoint (503 when the MQTT client is not connected)." },
+                { route: "/ready", description: "Readiness check endpoint (503 when the MQTT client is not connected or a subscription is not active)." },
                 { route: "/metrics", description: "Prometheus metrics endpoint." },
                 { route: "/read-config", description: "Reads the current configuration." },
                 { route: "/write-config", description: "Updates the configuration and reloads it." },
@@ -647,8 +658,8 @@ export class PrometheusWriter {
                 route: "/ready",
                 verb: "GET",
                 requestBody: "None",
-                responseBody: "{ status: \"ready|degraded\", mqtt: \"connected|disconnected\", timestamp: \"ISO-date-string\" }",
-                description: "Readiness check endpoint: returns 200 when the MQTT client is connected and 503 (degraded) otherwise. Use for readiness-sensitive orchestration; /health remains the liveness signal."
+                responseBody: "{ status: \"ready|degraded\", mqtt: \"connected|disconnected\", subscriptions: \"active|degraded\", timestamp: \"ISO-date-string\" }",
+                description: "Readiness check endpoint: returns 200 when the MQTT client is connected and the broker has acknowledged the configured subscriptions, 503 (degraded) otherwise. A denied subscription (SUBACK failure) keeps the client connected while ingesting nothing, so both signals are required. Use for readiness-sensitive orchestration; /health remains the liveness signal."
             },
             {
                 name: "Metrics",
@@ -2332,6 +2343,28 @@ export class PrometheusWriter {
             name: "sensor_health_utc_sync_age_sec",
             help: "Age of the last successful UTC time sync in seconds.",
             labelNames: ["source"],
+        });
+
+        // ******** service diagnostics (this service's own MQTT subscriptions)
+
+        // Pulled from MqttNetworking at scrape time rather than pushed on
+        // each SUBACK: the value is always current and no callback coupling
+        // is needed. Absent (no series) when no networking is attached, as
+        // in unit tests that use a bare writer.
+        this.prometheus_Gauge_MqttSubscriptionActive = new Gauge({
+            name: "mqtt_subscription_active",
+            help: "Per-topic MQTT subscription state for this service (1 = broker acknowledged the subscription, 0 = pending, denied, or lost).",
+            labelNames: ["topic"],
+            collect: () => {
+                const states = this.mqttNetworking?.get_subscription_states();
+                if (!states) return;
+                for (const { topic, active } of states) {
+                    this.prometheus_Gauge_MqttSubscriptionActive!.set(
+                        { topic },
+                        active ? 1 : 0
+                    );
+                }
+            },
         });
     }
 

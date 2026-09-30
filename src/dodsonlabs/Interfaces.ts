@@ -220,5 +220,13 @@ export interface ILogger {
 
 export interface IMqttNetworking {
   is_connected(): boolean;
+  /**
+   * True once the broker has acknowledged every configured subscription.
+   * Connection alone is not readiness: a broker may grant CONNECT while
+   * denying SUBSCRIBE, leaving the client connected but ingesting nothing.
+   */
+  subscriptions_active(): boolean;
+  /** Per-topic subscription state, consumed by the mqtt_subscription_active gauge. */
+  get_subscription_states(): Array<{ topic: string; active: boolean }>;
   close(): Promise<void>;
 }

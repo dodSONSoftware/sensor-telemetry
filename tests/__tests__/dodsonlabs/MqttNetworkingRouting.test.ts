@@ -33,11 +33,14 @@ jest
   .mockImplementation((version: string) => version);
 
 function createMockMqttClient() {
-  // on must stay a recording jest.fn(): the driver below finds the
-  // "message" handler by searching on.mock.calls.
+  // on must stay a recording jest.fn(): the drivers below find the
+  // "message"/"connect" handlers by searching on.mock.calls. subscribe is
+  // a recording jest.fn() so SUBACK callbacks can be captured and invoked
+  // with either a grant or an error.
   return {
     connected: false,
     on: jest.fn(),
+    subscribe: jest.fn(),
     end: jest.fn((optsOrCallback?: unknown, maybeCallback?: () => void) => {
       const cb = typeof optsOrCallback === "function"
         ? (optsOrCallback as () => void)
@@ -402,5 +405,70 @@ describe("MqttNetworking V3 health field mapping", () => {
     ).toBe(true);
     expect(prom.set_health_up).not.toHaveBeenCalled();
     expect(prom.set_uptime_seconds).not.toHaveBeenCalled();
+  });
+});
+
+describe("subscription SUBACK handling (regression P2-3)", () => {
+  // Fire the constructor's "connect" handler so on_connect() issues the
+  // subscribe() calls, then capture the (topic, callback) pairs the fake
+  // client recorded. baseConfig configures no log/health topics, so there
+  // is exactly one subscription (telemetry).
+  function driveConnect(): {
+    networking: MqttNetworking;
+    logger: MockLogger & ILogger;
+    subscribe: jest.Mock;
+  } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const client = (
+      networking as unknown as { mqtt_client: ReturnType<typeof createMockMqttClient> }
+    ).mqtt_client;
+    const connectCall = client.on.mock.calls.find((call) => call[0] === "connect");
+    if (!connectCall) {
+      throw new Error("MqttNetworking did not register a 'connect' handler");
+    }
+    (connectCall[1] as () => Promise<void>)();
+    return { networking, logger, subscribe: client.subscribe as jest.Mock };
+  }
+
+  it("logs mqtt_subscription_failed and reports subscriptions inactive when the broker denies the subscription", () => {
+    const { networking, logger, subscribe } = driveConnect();
+
+    // No SUBACK yet: the broker has acknowledged nothing.
+    expect(networking.subscriptions_active()).toBe(false);
+    expect(networking.get_subscription_states()).toEqual([
+      { topic: baseConfig.mqttTopicTelemetry, active: false },
+    ]);
+
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    const [topic, callback] = subscribe.mock.calls[0];
+    expect(topic).toBe(baseConfig.mqttTopicTelemetry);
+    (callback as (err: Error | undefined, granted?: unknown) => void)(
+      new Error("not authorized")
+    );
+
+    expect(networking.subscriptions_active()).toBe(false);
+    const failures = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_subscription_failed"
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0][2]).toMatchObject({
+      mqttTopic: baseConfig.mqttTopicTelemetry,
+    });
+  });
+
+  it("reports subscriptions active once the broker acknowledges them", () => {
+    const { networking, subscribe } = driveConnect();
+
+    expect(networking.subscriptions_active()).toBe(false);
+    const [topic, callback] = subscribe.mock.calls[0];
+    (callback as (err: Error | undefined, granted?: unknown) => void)(undefined, [
+      { topic, qos: 0, isValid: true },
+    ]);
+
+    expect(networking.subscriptions_active()).toBe(true);
+    expect(networking.get_subscription_states()).toEqual([
+      { topic: baseConfig.mqttTopicTelemetry, active: true },
+    ]);
   });
 });

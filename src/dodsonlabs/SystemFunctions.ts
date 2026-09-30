@@ -176,19 +176,34 @@ export function read_file_yaml_first<T>(
   };
 }
 
+/**
+ * Atomically replace `filename` with the YAML serialization of `data`:
+ * write to a sibling temp file, then rename it over the target.
+ * rename(2) is atomic on POSIX, so readers and the next startup never
+ * observe a truncated file — a failure mid-write (ENOSPC, crash, power
+ * loss) leaves the previous config byte-for-byte intact, which callers
+ * rely on to truthfully report "no changes were applied".
+ */
 export function write_file_yaml(
   filename: string,
   data: unknown,
   logger?: ILogger
 ): boolean {
+  // Sibling in the same directory so the rename stays on one filesystem.
+  const tmpFile = `${filename}.tmp-${process.pid}`;
   try {
     const yamlStr = yaml.dump(data, {
       indent: 2,
       lineWidth: -1,
     });
-    fs.writeFileSync(filename, yamlStr, "utf8");
+    fs.writeFileSync(tmpFile, yamlStr, "utf8");
+    fs.renameSync(tmpFile, filename);
     return true;
   } catch (error) {
+    // Best-effort cleanup; the original file is untouched either way.
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {}
     const msg = `write_file_yaml: failed to write '${filename}': ${(error as Error).message}`;
     if (logger) {
       logger.write_error("SystemFunctions/write_file_yaml", msg, {

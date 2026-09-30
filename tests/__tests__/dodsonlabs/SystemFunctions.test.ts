@@ -9,6 +9,7 @@ import path from "path";
 import {
   CONFIG_FILE_CANDIDATES,
   read_file_yaml_first,
+  write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
 
 const VALID_CONFIG_YAML = [
@@ -134,5 +135,82 @@ describe("read_file_yaml_first", () => {
     expect(result.error).not.toBeNull();
     expect(result.error).toContain("./does-not-exist/config.yml");
     expect(result.error).toContain("./config.yml");
+  });
+});
+
+describe("write_file_yaml", () => {
+  // Each test runs in a throwaway directory; fs spies are restored
+  // afterwards so cleanup (rmSync) keeps working.
+  let workDir: string;
+
+  beforeEach(() => {
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), "write-file-yaml-"));
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it("writes parseable YAML and leaves no temp file behind", () => {
+    const file = path.join(workDir, "config.yml");
+    fs.writeFileSync(file, VALID_CONFIG_YAML, "utf8");
+
+    const result = write_file_yaml(file, { apiPort: 3400 });
+
+    expect(result).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toContain("apiPort: 3400");
+    expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+
+  // Regression P2-2: a failure after the temp write (crash/rename failure)
+  // must leave the existing config byte-identical so the next startup's
+  // fail-fast on unparseable files never trips over a truncated file.
+  it("leaves the existing file untouched and removes the temp file when the rename fails", () => {
+    const file = path.join(workDir, "config.yml");
+    const original = VALID_CONFIG_YAML;
+    fs.writeFileSync(file, original, "utf8");
+    jest
+      .spyOn(fs, "renameSync")
+      .mockImplementation(() => {
+        throw new Error("simulated rename failure");
+      });
+
+    const result = write_file_yaml(file, { apiPort: 3400 });
+
+    expect(result).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+
+  // Regression P2-2: ENOSPC mid-write (the realistic trigger) — the temp
+  // write itself fails, so the target must be untouched and nothing left
+  // behind; the caller's "no changes were applied" response depends on it.
+  it("leaves the existing file untouched and returns false when the temp write fails (ENOSPC)", () => {
+    const file = path.join(workDir, "config.yml");
+    const original = VALID_CONFIG_YAML;
+    fs.writeFileSync(file, original, "utf8");
+    const enospc = new Error("no space left on device") as Error & { code: string };
+    enospc.code = "ENOSPC";
+    // Capture the original before spying: inside the mock implementation,
+    // fs.writeFileSync is the mock itself.
+    const realWrite = fs.writeFileSync as (...a: unknown[]) => unknown;
+    jest
+      .spyOn(fs, "writeFileSync")
+      .mockImplementation((...args: unknown[]) => {
+        // Only fail write_file_yaml's temp-file write (tmp suffix); let
+        // anything else through.
+        const target = args[0] as string;
+        if (target.includes(".tmp-")) {
+          throw enospc;
+        }
+        return realWrite(...(args as [string, string, string]));
+      });
+
+    const result = write_file_yaml(file, { apiPort: 3400 });
+
+    expect(result).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
   });
 });

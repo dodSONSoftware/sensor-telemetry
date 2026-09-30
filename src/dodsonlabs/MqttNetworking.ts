@@ -82,6 +82,12 @@ export class MqttNetworking implements IMqttNetworking {
     private forward_sensor_logs: boolean;
     private forward_sensor_logs_level: LogLevel;
     // ----
+    // Per-topic subscription state, confirmed by the broker's SUBACK.
+    // /ready and the mqtt_subscription_active gauge rely on this because a
+    // broker can grant CONNECT while denying SUBSCRIBE (ACL, rejected topic
+    // filter), leaving the client "connected" but ingesting nothing.
+    private subscription_active = new Map<string, boolean>();
+    // ----
     // Cached close promise: close() must be idempotent, so a second signal
     // during an in-flight close reuses the first close instead of re-entering
     // the client's end() path.
@@ -120,6 +126,32 @@ export class MqttNetworking implements IMqttNetworking {
 
     public is_connected(): boolean {
         return this.mqtt_client?.connected ?? false;
+    }
+
+    /**
+     * True once the broker has acknowledged every configured subscription
+     * (telemetry, plus the log/health topics when set). False before the
+     * first SUBACK and after any denied or lost subscription. /ready ANDs
+     * this into its decision so a broker that grants CONNECT but denies
+     * SUBSCRIBE cannot masquerade as a service that ingests telemetry.
+     */
+    public subscriptions_active(): boolean {
+        if (this.subscription_active.size === 0) {
+            // No connect/SUBACK cycle has completed yet.
+            return false;
+        }
+        for (const active of this.subscription_active.values()) {
+            if (!active) return false;
+        }
+        return true;
+    }
+
+    /** Per-topic subscription state, consumed by the mqtt_subscription_active gauge. */
+    public get_subscription_states(): Array<{ topic: string; active: boolean }> {
+        return [...this.subscription_active.entries()].map(([topic, active]) => ({
+            topic,
+            active,
+        }));
     }
 
     public prometheus_server_ready(): boolean {
@@ -270,6 +302,19 @@ export class MqttNetworking implements IMqttNetworking {
             }
         );
 
+        // A new MQTT session starts with no broker-side subscriptions: seed
+        // every configured topic as inactive so the gauge shows them while
+        // the SUBACKs are still outstanding, and /ready does not report
+        // ready before the broker has acknowledged the telemetry topic.
+        this.subscription_active.clear();
+        this.subscription_active.set(this.mqtt_topic_telemetry, false);
+        if (this.mqtt_topic_log && this.mqtt_topic_log.length > 0) {
+            this.subscription_active.set(this.mqtt_topic_log, false);
+        }
+        if (this.mqtt_topic_health && this.mqtt_topic_health.length > 0) {
+            this.subscription_active.set(this.mqtt_topic_health, false);
+        }
+
         // subscribe to telemetry topic
         this.logger.write_debug(
             "networking/onConnect",
@@ -280,7 +325,9 @@ export class MqttNetworking implements IMqttNetworking {
                 mqttTopic: this.mqtt_topic_telemetry,
             }
         );
-        this.mqtt_client.subscribe(this.mqtt_topic_telemetry);
+        this.mqtt_client.subscribe(this.mqtt_topic_telemetry, (err, granted) =>
+            this.on_subscribe_result(this.mqtt_topic_telemetry, err, granted)
+        );
 
         // subscribe to log topic if configured
         if (this.mqtt_topic_log && this.mqtt_topic_log.length > 0) {
@@ -293,7 +340,9 @@ export class MqttNetworking implements IMqttNetworking {
                     mqttTopic: this.mqtt_topic_log,
                 }
             );
-            this.mqtt_client.subscribe(this.mqtt_topic_log);
+            this.mqtt_client.subscribe(this.mqtt_topic_log, (err, granted) =>
+                this.on_subscribe_result(this.mqtt_topic_log, err, granted)
+            );
         }
 
         // subscribe to health topic if configured (V3)
@@ -307,8 +356,49 @@ export class MqttNetworking implements IMqttNetworking {
                     mqttTopic: this.mqtt_topic_health,
                 }
             );
-            this.mqtt_client.subscribe(this.mqtt_topic_health);
+            this.mqtt_client.subscribe(this.mqtt_topic_health, (err, granted) =>
+                this.on_subscribe_result(this.mqtt_topic_health, err, granted)
+            );
         }
+    }
+
+    /**
+     * Handle the broker's SUBACK for a topic. Without this callback the
+     * mqtt library delivers SUBACK failures (ACL denial, rejected topic
+     * filter) to a no-op, so the service could stay "connected" while
+     * ingesting nothing — log the error and record the state that /ready
+     * and the mqtt_subscription_active gauge report.
+     */
+    private on_subscribe_result(
+        topic: string,
+        error: Error | null | undefined,
+        granted: mqtt.ISubscriptionGrant[] | undefined
+    ): void {
+        if (error) {
+            this.subscription_active.set(topic, false);
+            this.logger.write_error(
+                "networking/subscribe",
+                `Failed to subscribe to topic: ${topic} — ${(error as Error).message}`,
+                {
+                    event: "mqtt_subscription_failed",
+                    logType: "service",
+                    mqttTopic: topic,
+                    error,
+                }
+            );
+            return;
+        }
+        this.subscription_active.set(topic, true);
+        this.logger.write_debug(
+            "networking/subscribe",
+            `Subscribed to topic: ${topic}`,
+            {
+                event: "mqtt_subscribed",
+                logType: "service",
+                mqttTopic: topic,
+                granted,
+            }
+        );
     }
 
     private on_disconnect(): void {
@@ -322,6 +412,11 @@ export class MqttNetworking implements IMqttNetworking {
         );
         // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
         // When it does, the 'connect' event fires on_connect() which resubscribes.
+        // The broker-side subscriptions are gone with the session, so mark
+        // every topic inactive until the new session's SUBACKs arrive.
+        for (const topic of this.subscription_active.keys()) {
+            this.subscription_active.set(topic, false);
+        }
     }
 
     private on_message(

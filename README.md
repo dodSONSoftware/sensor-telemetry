@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Nickel Hawk — firmware 2.7.0.
+**Release:** Nickel Hawk — firmware 2.7.1.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -367,6 +367,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
 | `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
 | `sensor_firmware_versions_rejected_total` | Counter | — | Firmware version values mapped to the `unknown_firmware` fallback because the firmware version cardinality cap was reached |
+| `mqtt_subscription_active` | Gauge | topic | This service's per-topic MQTT subscription state (1 = broker acknowledged, 0 = pending/denied/lost); the same state `/ready` decides on |
 
 ## Source Label Sanitization
 
@@ -390,7 +391,7 @@ The service handles SIGTERM and SIGINT signals gracefully:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Liveness check endpoint (200 while the process is responsive, regardless of MQTT state) |
-| `/ready` | GET | Readiness check endpoint (200 when the MQTT client is connected, 503 degraded otherwise) |
+| `/ready` | GET | Readiness check endpoint (200 when the MQTT client is connected **and** the broker has acknowledged the configured subscriptions, 503 degraded otherwise — a denied subscription keeps the client connected while ingesting nothing) |
 | `/metrics` | GET | Prometheus metrics endpoint |
 | `/about` | GET | Service information |
 | `/endpoints` | GET | List available endpoints |

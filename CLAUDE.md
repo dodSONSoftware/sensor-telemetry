@@ -94,8 +94,8 @@ Metrics are exposed at `/metrics` (default: `http://localhost:3301/metrics`).
 
 Also available:
 - `/health` — Liveness check endpoint. Returns 200 while the process is responsive, regardless of MQTT state, so the Docker healthcheck does not restart the container on a transient broker outage (the MQTT layer reconnects on its own)
-- `/ready` — Readiness check endpoint. Returns 200 (`{ status: "ready" }`) when the MQTT client is connected and 503 (`{ status: "degraded" }`) otherwise. For readiness-sensitive orchestration (Kubernetes, load balancing); `/health` remains the liveness signal
-- `/metrics` — Prometheus metrics
+- `/ready` — Readiness check endpoint. Returns 200 (`{ status: "ready" }`) when the MQTT client is connected **and** the broker has acknowledged the configured subscriptions, 503 (`{ status: "degraded" }`) otherwise. Connection alone is not readiness: a broker can grant CONNECT while denying SUBSCRIBE (ACL denial, rejected topic filter), keeping the client "connected" while ingesting nothing — SUBACK failures are logged as `mqtt_subscription_failed` (with the topic) and the response body reports `subscriptions: "active|degraded"` alongside `mqtt: "connected|disconnected"`. For readiness-sensitive orchestration (Kubernetes, load balancing); `/health` remains the liveness signal
+- `/metrics` — Prometheus metrics. Includes `mqtt_subscription_active` — a per-topic gauge (label `topic`, 1 = broker acknowledged the subscription, 0 = pending/denied/lost) that is pulled from the MQTT client state at scrape time, so it reflects the same state `/ready` decides on
 
 ## Source Label Sanitization
 

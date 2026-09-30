@@ -753,35 +753,70 @@ describe("PrometheusWriter", () => {
     });
 
     it("returns 503 and degraded when the MQTT client is disconnected", async () => {
-      writer.setMqttNetworking({ is_connected: () => false } as unknown as IMqttNetworking);
+      writer.setMqttNetworking({
+        is_connected: () => false,
+        subscriptions_active: () => false,
+        get_subscription_states: () => [{ topic: "iot/v3/telemetry", active: false }],
+      } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
         headers: { Connection: "close" },
       });
 
       expect(res.status).toBe(503);
-      const body = (await res.json()) as { status: string; mqtt: string };
+      const body = (await res.json()) as { status: string; mqtt: string; subscriptions: string };
       expect(body.status).toBe("degraded");
       expect(body.mqtt).toBe("disconnected");
+      expect(body.subscriptions).toBe("degraded");
+    });
+
+    it("returns 503 and degraded when connected but the subscription was denied (regression P2-3)", async () => {
+      // A broker that grants CONNECT but denies SUBSCRIBE keeps the client
+      // "connected" while ingesting nothing — the exact silent failure
+      // /ready exists to surface.
+      writer.setMqttNetworking({
+        is_connected: () => true,
+        subscriptions_active: () => false,
+        get_subscription_states: () => [{ topic: "iot/v3/telemetry", active: false }],
+      } as unknown as IMqttNetworking);
+
+      const res = await fetch(`http://127.0.0.1:${port}/ready`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { status: string; mqtt: string; subscriptions: string };
+      expect(body.status).toBe("degraded");
+      expect(body.mqtt).toBe("connected");
+      expect(body.subscriptions).toBe("degraded");
     });
 
     it("returns 200 and ready when the MQTT client is connected", async () => {
-      writer.setMqttNetworking({ is_connected: () => true } as unknown as IMqttNetworking);
+      writer.setMqttNetworking({
+        is_connected: () => true,
+        subscriptions_active: () => true,
+        get_subscription_states: () => [{ topic: "iot/v3/telemetry", active: true }],
+      } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
         headers: { Connection: "close" },
       });
 
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { status: string; mqtt: string };
+      const body = (await res.json()) as { status: string; mqtt: string; subscriptions: string };
       expect(body.status).toBe("ready");
       expect(body.mqtt).toBe("connected");
+      expect(body.subscriptions).toBe("active");
     });
 
     it("keeps /health at 200 while the MQTT client is disconnected", async () => {
       // The whole point of the split: a readiness failure must not be
       // reported as a liveness failure.
-      writer.setMqttNetworking({ is_connected: () => false } as unknown as IMqttNetworking);
+      writer.setMqttNetworking({
+        is_connected: () => false,
+        subscriptions_active: () => false,
+        get_subscription_states: () => [],
+      } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/health`, {
         headers: { Connection: "close" },
