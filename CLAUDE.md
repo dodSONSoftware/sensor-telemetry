@@ -97,6 +97,8 @@ Also available:
 - `/ready` — Readiness check endpoint. Returns 200 (`{ status: "ready" }`) when the MQTT client is connected **and** the broker has acknowledged the configured subscriptions, 503 (`{ status: "degraded" }`) otherwise. Connection alone is not readiness: a broker can grant CONNECT while denying SUBSCRIBE (ACL denial, rejected topic filter), keeping the client "connected" while ingesting nothing — SUBACK failures are logged as `mqtt_subscription_failed` (with the topic) and the response body reports `subscriptions: "active|degraded"` alongside `mqtt: "connected|disconnected"`. For readiness-sensitive orchestration (Kubernetes, load balancing); `/health` remains the liveness signal
 - `/metrics` — Prometheus metrics. Includes `mqtt_subscription_active` — a per-topic gauge (label `topic`, 1 = broker acknowledged the subscription, 0 = pending/denied/lost) that is pulled from the MQTT client state at scrape time, so it reflects the same state `/ready` decides on
 
+Every route enforces the verb advertised at `/endpoints`: the read-only routes (`/metrics`, `/health`, `/ready`, `/about`, `/endpoints`) answer only `GET`, and the config routes enforce `GET` (`/read-config`, `/reload-config`) or `POST` (`/write-config`). Unsupported verbs get a `405` with an `Allow` header; `OPTIONS` preflights are answered `204` before method checks.
+
 ## Source Label Sanitization
 
 Source names from MQTT payloads are sanitized before being used as Prometheus labels:

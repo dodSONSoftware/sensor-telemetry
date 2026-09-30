@@ -451,6 +451,56 @@ describe("PrometheusWriter", () => {
         expect(body.success).toBe(false);
       }
     });
+
+    // The read-only routes advertise verb GET at /endpoints, so they must
+    // enforce it: DELETE /health, POST /metrics, and friends used to be
+    // served as normal reads.
+    it("rejects non-GET methods on the read-only routes with 405 and Allow: GET", async () => {
+      const routes = ["/metrics", "/health", "/ready", "/about", "/endpoints"];
+      for (const route of routes) {
+        for (const method of ["POST", "DELETE", "PATCH"]) {
+          const res = await fetch(`http://127.0.0.1:${port}${route}`, {
+            method,
+            headers: { Connection: "close" },
+          });
+          expect(res.status).toBe(405);
+          expect(res.headers.get("allow")).toBe("GET");
+          const body = (await res.json()) as { success: boolean; message: string };
+          expect(body.success).toBe(false);
+        }
+      }
+    });
+
+    it("serves /about on GET with the service description and route list", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/about`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        about: { name: string };
+        routes: { route: string }[];
+      };
+      expect(body.about.name).toBe("Sensor Telemetry Services");
+      expect(body.routes.map((r) => r.route)).toContain("/endpoints");
+    });
+
+    it("serves /endpoints on GET with the advertised verbs", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/endpoints`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        endpoints: { route: string; verb: string }[];
+      };
+      // The runtime now enforces exactly what this list advertises.
+      const verbs = new Map(body.endpoints.map((e) => [e.route, e.verb]));
+      expect(verbs.get("/metrics")).toBe("GET");
+      expect(verbs.get("/health")).toBe("GET");
+      expect(verbs.get("/ready")).toBe("GET");
+      expect(verbs.get("/about")).toBe("GET");
+      expect(verbs.get("/endpoints")).toBe("GET");
+      expect(verbs.get("/write-config")).toBe("POST");
+    });
   });
 
   describe("query-string routing", () => {

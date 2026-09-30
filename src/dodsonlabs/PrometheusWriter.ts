@@ -249,10 +249,21 @@ export class PrometheusWriter {
                 );
             }
 
+            // The read-only routes enforce the same GET-only contract that
+            // /endpoints advertises: an unsupported verb gets 405 with an
+            // Allow header instead of silently serving a normal response.
+            // (OPTIONS never reaches here — the preflight is answered
+            // above.)
             if (path === "/metrics") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 res.setHeader("Content-Type", register.contentType);
                 res.end(await register.metrics());
             } else if (path === "/health") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 // Liveness only: stays 200 while the process is responsive so
                 // the Docker healthcheck does not restart the container on a
                 // transient broker outage (the MQTT layer reconnects on its
@@ -267,6 +278,9 @@ export class PrometheusWriter {
                     timestamp: new Date().toISOString()
                 }));
             } else if (path === "/ready") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 // Readiness: can the service actually ingest telemetry right
                 // now? The client must be connected AND the broker must have
                 // acknowledged the configured subscriptions — a broker can
@@ -287,8 +301,14 @@ export class PrometheusWriter {
                     timestamp: new Date().toISOString()
                 }));
             } else if (path === "/about") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 this.handleAbout(req, res);
             } else if (path === "/endpoints") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 this.handleEndpoints(req, res);
             } else if (path === "/read-config") {
                 if (!this.requireMethod(req, res, "GET")) {
