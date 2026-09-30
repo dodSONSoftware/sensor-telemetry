@@ -13,26 +13,7 @@ Run these before making any changes:
 
 If checks fail, abort with clear error message.
 
-### 1. UPDATE CLAUDE.md AND README.md IF NEEDED
-
-Check if documentation needs updating based on changes:
-
-**For CLAUDE.md:**
-- **New files/directories** — add entries to directory tree
-- **Modified commands/skills** — update references or descriptions
-- **Removed files** — remove stale entries
-- **Architecture/config changes** — update architecture notes or commands
-
-**For README.md:**
-- **New features** — add feature highlights or usage examples
-- **API changes** — update endpoint tables or request/response examples
-- **Configuration changes** — update config examples or environment variables
-- **Dependency updates** — note major version changes
-- **Breaking changes** — add migration notes or deprecation warnings
-
-Skip if no structural or documentation-relevant changes. Do NOT stage documentation files yet.
-
-### 2. ANALYZE GIT CHANGES
+### 1. ANALYZE GIT CHANGES
 
 Run these commands to understand what changed:
 - `git status --short` — list all modified/added/deleted files
@@ -46,7 +27,7 @@ Classify every changed file:
 - **Deleted** (`D`)
 - **Renamed** (`R`)
 
-### 3. DETERMINE VERSION BUMP AND UPDATE PACKAGE.JSON
+### 2. DETERMINE VERSION BUMP AND UPDATE PACKAGE.JSON
 
 Parse recent commits to determine appropriate version bump:
 
@@ -75,6 +56,31 @@ Verify the update:
 ```bash
 node -p "require('$PACKAGE_JSON').version"
 ```
+
+### 3. UPDATE README.md AND CLAUDE.md
+
+Sync the project documentation to the new state before committing — the version bump from step 2 must be reflected here so the docs never drift from the committed version. These edits are mandatory, not optional.
+
+**README.md — always:**
+- **Release line** — update it to the new version and codename: `**Release:** <Material Animal> — firmware <X.Y.Z>.` Derive the codename from the new version using the release codename scheme at the end of this file; the release line is the codename's home in the README. If the README has no release line, add one near the top.
+
+**README.md — when the change is documentation-relevant:**
+- **New features** — add feature highlights or usage examples
+- **API changes** — update endpoint tables or request/response examples
+- **Configuration changes** — update config examples or environment variables
+- **Dependency updates** — note major version changes
+- **Breaking changes** — add migration notes or deprecation warnings
+
+**CLAUDE.md — always:**
+- **Version** — if CLAUDE.md records the project version, update it to the new version.
+
+**CLAUDE.md — when the change is documentation-relevant:**
+- **New files/directories** — add entries to directory tree
+- **Modified commands/skills** — update references or descriptions
+- **Removed files** — remove stale entries
+- **Architecture/config changes** — update architecture notes or commands
+
+The documentation edits are part of the commit: list them in the commit-message bullets and let `git add .` (step 5) stage them alongside the code changes.
 
 ### 4. GENERATE COMMIT MESSAGE
 
@@ -126,7 +132,7 @@ Run:
 - **Uncommitted changes detected**: Abort with message listing conflicting files
 - **Malformed package.json**: Show parsing error and exit
 - **Git command failure**: Show error output and exit code
-- **Commit failure**: Rollback version bump (restore original package.json)
+- **Commit failure**: Rollback the version bump and documentation edits (restore original package.json, README.md, and CLAUDE.md)
 
 ## Output
 
@@ -137,7 +143,7 @@ After successful commit, return:
    ```
    - <file_path>: <description>
    ```
-3. **Documentation updates**: CLAUDE.md and/or README.md (if applicable)
+3. **Documentation updates**: what was synced in README.md (release line at minimum) and CLAUDE.md
 4. **Version bump**: old → new
 5. **Summary** of notable changes
 
