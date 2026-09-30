@@ -136,6 +136,15 @@ forwardSensorLogsLevel: debug
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
 
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SENSOR_TELEMETRY_CORS_ORIGINS` | Comma-separated list of browser origins permitted to call the HTTP API cross-origin. Origins must match exactly, including scheme and port. When unset or set to `*`, all browser origins are allowed for backward compatibility. Example: `http://10.10.10.50:3000,https://sensors.home.lab` | unset (all origins allowed) |
+| `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/write-config` and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
+
+CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
+
 ## Sensor Log Messages
 
 Sensors can send log messages via MQTT using the same telemetry topic.

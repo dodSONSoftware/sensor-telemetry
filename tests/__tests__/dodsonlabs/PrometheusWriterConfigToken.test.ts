@@ -77,10 +77,18 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
   let configDir: string;
   let configSource: string;
   let savedToken: string | undefined;
+  let savedCorsOrigins: string | undefined;
 
   beforeAll(async () => {
     savedToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
     process.env.SENSOR_TELEMETRY_CONFIG_TOKEN = TOKEN;
+
+    // Left unset on purpose: this writer runs in wildcard CORS mode
+    // (Access-Control-Allow-Origin: *), which the preflight/token
+    // interaction tests pin. Parsed at construction, so it must be fixed
+    // before the writer is built.
+    savedCorsOrigins = process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
+    delete process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
 
     port = await getFreePort();
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-token-test-"));
@@ -109,6 +117,11 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
       delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
     } else {
       process.env.SENSOR_TELEMETRY_CONFIG_TOKEN = savedToken;
+    }
+    if (savedCorsOrigins === undefined) {
+      delete process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
+    } else {
+      process.env.SENSOR_TELEMETRY_CORS_ORIGINS = savedCorsOrigins;
     }
   });
 
@@ -338,6 +351,78 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
           mqttTopicTelemetry: "iot/v3/telemetry",
         })
       );
+    });
+  });
+
+  describe("CORS preflight with a token configured", () => {
+    // This writer runs in wildcard mode (SENSOR_TELEMETRY_CORS_ORIGINS
+    // unset), so allowed browser origins get Access-Control-Allow-Origin:
+    // *. The point of this block: preflights must never be authenticated —
+    // a browser preflight names x-config-token but never carries the value,
+    // so authenticating it would break every token-protected browser call.
+
+    it("answers the preflight 204 without requiring x-config-token", async () => {
+      logger.write_warn.mockClear();
+      configChangeCallback.mockClear();
+      const before = fs.readFileSync(configSource, "utf8");
+
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: "http://browser.test:3000",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type,x-config-token",
+          // Connection: close keeps undici's keep-alive pool from holding a
+          // socket open, which would block server.close() in afterAll.
+          Connection: "close",
+        },
+      });
+
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+      // Preflight is not an authentication attempt: no token-rejected warn.
+      expect(tokenRejectedWarns(logger)).toBe(false);
+      // The endpoint never ran: config untouched, no callback.
+      expect(fs.readFileSync(configSource, "utf8")).toBe(before);
+      expect(configChangeCallback).not.toHaveBeenCalled();
+    });
+
+    it("still returns 401 for the actual POST without a token, with the CORS header", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: {
+          Origin: "http://browser.test:3000",
+          "Content-Type": "application/json",
+          Connection: "close",
+        },
+        body: JSON.stringify({ ...VALID_CONFIG, apiPort: port }),
+      });
+      const body = (await res.json()) as { success: boolean };
+
+      expect(res.status).toBe(401);
+      expect(body.success).toBe(false);
+      // The browser must be able to read the real API error status instead
+      // of an opaque CORS failure.
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    });
+
+    it("lets an allowed-origin POST through when the token is correct", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: {
+          Origin: "http://browser.test:3000",
+          "Content-Type": "application/json",
+          "x-config-token": TOKEN,
+          Connection: "close",
+        },
+        body: JSON.stringify({ ...VALID_CONFIG, apiPort: port }),
+      });
+      const body = (await res.json()) as { success: boolean; message: string };
+
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ success: true, message: "Configuration updated successfully" });
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
     });
   });
 });

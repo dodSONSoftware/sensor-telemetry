@@ -194,6 +194,7 @@ describe("PrometheusWriter", () => {
   let configDir: string;
   let configSource: string;
   let savedToken: string | undefined;
+  let savedCorsOrigins: string | undefined;
 
   const baseConfig = {
     logLevel: "info",
@@ -201,10 +202,20 @@ describe("PrometheusWriter", () => {
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
 
+  // The writer's CORS allowlist, fixed for the whole file: the browser
+  // tests below use http://browser.test:3000, and every other Origin is
+  // rejected. Parsed once at construction, so it must be set before the
+  // writer is built (and never changed afterward).
+  const allowedOrigin = "http://browser.test:3000";
+  const disallowedOrigin = "http://evil.test:3000";
+
   beforeAll(async () => {
     // Endpoints must be reachable without a token for this test.
     savedToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
     delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
+
+    savedCorsOrigins = process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
+    process.env.SENSOR_TELEMETRY_CORS_ORIGINS = allowedOrigin;
 
     port = await getFreePort();
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-writer-test-"));
@@ -231,6 +242,11 @@ describe("PrometheusWriter", () => {
       delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
     } else {
       process.env.SENSOR_TELEMETRY_CONFIG_TOKEN = savedToken;
+    }
+    if (savedCorsOrigins === undefined) {
+      delete process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
+    } else {
+      process.env.SENSOR_TELEMETRY_CORS_ORIGINS = savedCorsOrigins;
     }
   });
 
@@ -475,6 +491,246 @@ describe("PrometheusWriter", () => {
           (call) => call[2]?.event === "route_not_found"
         )
       ).toBe(false);
+    });
+  });
+
+  describe("CORS (browser clients)", () => {
+    // Node's fetch() does not enforce browser CORS policy, so these tests
+    // send Origin/OPTIONS explicitly and inspect the raw response headers.
+    // The shared writer runs with SENSOR_TELEMETRY_CORS_ORIGINS pinned to
+    // allowedOrigin (set in beforeAll), which is the only allowed origin.
+
+    function variesOnOrigin(res: globalThis.Response): boolean {
+      return (res.headers.get("vary") ?? "")
+        .split(",")
+        .map((part) => part.trim())
+        .includes("Origin");
+    }
+
+    it("answers an allowed preflight for /write-config with 204 and no body", async () => {
+      // A preflight carries the *names* of the headers the actual request
+      // will use, never their values — no x-config-token header here.
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: allowedOrigin,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type,x-config-token",
+          // Connection: close keeps undici's keep-alive pool from holding a
+          // socket open, which would block server.close() in afterAll.
+          Connection: "close",
+        },
+      });
+
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      const methods = res.headers.get("access-control-allow-methods") ?? "";
+      expect(methods).toContain("POST");
+      expect(methods).toContain("OPTIONS");
+      const allowedHeaders = res.headers.get("access-control-allow-headers") ?? "";
+      expect(allowedHeaders).toContain("Content-Type");
+      expect(allowedHeaders).toContain("X-Config-Token");
+      expect(res.headers.get("access-control-max-age")).toBe("600");
+      expect(variesOnOrigin(res)).toBe(true);
+    });
+
+    it("does not execute the endpoint for a preflight request", async () => {
+      // If the preflight fell through to normal routing, requireMethod
+      // would answer 405 (OPTIONS is not POST) before any body handling.
+      (write_file_yaml as unknown as jest.Mock).mockClear();
+      const before = fs.readFileSync(configSource, "utf8");
+
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "OPTIONS",
+        headers: { Origin: allowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+      expect(fs.readFileSync(configSource, "utf8")).toBe(before);
+      expect(write_file_yaml).not.toHaveBeenCalled();
+    });
+
+    it("serves an allowed cross-origin GET /health even though it bypasses sendJson", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Origin: allowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      expect(variesOnOrigin(res)).toBe(true);
+      const body = (await res.json()) as { status: string };
+      expect(body.status).toBe("healthy");
+    });
+
+    it("serves /metrics with CORS headers for an allowed browser origin", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/metrics`, {
+        headers: { Origin: allowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("# HELP");
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+    });
+
+    it("serves an allowed cross-origin POST /write-config and keeps write behavior intact", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: {
+          Origin: allowedOrigin,
+          "Content-Type": "application/json",
+          Connection: "close",
+        },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, mqttTopicLog: "iot/v3/log" }),
+      });
+      const response = (await res.json()) as { success: boolean };
+
+      expect(res.status).toBe(200);
+      expect(response.success).toBe(true);
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      expect(variesOnOrigin(res)).toBe(true);
+
+      const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
+      expect(onDisk.mqttTopicLog).toBe("iot/v3/log");
+    });
+
+    it("includes the CORS header on API error responses for an allowed origin", async () => {
+      // A 405 goes through sendJson: the browser must see the real API
+      // status and body rather than an opaque CORS failure.
+      const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
+        method: "POST",
+        headers: { Origin: allowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(405);
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      const body = (await res.json()) as { success: boolean };
+      expect(body.success).toBe(false);
+    });
+
+    it("includes the CORS header on 404 responses, which bypass sendJson", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/not-a-route`, {
+        headers: { Origin: allowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(404);
+      expect(res.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+    });
+
+    it("rejects a preflight from a disallowed origin with 403 and no allow-origin header", async () => {
+      logger.write_warn.mockClear();
+
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: disallowedOrigin,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type,x-config-token",
+          Connection: "close",
+        },
+      });
+
+      expect(res.status).toBe(403);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      // The rejection is audited with the offending origin, never the token.
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) =>
+            call[2]?.event === "cors_origin_rejected" &&
+            call[2]?.logType === "audit" &&
+            call[2]?.origin === disallowedOrigin &&
+            call[2]?.statusCode === 403
+        )
+      ).toBe(true);
+    });
+
+    it("rejects a normal browser request from a disallowed origin with 403 and no allow-origin header", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Origin: disallowedOrigin, Connection: "close" },
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      const body = (await res.json()) as { success: boolean; message: string };
+      expect(body.success).toBe(false);
+      expect(body.message).toBe("origin not allowed");
+    });
+
+    it("leaves non-browser requests (no Origin header) unaffected", async () => {
+      // Prometheus scrapers, Docker healthchecks, curl, and other services
+      // send no Origin header and must keep working unchanged.
+      const health = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Connection: "close" },
+      });
+      expect(health.status).toBe(200);
+      expect(health.headers.get("access-control-allow-origin")).toBeNull();
+
+      const metrics = await fetch(`http://127.0.0.1:${port}/metrics`, {
+        headers: { Connection: "close" },
+      });
+      expect(metrics.status).toBe(200);
+      expect(metrics.headers.get("access-control-allow-origin")).toBeNull();
+    });
+  });
+
+  describe("CORS origin parsing and matching (pure logic)", () => {
+    // parseCorsOrigins and resolveCorsOrigin are pure, so wildcard-mode
+    // semantics (unset/empty/"*") can be pinned without constructing a
+    // second writer — prom-client's global registry allows only one per
+    // process, and the shared writer is allowlist-mode by design.
+    const parse = (raw: string | undefined) =>
+      (
+        PrometheusWriter as unknown as {
+          parseCorsOrigins(
+            raw: string | undefined
+          ): { allowAllOrigins: boolean; allowedOrigins: ReadonlySet<string> };
+        }
+      ).parseCorsOrigins(raw);
+
+    const resolve = (
+      origin: string | undefined,
+      parsed: { allowAllOrigins: boolean; allowedOrigins: ReadonlySet<string> }
+    ): string | null =>
+      (
+        PrometheusWriter as unknown as {
+          resolveCorsOrigin(
+            origin: string | undefined,
+            allowAllOrigins: boolean,
+            allowedOrigins: ReadonlySet<string>
+          ): string | null;
+        }
+      ).resolveCorsOrigin(origin, parsed.allowAllOrigins, parsed.allowedOrigins);
+
+    it("treats an unset, empty, or '*' value as allow-all and emits *", () => {
+      for (const raw of [undefined, "", "   ", "*"]) {
+        const parsed = parse(raw);
+        expect(parsed.allowAllOrigins).toBe(true);
+        expect(resolve("http://any-origin.example:1234", parsed)).toBe("*");
+      }
+    });
+
+    it("trims entries and drops empty ones from an explicit list", () => {
+      const parsed = parse(" http://a.example:3000 , ,https://b.example ,");
+      expect(parsed.allowAllOrigins).toBe(false);
+      expect(parsed.allowedOrigins.has("http://a.example:3000")).toBe(true);
+      expect(parsed.allowedOrigins.has("https://b.example")).toBe(true);
+      expect(parsed.allowedOrigins.size).toBe(2);
+    });
+
+    it("matches origins by exact equality only (scheme and port matter)", () => {
+      const parsed = parse("http://browser.test:3000");
+      expect(resolve("http://browser.test:3000", parsed)).toBe("http://browser.test:3000");
+      // Same host, different port / scheme / suffix: all distinct origins.
+      expect(resolve("http://browser.test:3301", parsed)).toBeNull();
+      expect(resolve("https://browser.test:3000", parsed)).toBeNull();
+      expect(resolve("http://browser.test:3000.evil.example", parsed)).toBeNull();
+    });
+
+    it("emits no header for requests without an Origin header", () => {
+      expect(resolve(undefined, parse("*"))).toBeNull();
+      expect(resolve(undefined, parse("http://a.example:3000"))).toBeNull();
     });
   });
 

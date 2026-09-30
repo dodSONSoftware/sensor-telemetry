@@ -11,3 +11,8 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
+      # Browser origins allowed to call the HTTP API cross-origin
+      # (comma-separated, exact scheme://host:port matches). Omit or set to
+      # * to allow all origins, the previous default. Does not replace
+      # SENSOR_TELEMETRY_CONFIG_TOKEN authentication.
+      - SENSOR_TELEMETRY_CORS_ORIGINS=http://10.10.10.50:3000

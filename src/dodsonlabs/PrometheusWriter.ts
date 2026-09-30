@@ -80,6 +80,12 @@ export class PrometheusWriter {
     // expose) at construction. When unset, the endpoints remain open for
     // trusted-LAN deployments and a warning is logged at startup.
     private readonly configToken: string | undefined;
+    // ---- browser CORS policy, parsed once at construction from
+    // SENSOR_TELEMETRY_CORS_ORIGINS (see parseCorsOrigins). Unset, empty, or
+    // "*" keeps the previous permissive behavior; otherwise only exact
+    // allowlisted Origin values receive Access-Control-Allow-Origin.
+    private readonly corsAllowAllOrigins: boolean;
+    private readonly corsAllowedOrigins: ReadonlySet<string>;
 
     // ******** constants
     private readonly MAX_SOURCE_LENGTH: number;
@@ -87,6 +93,12 @@ export class PrometheusWriter {
     // Cap for /write-config request bodies. A valid config is < 2 KiB, so
     // anything larger is a misbehaving or hostile client, not a config.
     private static readonly MAX_CONFIG_BODY_BYTES = 64 * 1024;
+    // CORS preflight contract for browser clients: the methods and headers
+    // cross-origin requests may use, and how long a browser may cache the
+    // preflight answer (bounds how long a stale policy can persist).
+    private static readonly CORS_ALLOW_METHODS = "GET, POST, OPTIONS";
+    private static readonly CORS_ALLOW_HEADERS = "Content-Type, X-Config-Token";
+    private static readonly CORS_MAX_AGE_SECONDS = 600;
 
     // ******** ctor
 
@@ -138,6 +150,11 @@ export class PrometheusWriter {
             );
         }
 
+        // Browser CORS policy: parsed once at startup, not per request.
+        const corsOrigins = PrometheusWriter.parseCorsOrigins(process.env.SENSOR_TELEMETRY_CORS_ORIGINS);
+        this.corsAllowAllOrigins = corsOrigins.allowAllOrigins;
+        this.corsAllowedOrigins = corsOrigins.allowedOrigins;
+
         // create prometheus gauges
         this.create_prometheus_gauges();
 
@@ -157,6 +174,23 @@ export class PrometheusWriter {
             // against it 404s well-formed requests. The full req.url is
             // still logged where it matters for diagnostics.
             const path = (req.url ?? "/").split("?")[0];
+
+            // CORS is handled at the server boundary, not in sendJson():
+            // /health, /metrics, and 404 responses never pass through
+            // sendJson, and a browser must be able to read API error
+            // responses (401/405/500) for an allowed origin instead of
+            // seeing an opaque CORS failure. Preflight (OPTIONS) is
+            // answered before method checks and authentication: a browser
+            // preflight names x-config-token in
+            // Access-Control-Request-Headers but never carries the value.
+            if (this.handleCorsPreflight(req, res)) {
+                return;
+            }
+            if (!this.applyCorsHeaders(req, res)) {
+                this.logCorsOriginRejected(req);
+                this.sendJson(res, 403, { success: false, message: "origin not allowed" });
+                return;
+            }
 
             // Suppress logging for successful /metrics, /health, and /ready
             // requests (all are polled by orchestrators at high frequency)
@@ -305,9 +339,11 @@ export class PrometheusWriter {
 
     // ******** private methods for HTTP handlers
 
+    // CORS headers are applied centrally in the request callback (see
+    // applyCorsHeaders), not here: every route must answer browsers
+    // consistently, including the ones that bypass sendJson.
     private sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {
         res.setHeader("Content-Type", "application/json");
-        res.setHeader("Access-Control-Allow-Origin", "*");
         res.writeHead(statusCode);
         res.end(JSON.stringify(data));
     }
@@ -358,6 +394,158 @@ export class PrometheusWriter {
             return false;
         }
         return true;
+    }
+
+    // ******** private methods for CORS
+
+    /**
+     * Parse the SENSOR_TELEMETRY_CORS_ORIGINS environment variable.
+     * Called once at construction — not per request. Unset, empty, or "*"
+     * preserves the previous permissive behavior; anything else is a
+     * comma-separated exact-match allowlist (entries are trimmed of
+     * whitespace, empty entries are dropped). An origin is the full
+     * scheme://host:port tuple, so there is no prefix, wildcard-domain, or
+     * regex matching: http://host:3000 and http://host:3301 are distinct.
+     */
+    private static parseCorsOrigins(raw: string | undefined): {
+        allowAllOrigins: boolean;
+        allowedOrigins: ReadonlySet<string>;
+    } {
+        const configured = raw?.trim();
+        if (!configured || configured === "*") {
+            return { allowAllOrigins: true, allowedOrigins: new Set() };
+        }
+        return {
+            allowAllOrigins: false,
+            allowedOrigins: new Set(
+                configured
+                    .split(",")
+                    .map((origin) => origin.trim())
+                    .filter((origin) => origin.length > 0)
+            ),
+        };
+    }
+
+    /**
+     * Decide which Access-Control-Allow-Origin value a request may receive,
+     * or null when the response must carry no CORS headers at all:
+     * - no Origin header (Prometheus, curl, containers, healthchecks) → null
+     * - wildcard mode → "*"
+     * - allowlist mode → the request's own origin, only on an exact match
+     * A disallowed origin returns null too; the caller distinguishes it
+     * from "no Origin" by checking the request header.
+     */
+    private static resolveCorsOrigin(
+        origin: string | undefined,
+        allowAllOrigins: boolean,
+        allowedOrigins: ReadonlySet<string>
+    ): string | null {
+        if (origin === undefined) {
+            return null;
+        }
+        if (allowAllOrigins) {
+            return "*";
+        }
+        return allowedOrigins.has(origin) ? origin : null;
+    }
+
+    /**
+     * Apply CORS response headers for a normal (non-preflight) request.
+     * Returns true when the request may continue — either headers were
+     * applied for an allowed browser origin, or the request had no Origin
+     * header and needs no CORS headers at all. Returns false for a browser
+     * origin that is not allowlisted; the caller must answer 403 with no
+     * Access-Control-Allow-Origin header.
+     *
+     * Vary: Origin is added only when echoing a specific origin, so an HTTP
+     * cache never serves one allowed origin's response to a different one.
+     * Access-Control-Allow-Credentials is intentionally never set: this API
+     * authenticates with x-config-token, not browser HTTP credentials.
+     */
+    private applyCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+        const rawOrigin = req.headers.origin;
+        // Duplicate Origin headers are protocol-violating; take the first.
+        const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+        const allowed = PrometheusWriter.resolveCorsOrigin(origin, this.corsAllowAllOrigins, this.corsAllowedOrigins);
+        if (allowed === null) {
+            // No header at all when the request had no Origin, so
+            // non-browser clients see exactly the responses they always did.
+            return origin === undefined;
+        }
+        res.setHeader("Access-Control-Allow-Origin", allowed);
+        if (allowed !== "*") {
+            this.appendVaryOrigin(res);
+        }
+        return true;
+    }
+
+    /**
+     * Add "Origin" to the response Vary header without clobbering values an
+     * earlier layer may have set (setHeader would replace them).
+     */
+    private appendVaryOrigin(res: http.ServerResponse): void {
+        const existing = res.getHeader("Vary");
+        if (existing === undefined) {
+            res.setHeader("Vary", "Origin");
+            return;
+        }
+        const values = (Array.isArray(existing) ? existing : [String(existing)])
+            .join(", ")
+            .split(",")
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0);
+        if (!values.includes("Origin")) {
+            values.push("Origin");
+            res.setHeader("Vary", values.join(", "));
+        }
+    }
+
+    /**
+     * Answer a CORS preflight request and report that the response is
+     * complete (true), or return false for non-OPTIONS requests so the
+     * caller continues with normal routing. Runs before method checks and
+     * authentication: a browser preflight never carries the actual
+     * x-config-token value, only the intent to send it. Never reads the
+     * request body, never invokes an endpoint handler.
+     */
+    private handleCorsPreflight(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+        if (req.method !== "OPTIONS") {
+            return false;
+        }
+        if (!this.applyCorsHeaders(req, res)) {
+            this.logCorsOriginRejected(req);
+            res.writeHead(403);
+            res.end();
+            return true;
+        }
+        res.setHeader("Access-Control-Allow-Methods", PrometheusWriter.CORS_ALLOW_METHODS);
+        res.setHeader("Access-Control-Allow-Headers", PrometheusWriter.CORS_ALLOW_HEADERS);
+        res.setHeader("Access-Control-Max-Age", PrometheusWriter.CORS_MAX_AGE_SECONDS.toString());
+        res.writeHead(204);
+        res.end();
+        return true;
+    }
+
+    /**
+     * Audit a rejected browser origin. Deliberately excludes request headers
+     * and secrets — the token lives in x-config-token and never belongs in
+     * a log line.
+     */
+    private logCorsOriginRejected(req: http.IncomingMessage): void {
+        const rawOrigin = req.headers.origin;
+        const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+        this.logger.write_warn(
+            "prometheus/corsOriginRejected",
+            "Rejected browser request from an origin not on the CORS allowlist",
+            {
+                event: "cors_origin_rejected",
+                logType: "audit",
+                method: req.method || "UNKNOWN",
+                url: req.url || "/",
+                origin: origin ?? "UNKNOWN",
+                statusCode: 403,
+            }
+        );
     }
 
     private handleAbout(_req: http.IncomingMessage, res: http.ServerResponse): void {
