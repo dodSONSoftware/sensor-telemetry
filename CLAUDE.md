@@ -37,7 +37,7 @@ Unknown device types are dropped with a warning. V2 section-based payloads (`pay
 
 ### Configuration
 
-- **config.yml** (project root) — Single source of truth for runtime configuration (YAML). Copied to `dist/` by `npm run build`. At startup the service tries `CONFIG_FILE_CANDIDATES` in order: `/app/configs/config.yml` (Docker mount — the container does not ship the file in the image, see docker-compose.yml), `./dist/config.yml` (build output), then `./config.yml` (repo root).
+- **config.yml** (project root) — Single source of truth for runtime configuration (YAML). Copied to `dist/` by `npm run build`. At startup the service tries `CONFIG_FILE_CANDIDATES` in order: `/app/configs/config.yml` (Docker mount — the container does not ship the file in the image, see docker-compose.yml), `./dist/config.yml` (build output), then `./config.yml` (repo root). Fallback continues only past *missing* files: a candidate that exists but is unreadable, unparseable, or empty fails startup immediately (naming the offending file) instead of silently booting on a stale earlier snapshot.
 - **schemas/config.ts** — Zod schema for configuration validation
 - **SENSOR_TELEMETRY_CONFIG_TOKEN** (env var) — Optional shared secret protecting `/write-config` and `/reload-config`. When set, requests must carry a matching `x-config-token` header (constant-time compare); when unset the endpoints remain open and a warning is logged at startup.
 

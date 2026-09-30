@@ -67,7 +67,10 @@ export function read_file_yaml<T>(
     return { data: null, error: `read_file_yaml: could not read '${filename}'` };
   }
   try {
-    return { data: yaml.load(data) as T, error: null };
+    // yaml.load returns undefined (not null) for empty/whitespace-only
+    // input; normalize so data is strictly T | null as documented.
+    const parsed = yaml.load(data) as T;
+    return { data: parsed ?? null, error: null };
   } catch (error) {
     const msg = `read_file_yaml: failed to parse '${filename}': ${(error as Error).message}`;
     if (logger) {
@@ -102,9 +105,13 @@ export const CONFIG_FILE_CANDIDATES: string[] = [
 export interface ResolveYamlResult<T> {
   /** Parsed YAML data, or null if no candidate could be read. */
   data: T | null;
-  /** The candidate path that was read successfully, or null if all failed. */
+  /**
+   * On success, the candidate that was read; on failure, the existing
+   * candidate that stopped the search (unreadable or unparseable), or
+   * null if no candidate file existed at all.
+   */
   source: string | null;
-  /** Error text combining every failed read, or null on success. */
+  /** Error text, or null on success. */
   error: string | null;
 }
 
@@ -113,25 +120,59 @@ export interface ResolveYamlResult<T> {
  * read and parsed as YAML. Relative paths resolve against the process
  * working directory, so callers can mix container paths and CWD-relative
  * fallbacks.
+ *
+ * Falling through is only allowed past *missing* files. A candidate that
+ * exists but fails to read or parse (or parses to null) is an operator
+ * error — a corrupted or truncated config — and stops the search with
+ * that error. This is deliberate: silently continuing on to the next
+ * candidate would let the service boot on a stale snapshot (e.g. a
+ * previous build's dist/config.yml) that may point at a different broker
+ * or topic. The check applies to every existing candidate, so a corrupted
+ * source-of-truth ./config.yml is caught even when an earlier candidate
+ * (dist/) is still valid.
  */
 export function read_file_yaml_first<T>(
   candidates: readonly string[],
   logger?: ILogger
 ): ResolveYamlResult<T> {
-  const errors: string[] = [];
+  const missing: string[] = [];
+  const parsed: Record<string, T> = {};
+
+  // First pass: validate every candidate that exists on disk. An
+  // unreadable or unparseable file that is present fails fast instead of
+  // falling back to a potentially stale earlier candidate.
   for (const candidate of candidates) {
-    const result = read_file_yaml<T>(candidate, logger);
-    if (result.data !== null) {
-      return { data: result.data, source: candidate, error: null };
+    if (!fs.existsSync(candidate)) {
+      missing.push(candidate);
+      continue;
     }
-    if (result.error !== null) {
-      errors.push(result.error);
+    const result = read_file_yaml<T>(candidate, logger);
+    if (result.data === null) {
+      return {
+        data: null,
+        source: candidate,
+        error:
+          result.error ??
+          `read_file_yaml_first: '${candidate}' exists but parsed to null`,
+      };
+    }
+    parsed[candidate] = result.data;
+  }
+
+  // Second pass: return the first parseable candidate in priority order.
+  for (const candidate of candidates) {
+    if (candidate in parsed) {
+      return { data: parsed[candidate], source: candidate, error: null };
     }
   }
+
   return {
     data: null,
     source: null,
-    error: errors.length > 0 ? errors.join("; ") : null,
+    error:
+      missing.length > 0
+        ? `read_file_yaml_first: no config file found in any candidate location: ${missing.join(", ")}`
+        : null,
   };
 }
 

@@ -93,6 +93,36 @@ describe("read_file_yaml_first", () => {
     expect(result.source).toBe("./config.yml");
   });
 
+  it("fails fast on a corrupt root config instead of a stale dist/ copy (regression P3-4)", () => {
+    writeConfig(path.join(workDir, "dist"), "logLevel: debug");
+    // Unterminated double-quoted scalar: guaranteed YAML parse error.
+    writeConfig(workDir, 'logLevel: "info');
+
+    const result = read_file_yaml_first<Record<string, unknown>>(
+      CONFIG_FILE_CANDIDATES
+    );
+
+    expect(result.data).toBeNull();
+    expect(result.source).toBe("./config.yml");
+    expect(result.error).not.toBeNull();
+    expect(result.error).toContain("./config.yml");
+    expect(result.error).toContain("failed to parse");
+  });
+
+  it("fails fast on an existing but empty candidate instead of falling through (regression P3-4)", () => {
+    writeConfig(path.join(workDir, "dist"), "logLevel: debug");
+    writeConfig(workDir, "");
+
+    const result = read_file_yaml_first<Record<string, unknown>>(
+      CONFIG_FILE_CANDIDATES
+    );
+
+    expect(result.data).toBeNull();
+    expect(result.source).toBe("./config.yml");
+    expect(result.error).not.toBeNull();
+    expect(result.error).toContain("./config.yml");
+  });
+
   it("returns null data and combined errors when no candidate exists", () => {
     const result = read_file_yaml_first<Record<string, unknown>>([
       "./does-not-exist/config.yml",
