@@ -180,8 +180,11 @@ export class MqttNetworking implements IMqttNetworking {
             }
         );
 
-        // Close Prometheus writer first (no timeout needed)
-        this.promWriter.close();
+        // Close Prometheus writer first and await the drain: server.close()
+        // is asynchronous, so a fire-and-forget call would let index.ts reach
+        // process.exit() while the HTTP server still has live connections
+        // (bounded in practice by Node's keepAliveTimeout for idle sockets).
+        await this.promWriter.close();
 
         // Close MQTT client with timeout
         const closePromise = new Promise<void>((resolve) => {

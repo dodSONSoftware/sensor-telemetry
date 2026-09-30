@@ -111,11 +111,11 @@ Sanitization bounds each label *value* but not how many distinct values appear, 
 
 The service handles SIGTERM and SIGINT signals gracefully:
 1. Stops accepting new MQTT messages
-2. Closes MQTT connection with configurable timeout
-3. Shuts down Prometheus server
+2. Shuts down the Prometheus server, awaiting its connection drain before proceeding (`server.close` resolves only once existing connections have finished; idle keep-alive sockets are reaped by Node's `keepAliveTimeout`)
+3. Closes MQTT connection with configurable timeout
 4. Logs uptime statistics
 
-Shutdown is idempotent: a repeated signal during an in-flight close is ignored (the MQTT close promise and HTTP server close are cached). The service tracks the worst exit code seen, so a fatal error (`uncaughtException`/`unhandledRejection`) — whether it starts the shutdown or lands during an in-flight one — exits with code 1 and is never masked as a clean 0, letting orchestrators distinguish a crash from an operator-initiated stop.
+Shutdown is idempotent: a repeated signal during an in-flight close is ignored (the networking close promise is cached, and the Prometheus writer's close is idempotent — a second call resolves immediately). The service tracks the worst exit code seen, so a fatal error (`uncaughtException`/`unhandledRejection`) — whether it starts the shutdown or lands during an in-flight one — exits with code 1 and is never masked as a clean 0, letting orchestrators distinguish a crash from an operator-initiated stop.
 
 ## Building & Deployment
 

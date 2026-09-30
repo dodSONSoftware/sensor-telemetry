@@ -231,12 +231,14 @@ describe("PrometheusWriter", () => {
   });
 
   afterAll(async () => {
-    writer.close();
-    await until(() =>
+    // close() resolves only once the server's close callback has fired, so
+    // awaiting it guarantees the log line is already written — no polling.
+    await writer.close();
+    expect(
       logger.write_info.mock.calls.some(
         (call) => call[2]?.event === "prometheus_server_closed"
       )
-    );
+    ).toBe(true);
     fs.rmSync(configDir, { recursive: true, force: true });
     if (savedToken === undefined) {
       delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
@@ -959,27 +961,25 @@ describe("PrometheusWriter", () => {
   // metrics server, so this must run after every describe that still needs
   // it. afterAll's own close() is then a no-op by design.
   describe("close() idempotency", () => {
-    it("a second close() while the first is still in flight does not throw and logs no error", async () => {
+    it("a second close() while the first is still in flight resolves without throwing and logs no error", async () => {
       logger.write_error.mockClear();
       logger.write_critical.mockClear();
 
       // The first close puts the server into its closing state; an
       // unguarded second close() would reach server.close() on that
       // closing server and throw ERR_SERVER_NOT_RUNNING.
-      expect(() => {
-        writer.close();
-        writer.close();
-      }).not.toThrow();
+      const first = writer.close();
+      const second = writer.close();
+      await Promise.all([first, second]);
 
       expect(logger.write_error).not.toHaveBeenCalled();
       expect(logger.write_critical).not.toHaveBeenCalled();
 
-      // First close's callback still fires exactly once.
-      await until(() =>
-        logger.write_info.mock.calls.some(
-          (call) => call[2]?.event === "prometheus_server_closed"
-        )
+      // First close's callback fires exactly once.
+      const closedCalls = logger.write_info.mock.calls.filter(
+        (call) => call[2]?.event === "prometheus_server_closed"
       );
+      expect(closedCalls).toHaveLength(1);
     });
   });
 });

@@ -4,6 +4,7 @@
  */
 
 import { MqttNetworking } from "../../../src/dodsonlabs/MqttNetworking";
+import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
@@ -140,5 +141,86 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
     );
     expect(infoCall).toBeDefined();
     expect(infoCall?.[2]).toMatchObject({ logLevel: "debug" });
+  });
+});
+
+describe("MqttNetworking.close() shutdown ordering", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+    sensorSourceMaxLength: 30,
+    sensorSourceValidCharsRegex: "a-zA-Z0-9._-",
+  };
+
+  beforeEach(() => {
+    mockConnect.mockReset();
+    mockConnect.mockReturnValue(createMockMqttClient());
+    (PrometheusWriter as unknown as jest.Mock).mockClear();
+  });
+
+  function getMockWriter() {
+    return (PrometheusWriter as unknown as jest.Mock).mock.instances.at(
+      -1
+    ) as unknown as { close: jest.Mock };
+  }
+
+  it("does not resolve until the Prometheus server's close promise settles", async () => {
+    const logger = createMockLogger();
+    const mockClient = createMockMqttClient();
+    mockConnect.mockReturnValue(mockClient);
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    // Hold the writer's close open: this is the HTTP server's connection
+    // drain, and perform_close must block on it before touching the MQTT
+    // client or resolving.
+    let resolveWriterClose: () => void = () => {};
+    writerMock.close.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveWriterClose = resolve;
+      })
+    );
+
+    const closePromise = networking.close(5000);
+
+    expect(writerMock.close).toHaveBeenCalledTimes(1);
+    // The MQTT close has not started: the old fire-and-forget close()
+    // would already have reached end() at this point.
+    expect(mockClient.end).not.toHaveBeenCalled();
+
+    let resolved = false;
+    void closePromise.then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    resolveWriterClose();
+    await closePromise;
+    expect(resolved).toBe(true);
+    expect(mockClient.end).toHaveBeenCalled();
+  });
+
+  it("reuses the in-flight close instead of starting a second one", async () => {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    let resolveWriterClose: () => void = () => {};
+    writerMock.close.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveWriterClose = resolve;
+      })
+    );
+
+    const first = networking.close(5000);
+    const second = networking.close(5000);
+
+    expect(writerMock.close).toHaveBeenCalledTimes(1);
+    resolveWriterClose();
+    await Promise.all([first, second]);
+    expect(writerMock.close).toHaveBeenCalledTimes(1);
   });
 });

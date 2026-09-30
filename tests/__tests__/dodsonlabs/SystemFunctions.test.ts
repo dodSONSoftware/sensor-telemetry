@@ -9,6 +9,7 @@ import path from "path";
 import {
   CONFIG_FILE_CANDIDATES,
   get_numeric_field,
+  get_timestamp_iso,
   read_file_yaml_first,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
@@ -213,6 +214,19 @@ describe("write_file_yaml", () => {
     expect(result).toBe(false);
     expect(fs.readFileSync(file, "utf8")).toBe(original);
     expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+});
+
+describe("get_timestamp_iso", () => {
+  it("returns the full ISO 8601 form with the Z suffix", () => {
+    // The value lands in *_utc fields (boot_date_utc, forwarded-log
+    // timestamps); the trailing Z is what makes it unambiguously UTC.
+    const ts = get_timestamp_iso();
+    expect(ts).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+    );
+    // Round-trips as the same instant (not interpreted as local time).
+    expect(new Date(ts).toISOString()).toBe(ts);
   });
 });
 

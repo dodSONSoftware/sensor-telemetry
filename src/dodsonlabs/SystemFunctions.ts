@@ -303,8 +303,11 @@ export function get_numeric_field(
 
 // **** time-related functions
 
+// The full ISO 8601 form, trailing Z included: the value is written into
+// *_utc fields (boot_date_utc, forwarded-log timestamps) where a string with
+// no timezone designation is not actually unambiguous UTC.
 export function get_timestamp_iso(): string {
-  return new Date().toISOString().slice(0, -1);
+  return new Date().toISOString();
 }
 
 export function formatElapsedTime(ms: number): string {

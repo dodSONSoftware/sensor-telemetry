@@ -1043,26 +1043,33 @@ export class PrometheusWriter {
         return this._ready;
     }
 
-    close() {
+    close(): Promise<void> {
         this._ready = false;
         if (!this.server) {
             // close() must be idempotent: a second shutdown signal while the
             // first is still in flight would otherwise call server.close()
             // on a server that is already closing and throw
             // ERR_SERVER_NOT_RUNNING.
-            return;
+            return Promise.resolve();
         }
         const server = this.server;
         this.server = undefined;
-        server.close(() => {
-            this.logger.write_info(
-                "prometheus/serverClosed",
-                "Prometheus metrics server closed.",
-                {
-                    event: "prometheus_server_closed",
-                    logType: "service",
-                }
-            );
+        // server.close() is asynchronous: it stops accepting new connections
+        // but only fires its callback once existing connections have drained,
+        // so the promise must resolve in the callback — the shutdown path in
+        // MqttNetworking awaits it before process.exit() runs.
+        return new Promise<void>((resolve) => {
+            server.close(() => {
+                this.logger.write_info(
+                    "prometheus/serverClosed",
+                    "Prometheus metrics server closed.",
+                    {
+                        event: "prometheus_server_closed",
+                        logType: "service",
+                    }
+                );
+                resolve();
+            });
         });
     }
 
