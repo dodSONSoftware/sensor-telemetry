@@ -189,10 +189,12 @@ export class PrometheusWriter {
             } else if (path === "/endpoints") {
                 this.handleEndpoints(req, res);
             } else if (path === "/read-config") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 await this.handleReadConfig(req, res);
             } else if (path === "/write-config") {
-                if (req.method !== "POST") {
-                    this.sendJson(res, 405, { success: false, message: "method not allowed; use POST" });
+                if (!this.requireMethod(req, res, "POST")) {
                     return;
                 }
                 if (!this.verifyConfigToken(req, res)) {
@@ -200,6 +202,9 @@ export class PrometheusWriter {
                 }
                 await this.handleWriteConfig(req, res);
             } else if (path === "/reload-config") {
+                if (!this.requireMethod(req, res, "GET")) {
+                    return;
+                }
                 if (!this.verifyConfigToken(req, res)) {
                     return;
                 }
@@ -286,6 +291,22 @@ export class PrometheusWriter {
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.writeHead(statusCode);
         res.end(JSON.stringify(data));
+    }
+
+    /**
+     * Enforce the single HTTP method a route accepts. Returns true when the
+     * request method matches and the caller should continue; otherwise sends
+     * a 405 with an Allow header naming the accepted method and returns false.
+     * Checked before authentication so an unsupported method is rejected
+     * (405) rather than misread as an auth failure (401).
+     */
+    private requireMethod(req: http.IncomingMessage, res: http.ServerResponse, allowed: string): boolean {
+        if (req.method === allowed) {
+            return true;
+        }
+        res.setHeader("Allow", allowed);
+        this.sendJson(res, 405, { success: false, message: `method not allowed; use ${allowed}` });
+        return false;
     }
 
     /**

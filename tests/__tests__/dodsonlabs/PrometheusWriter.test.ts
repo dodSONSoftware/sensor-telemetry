@@ -332,6 +332,54 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("HTTP method enforcement", () => {
+    it("rejects non-GET methods on /read-config with 405 and Allow: GET", async () => {
+      for (const method of ["POST", "DELETE", "PATCH"]) {
+        const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
+          method,
+          headers: { Connection: "close" },
+        });
+        expect(res.status).toBe(405);
+        expect(res.headers.get("allow")).toBe("GET");
+        const body = (await res.json()) as { success: boolean; message: string };
+        expect(body.success).toBe(false);
+      }
+    });
+
+    it("still serves /read-config on GET", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("rejects non-POST methods on /write-config with 405 and Allow: POST", async () => {
+      for (const method of ["GET", "DELETE", "PUT"]) {
+        const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+          method,
+          headers: { Connection: "close" },
+        });
+        expect(res.status).toBe(405);
+        expect(res.headers.get("allow")).toBe("POST");
+        const body = (await res.json()) as { success: boolean; message: string };
+        expect(body.success).toBe(false);
+      }
+    });
+
+    it("rejects non-GET methods on /reload-config with 405 and Allow: GET", async () => {
+      for (const method of ["POST", "DELETE", "PUT"]) {
+        const res = await fetch(`http://127.0.0.1:${port}/reload-config`, {
+          method,
+          headers: { Connection: "close" },
+        });
+        expect(res.status).toBe(405);
+        expect(res.headers.get("allow")).toBe("GET");
+        const body = (await res.json()) as { success: boolean; message: string };
+        expect(body.success).toBe(false);
+      }
+    });
+  });
+
   describe("query-string routing", () => {
     // req.url includes the query string, so matching routes against it
     // 404s well-formed requests like /health?probe=20260929 and emits a
