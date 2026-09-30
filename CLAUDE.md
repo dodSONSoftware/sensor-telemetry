@@ -115,7 +115,7 @@ The service handles SIGTERM and SIGINT signals gracefully:
 3. Shuts down Prometheus server
 4. Logs uptime statistics
 
-Shutdown is idempotent: a repeated signal during an in-flight close is ignored (the MQTT close promise and HTTP server close are cached), and fatal errors (`uncaughtException`/`unhandledRejection`) exit with code 1 so orchestrators can distinguish a crash from a clean stop.
+Shutdown is idempotent: a repeated signal during an in-flight close is ignored (the MQTT close promise and HTTP server close are cached). The service tracks the worst exit code seen, so a fatal error (`uncaughtException`/`unhandledRejection`) — whether it starts the shutdown or lands during an in-flight one — exits with code 1 and is never masked as a clean 0, letting orchestrators distinguish a crash from an operator-initiated stop.
 
 ## Building & Deployment
 

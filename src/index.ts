@@ -144,16 +144,33 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   // exitCode 0 = graceful stop requested by the operator; 1 = the process
   // is exiting because of a fatal error, so orchestrators and monitoring
   // can distinguish a crash from a clean shutdown.
+  // pendingExitCode tracks the worst code seen so far: a fatal error that
+  // lands during an in-flight graceful shutdown escalates the pending code
+  // to 1 instead of being dropped, so a crash in the close window is never
+  // reported as a clean stop.
+  let pendingExitCode = 0;
+
   async function shutdown(signal: string, exitCode = 0): Promise<void> {
     if (shuttingDown) {
-      appLogger.write_warn("index.ts/shutdownIgnored", `Received ${signal} during an in-flight shutdown; ignoring.`, {
-        event: "shutdown_ignored",
-        logType: "service",
-        signal,
-      });
+      if (exitCode > pendingExitCode) {
+        pendingExitCode = exitCode;
+        appLogger.write_warn("index.ts/shutdownEscalated", `Received ${signal} during an in-flight shutdown; escalating exit code to ${exitCode}.`, {
+          event: "shutdown_escalated",
+          logType: "service",
+          signal,
+          exitCode,
+        });
+      } else {
+        appLogger.write_warn("index.ts/shutdownIgnored", `Received ${signal} during an in-flight shutdown; ignoring.`, {
+          event: "shutdown_ignored",
+          logType: "service",
+          signal,
+        });
+      }
       return;
     }
     shuttingDown = true;
+    pendingExitCode = exitCode;
 
     appLogger.write_info("index.ts/shutdown", `Received ${signal}. Starting graceful shutdown...`, {
       event: "shutdown_initiated",
@@ -173,7 +190,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
           event: "graceful_shutdown_completed",
           logType: "service",
           uptimeMs: Math.trunc(Date.now() - start_time),
-          exitCode,
+          exitCode: pendingExitCode,
         }
       );
     } catch (err) {
@@ -187,7 +204,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         }
       );
     } finally {
-      process.exit(exitCode);
+      process.exit(pendingExitCode);
     }
   }
 
