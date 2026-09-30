@@ -828,6 +828,47 @@ export class PrometheusWriter {
                 });
             }
         });
+
+        // A client that vanishes mid-body (aborted fetch, dropped TCP) makes
+        // the request stream emit 'error' (e.g. ECONNRESET) or 'aborted'
+        // instead of 'end'. With no handler attached, an unhandled 'error'
+        // event on the request stream throws ERR_UNHANDLED_ERROR and takes the
+        // process down. Both paths are made explicit here: mark the request
+        // rejected so the 'end' handler never parses a partial body, log an
+        // audit warning, and end the response if it is still open. (Not
+        // reproducible on the pinned Node runtime, but defensive against a
+        // runtime that does surface the error.)
+        req.on("error", (err: Error) => {
+            if (rejected) return;
+            rejected = true;
+            this.logger.write_warn(
+                "prometheus/writeConfigRequestError",
+                `/write-config request errored before completion: ${err.message}`,
+                {
+                    event: "config_request_error",
+                    logType: "audit",
+                    error: err.message,
+                }
+            );
+            if (!res.writableEnded) {
+                res.end();
+            }
+        });
+        req.on("aborted", () => {
+            if (rejected) return;
+            rejected = true;
+            this.logger.write_warn(
+                "prometheus/writeConfigRequestAborted",
+                "/write-config request aborted before completion",
+                {
+                    event: "config_request_aborted",
+                    logType: "audit",
+                }
+            );
+            if (!res.writableEnded) {
+                res.end();
+            }
+        });
     }
 
     private async handleReloadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -2261,7 +2302,7 @@ export class PrometheusWriter {
         // ******** lightning
 
         this.prometheus_Gauge_Lightning = new Gauge({
-            name: "lightning_strikes_total",
+            name: "lightning_strike_count",
             help: "This indicator shows the number of lightning strikes.",
             labelNames: ["source"],
         });
@@ -2301,13 +2342,13 @@ export class PrometheusWriter {
         });
 
         this.prometheus_Gauge_SensorReadFailures = new Gauge({
-            name: "sensor_health_read_failures_total",
+            name: "sensor_health_read_failure_count",
             help: "Total number of sensor read failures.",
             labelNames: ["source"],
         });
 
         this.prometheus_Gauge_SensorReadCounter = new Gauge({
-            name: "sensor_health_read_counter_total",
+            name: "sensor_health_read_count",
             help: "Total number of successful sensor reads.",
             labelNames: ["source"],
         });

@@ -1081,6 +1081,75 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("device-owned cumulative counts (gauges, not counters)", () => {
+    // lightning_strike_count, sensor_health_read_failure_count, and
+    // sensor_health_read_count mirror counter values owned by the sensor.
+    // The exporter publishes the device's absolute value as-is (Gauge.set),
+    // never accumulating deltas, so a device-side reset (102 -> 0) must land
+    // as a lower gauge value rather than be rejected, clamped, or
+    // compensated. These tests pin that the metrics stay Gauges named
+    // *_count and still track decreasing reported values.
+    function metricValue(
+      metrics: string,
+      name: string,
+      source: string
+    ): number | undefined {
+      const line = metrics
+        .split("\n")
+        .find((l) => l.startsWith(`${name}{source="${source}"}`));
+      if (!line) return undefined;
+      return Number(line.split(/\s+/).pop());
+    }
+
+    it("exports all three under the *_count names as gauge TYPEs", async () => {
+      const metrics = await getMetrics();
+      expect(metrics).toContain("# TYPE lightning_strike_count gauge");
+      expect(metrics).toContain("# TYPE sensor_health_read_failure_count gauge");
+      expect(metrics).toContain("# TYPE sensor_health_read_count gauge");
+      // Old _total names are gone — no compatibility aliases.
+      expect(metrics).not.toContain("lightning_strikes_total");
+      expect(metrics).not.toContain("sensor_health_read_failures_total");
+      expect(metrics).not.toContain("sensor_health_read_counter_total");
+    });
+
+    it("lightning_strike_count follows decreasing device values (10 -> 11 -> 0)", async () => {
+      const source = "count-lightning";
+      writer.publish_lightning({ lightning: { lightning_count: 10 } }, source, "1.0.0");
+      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(10);
+
+      writer.publish_lightning({ lightning: { lightning_count: 11 } }, source, "1.0.0");
+      // 11, not 21: the exporter mirrors the absolute value, it does not sum.
+      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(11);
+
+      writer.publish_lightning({ lightning: { lightning_count: 0 } }, source, "1.0.0");
+      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(0);
+    });
+
+    it("sensor_health_read_failure_count follows decreasing device values (5 -> 6 -> 0)", async () => {
+      const source = "count-readfail";
+      writer.set_sensor_read_failures(source, 5);
+      expect(metricValue(await getMetrics(), "sensor_health_read_failure_count", source)).toBe(5);
+
+      writer.set_sensor_read_failures(source, 6);
+      expect(metricValue(await getMetrics(), "sensor_health_read_failure_count", source)).toBe(6);
+
+      writer.set_sensor_read_failures(source, 0);
+      expect(metricValue(await getMetrics(), "sensor_health_read_failure_count", source)).toBe(0);
+    });
+
+    it("sensor_health_read_count follows decreasing device values (100 -> 101 -> 0)", async () => {
+      const source = "count-readcount";
+      writer.set_sensor_read_counter(source, 100);
+      expect(metricValue(await getMetrics(), "sensor_health_read_count", source)).toBe(100);
+
+      writer.set_sensor_read_counter(source, 101);
+      expect(metricValue(await getMetrics(), "sensor_health_read_count", source)).toBe(101);
+
+      writer.set_sensor_read_counter(source, 0);
+      expect(metricValue(await getMetrics(), "sensor_health_read_count", source)).toBe(0);
+    });
+  });
+
   // Declared last because it consumes the shared writer: close() stops the
   // metrics server, so this must run after every describe that still needs
   // it. afterAll's own close() is then a no-op by design.
