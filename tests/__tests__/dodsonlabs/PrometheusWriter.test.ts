@@ -617,6 +617,53 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("sanitizeSource (direct unit)", () => {
+    // Direct calls to the private label normalizer: the returned string IS
+    // the Prometheus label, so these pin the exact transformation pipeline
+    // (falsy fallback, dash normalization, stripping, truncation) without
+    // having to parse /metrics output.
+    const sanitize = (source: string): string =>
+      (
+        writer as unknown as { sanitizeSource(source: string): string }
+      ).sanitizeSource(source);
+
+    it("returns an already-clean source unchanged", () => {
+      expect(sanitize("Air-1")).toBe("Air-1");
+    });
+
+    it("normalizes a unicode en dash to an ASCII hyphen", () => {
+      // U+2013 (EN DASH) falls inside the production [‐-―−] class.
+      expect(sanitize("Air–1")).toBe("Air-1");
+    });
+
+    it("strips whitespace (an invalid character) from the source", () => {
+      expect(sanitize("Air 1")).toBe("Air1");
+    });
+
+    it("returns 'unknown' for an empty source", () => {
+      expect(sanitize("")).toBe("unknown");
+    });
+
+    it("returns 'unknown' and warns when all characters are invalid", () => {
+      logger.write_warn.mockClear();
+
+      expect(sanitize("💩💩")).toBe("unknown");
+
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) =>
+            call[2]?.event === "sensor_source_sanitized" &&
+            call[2]?.originalSource === "💩💩" &&
+            call[2]?.sanitizedSource === "unknown"
+        )
+      ).toBe(true);
+    });
+
+    it("truncates a source longer than the max length (30) to 30 chars", () => {
+      expect(sanitize("a".repeat(40))).toBe("a".repeat(30));
+    });
+  });
+
   // Declared last because it consumes the shared writer: close() stops the
   // metrics server, so this must run after every describe that still needs
   // it. afterAll's own close() is then a no-op by design.
