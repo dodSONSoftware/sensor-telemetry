@@ -37,6 +37,22 @@ function createMockMqttClient() {
   };
 }
 
+// A client whose ordinary end(cb) never invokes its callback — the close
+// hangs, which is exactly what the close-deadline logic has to rescue.
+// Forced end(true, cb) calls back, matching the real client's force-close
+// behavior (force skips waiting for pending packets and resolves).
+function createHangingMqttClient() {
+  return {
+    connected: false,
+    on: jest.fn(),
+    end: jest.fn((force?: boolean, cb?: () => void) => {
+      if (force) {
+        cb?.();
+      }
+    }),
+  };
+}
+
 interface MockLogger {
   global_log_level: jest.Mock;
   global_log_level_string: jest.Mock;
@@ -222,5 +238,59 @@ describe("MqttNetworking.close() shutdown ordering", () => {
     resolveWriterClose();
     await Promise.all([first, second]);
     expect(writerMock.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves at the deadline even when the HTTP drain never finishes", async () => {
+    const logger = createMockLogger();
+    const mockClient = createHangingMqttClient();
+    mockConnect.mockReturnValue(mockClient);
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    // The drain hangs forever (e.g. a stuck /write-config body). The close
+    // must still settle at the deadline: close(50) means "entire shutdown
+    // in ~50 ms", not "unbounded HTTP drain + 50 ms of MQTT".
+    writerMock.close.mockReturnValue(new Promise<void>(() => {}));
+
+    const startedAt = Date.now();
+    await networking.close(50);
+    const elapsed = Date.now() - startedAt;
+
+    expect(elapsed).toBeLessThan(400);
+    // The deadline was exhausted by the drain, so the wait was abandoned
+    // with an audit error and the MQTT close became a best-effort forced
+    // disconnect that does not wait.
+    const drainTimeout = logger.write_error.mock.calls.find(
+      (call) => call[2]?.event === "prometheus_server_close_timeout",
+    );
+    expect(drainTimeout).toBeDefined();
+    expect(mockClient.end).toHaveBeenCalledWith(true);
+  });
+
+  it("gives the MQTT close only the time the HTTP drain leaves on the deadline", async () => {
+    const logger = createMockLogger();
+    const mockClient = createHangingMqttClient();
+    mockConnect.mockReturnValue(mockClient);
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    // The drain eats ~100 ms of a 200 ms deadline, leaving ~100 ms for the
+    // MQTT phase. The MQTT close hangs, so its phase must time out against
+    // the REMAINING slice — not the full 200 ms.
+    writerMock.close.mockReturnValue(
+      new Promise<void>((resolve) => setTimeout(resolve, 100)),
+    );
+
+    await networking.close(200);
+
+    const mqttTimeout = logger.write_error.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_client_close_timeout",
+    );
+    expect(mqttTimeout).toBeDefined();
+    const budgetMs = mqttTimeout?.[2]?.timeoutMs as number;
+    expect(budgetMs).toBeLessThan(200);
+    expect(budgetMs).toBeGreaterThan(20);
+    // The stuck MQTT close was force-disconnected with a callback.
+    expect(mockClient.end).toHaveBeenCalledWith(true, expect.any(Function));
   });
 });

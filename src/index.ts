@@ -180,7 +180,9 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     });
 
     try {
-      // Close MQTT client with timeout
+      // Single 5 s deadline for the entire close path: the Prometheus HTTP
+      // drain and the MQTT disconnect share one budget, so the shutdown is
+      // bounded even when an in-flight HTTP request holds the drain open.
       await networking.close(5000);
 
       appLogger.write_info(

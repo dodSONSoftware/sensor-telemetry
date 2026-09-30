@@ -75,7 +75,38 @@ export const configSchema = z.object({
     forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
         error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",
     }).optional(),
-}).strict();
+}).strict().superRefine((config, ctx) => {
+    // MqttNetworking.on_message routes by lowercasing both the received
+    // topic and the configured topics, with log winning over health and
+    // both winning over the telemetry fallback. MQTT itself is
+    // case-sensitive, so two configured topics that differ only in case
+    // are distinct to the broker but identical to the router — one would
+    // silently shadow the other. The three configured topics must be
+    // unique under the same case-folded equality the router uses.
+    const topics: Array<{ name: "mqttTopicTelemetry" | "mqttTopicLog" | "mqttTopicHealth"; value: string }> = [
+        { name: "mqttTopicTelemetry", value: config.mqttTopicTelemetry },
+    ];
+    if (config.mqttTopicLog !== undefined) {
+        topics.push({ name: "mqttTopicLog", value: config.mqttTopicLog });
+    }
+    if (config.mqttTopicHealth !== undefined) {
+        topics.push({ name: "mqttTopicHealth", value: config.mqttTopicHealth });
+    }
+    const seen = new Map<string, "mqttTopicTelemetry" | "mqttTopicLog" | "mqttTopicHealth">();
+    for (const topic of topics) {
+        const folded = topic.value.toLowerCase();
+        const first = seen.get(folded);
+        if (first !== undefined) {
+            ctx.addIssue({
+                code: "custom",
+                message: `${first} and ${topic.name} must not resolve to the same topic when compared case-insensitively`,
+                path: [topic.name],
+            });
+        } else {
+            seen.set(folded, topic.name);
+        }
+    }
+});
 
 function isValidPort(port: string): boolean {
     if (!/^\d{1,5}$/.test(port)) {

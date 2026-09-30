@@ -158,6 +158,14 @@ export class MqttNetworking implements IMqttNetworking {
         return this.promWriter.is_ready();
     }
 
+    /**
+     * Shut down the MQTT client and the Prometheus HTTP server.
+     * timeout_ms is a deadline for the ENTIRE close path — the HTTP
+     * connection drain and the MQTT disconnect share one budget — so the
+     * returned promise settles within roughly timeout_ms even when an
+     * in-flight HTTP request would otherwise hold the server's drain open
+     * indefinitely.
+     */
     public async close(timeout_ms: number = 5000): Promise<void> {
         if (this.closePromise) {
             // A second close while one is still in flight (e.g. a repeated
@@ -172,7 +180,7 @@ export class MqttNetworking implements IMqttNetworking {
     private async perform_close(timeout_ms: number): Promise<void> {
         this.logger.write_info(
             "networking/close",
-            `Shutting down MQTT client (timeout: ${timeout_ms}ms)...`,
+            `Shutting down service (total close deadline: ${timeout_ms}ms)...`,
             {
                 event: "mqtt_client_closing",
                 logType: "service",
@@ -180,13 +188,68 @@ export class MqttNetworking implements IMqttNetworking {
             }
         );
 
-        // Close Prometheus writer first and await the drain: server.close()
-        // is asynchronous, so a fire-and-forget call would let index.ts reach
-        // process.exit() while the HTTP server still has live connections
-        // (bounded in practice by Node's keepAliveTimeout for idle sockets).
-        await this.promWriter.close();
+        // A single deadline bounds the ENTIRE close path, not just the MQTT
+        // phase: server.close() stops accepting new connections but waits for
+        // in-flight HTTP requests to finish, so a stuck request (e.g. an
+        // aborted /write-config body) can hold the drain open for an
+        // arbitrary time. Awaiting the drain before starting the MQTT timer
+        // would make close(5000) mean "unbounded HTTP drain + 5 s of MQTT
+        // shutdown", and an orchestrator with a shorter stop window would
+        // escalate to SIGKILL. Both phases therefore share one deadline, and
+        // the MQTT phase gets only what the drain leaves.
+        const deadline = Date.now() + timeout_ms;
 
-        // Close MQTT client with timeout
+        // Phase 1: Prometheus writer — stop accepting connections and drain
+        // existing ones, bounded by the shared deadline. If the drain does
+        // not finish in time, abandon the wait rather than extend shutdown:
+        // the process is about to exit, and its remaining connections die
+        // with it.
+        const prometheusClose = this.promWriter.close();
+        let prometheusTimer: NodeJS.Timeout | undefined;
+        const prometheusDeadline = new Promise<void>((resolve) => {
+            prometheusTimer = setTimeout(() => {
+                this.logger.write_error(
+                    "networking/close_timeout",
+                    `Prometheus server still draining ${timeout_ms}ms after close started; abandoning the wait.`,
+                    {
+                        event: "prometheus_server_close_timeout",
+                        logType: "service",
+                        timeoutMs: timeout_ms,
+                    }
+                );
+                resolve();
+            }, timeout_ms);
+        });
+        try {
+            await Promise.race([prometheusClose, prometheusDeadline]);
+        } finally {
+            // Clear the pending timer if the drain won the race, so it cannot
+            // fire later and log a false "still draining" error.
+            if (prometheusTimer) {
+                clearTimeout(prometheusTimer);
+            }
+        }
+
+        // Phase 2: MQTT client, with whatever the drain left on the deadline.
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+            // The drain consumed the entire deadline. Best effort: send a
+            // forced DISCONNECT without waiting for it — the process is
+            // exiting, the socket dies with it, and the broker notices the
+            // disconnect on its own.
+            this.logger.write_error(
+                "networking/close_timeout",
+                "Close deadline exhausted by the HTTP drain; forcing MQTT disconnect without waiting.",
+                {
+                    event: "mqtt_close_forced_deadline_exhausted",
+                    logType: "service",
+                    timeoutMs: timeout_ms,
+                }
+            );
+            this.mqtt_client.end(true);
+            return;
+        }
+
         const closePromise = new Promise<void>((resolve) => {
             this.mqtt_client.end(() => {
                 this.logger.write_info(
@@ -206,17 +269,17 @@ export class MqttNetworking implements IMqttNetworking {
             timeoutHandle = setTimeout(() => {
                 this.logger.write_error(
                     "networking/close_timeout",
-                    `MQTT client close timed out after ${timeout_ms}ms, forcing disconnect.`,
+                    `MQTT client close timed out after ${remainingMs}ms, forcing disconnect.`,
                     {
                         event: "mqtt_client_close_timeout",
                         logType: "service",
-                        timeoutMs: timeout_ms,
+                        timeoutMs: remainingMs,
                     }
                 );
                 // Force close as a last resort — force=true skips waiting for
                 // pending packets to be acknowledged, avoiding the hang.
                 this.mqtt_client.end(true, () => resolve());
-            }, timeout_ms);
+            }, remainingMs);
         });
 
         try {

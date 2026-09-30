@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.0.
+**Release:** Iron Badger — firmware 3.0.1.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -139,7 +139,7 @@ forwardSensorLogsLevel: debug
 
 ### Strict Configuration Validation
 
-The configuration schema is strict: unknown keys fail validation with an `Unrecognized key` error instead of being silently discarded. This applies at startup and to `/write-config` and `/reload-config` alike. A misspelled optional key (e.g. `forwardSensorLog` for `forwardSensorLogs`) therefore fails loudly rather than booting the service on the default the operator did not ask for. If an obsolete key remains in a deployed `config.yml` after an upgrade, remove it before starting the service.
+The configuration schema is strict: unknown keys fail validation with an `Unrecognized key` error instead of being silently discarded. This applies at startup and to `/write-config` and `/reload-config` alike. A misspelled optional key (e.g. `forwardSensorLog` for `forwardSensorLogs`) therefore fails loudly rather than booting the service on the default the operator did not ask for. If an obsolete key remains in a deployed `config.yml` after an upgrade, remove it before starting the service. The three MQTT topics (`mqttTopicTelemetry`, `mqttTopicLog`, `mqttTopicHealth`) must also be unique when compared case-insensitively: incoming messages are routed by case-folded topic, so two configured topics that differ only in case are distinct to the broker but identical to the router, and one would silently shadow the other.
 
 ## Environment Variables
 
@@ -386,11 +386,10 @@ Sanitization bounds each label *value* but not how many distinct values appear, 
 
 ## Graceful Shutdown
 
-The service handles SIGTERM and SIGINT signals gracefully:
-1. Stops accepting new MQTT messages
-2. Closes MQTT connection with timeout
-3. Shuts down Prometheus server
-4. Logs uptime statistics
+The service handles SIGTERM and SIGINT signals gracefully. The close timeout is a single deadline for the **entire** shutdown path: the Prometheus HTTP connection drain and the MQTT disconnect share one budget, so the process settles within roughly that window even when an in-flight HTTP request (e.g. a stuck `/write-config` body) would otherwise hold the server's drain open indefinitely. If the drain outlives the deadline the wait is abandoned (the process is exiting anyway), and if the deadline is already exhausted the MQTT client is force-disconnected without waiting.
+1. Shuts down Prometheus server (drain bounded by the shared deadline)
+2. Closes MQTT connection with whatever time the drain left on the deadline
+3. Logs uptime statistics
 
 ## API Endpoints
 

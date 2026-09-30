@@ -145,6 +145,81 @@ describe("mqttBrokerIpAddress format validation (regression P3)", () => {
   });
 });
 
+describe("MQTT topic uniqueness under case folding (regression P3-1)", () => {
+  // MqttNetworking.on_message routes by lowercasing both the received
+  // topic and the configured topics, with the log branch taking priority
+  // over health and both over the telemetry fallback. MQTT itself is
+  // case-sensitive, so topics that differ only in case are distinct to
+  // the broker but identical to the router — one would silently shadow
+  // the other. The schema now rejects any pair of configured topics that
+  // collapse to the same string under case folding (exact duplicates
+  // included).
+  const withTopics = (
+    mqttTopicTelemetry: string,
+    mqttTopicLog?: string,
+    mqttTopicHealth?: string
+  ) =>
+    validateConfig({
+      ...validConfig,
+      mqttTopicTelemetry,
+      ...(mqttTopicLog !== undefined && { mqttTopicLog }),
+      ...(mqttTopicHealth !== undefined && { mqttTopicHealth }),
+    });
+
+  it.each([
+    [["iot/v3/telemetry"], "telemetry topic only"],
+    [
+      ["iot/v3/telemetry", "iot/v3/log"],
+      "distinct topics",
+    ],
+    [
+      ["iot/v3/telemetry", "iot/v3/log", "iot/v3/health"],
+      "all three distinct topics",
+    ],
+    [
+      ["iot/v3/telemetry", "IOT/V3/Log"],
+      "distinct topics that differ in case and content",
+    ],
+  ])("accepts %s", (topics, _label) => {
+    expect(() => withTopics(...(topics as [string, string?, string?]))).not.toThrow();
+  });
+
+  it.each([
+    [
+      ["iot/v3/telemetry", "iot/v3/telemetry"],
+      "mqttTopicLog",
+      /mqttTopicTelemetry and mqttTopicLog/i,
+      "exact duplicate: log shadows telemetry",
+    ],
+    [
+      ["iot/v3/telemetry", "IOT/V3/TELEMETRY"],
+      "mqttTopicLog",
+      /mqttTopicTelemetry and mqttTopicLog/i,
+      "case-folded duplicate: log shadows telemetry",
+    ],
+    [
+      ["iot/v3/telemetry", undefined, "iot/v3/telemetry"],
+      "mqttTopicHealth",
+      /mqttTopicTelemetry and mqttTopicHealth/i,
+      "exact duplicate: health shadows telemetry",
+    ],
+    [
+      ["IOT/v3/telemetry", undefined, "iot/V3/TELEMETRY"],
+      "mqttTopicHealth",
+      /mqttTopicTelemetry and mqttTopicHealth/i,
+      "case-folded duplicate across mixed case",
+    ],
+    [
+      ["iot/v3/telemetry", "IoT/v3/telemetry", "IOT/V3/Telemetry"],
+      "mqttTopicHealth",
+      /mqttTopicTelemetry and/i,
+      "all three collapse to one topic",
+    ],
+  ])("rejects %s (%s)", (topics, _label, expected, _why) => {
+    expect(() => withTopics(...(topics as [string, string?, string?]))).toThrow(expected);
+  });
+});
+
 describe("sensorSourceValidCharsRegex constructibility (regression P2-1)", () => {
   // The value is escaped into a negated character class in the
   // PrometheusWriter constructor, which runs before index.ts's structured
