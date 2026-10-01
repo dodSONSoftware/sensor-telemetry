@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { MqttNetworking } from "../../../src/dodsonlabs/MqttNetworking";
+import { MqttNetworking, MAX_MQTT_PAYLOAD_BYTES } from "../../../src/dodsonlabs/MqttNetworking";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
@@ -1160,5 +1160,111 @@ describe("bounded structured metadata in forwarded sensor logs (regression P2-2)
     // redaction matches on exactly these names downstream.
     const data = meta.data as Record<string, unknown>;
     expect(Object.keys(data).sort()).toEqual(["apiKey", "password"]);
+  });
+});
+
+describe("MQTT payload size guard (regression)", () => {
+  /**
+   * Construct a MqttNetworking on the fake client and deliver a RAW payload
+   * buffer to the "message" handler (driveMessage JSON-encodes its input,
+   * which cannot express an oversized or non-JSON body).
+   */
+  function driveRawPayload(
+    payload: Buffer
+  ): { prom: MockProm; logger: MockLogger & ILogger } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
+    const messageCall = messageCalls.at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    handler(baseConfig.mqttTopicTelemetry, payload, {});
+    return {
+      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+      logger,
+    };
+  }
+
+  const wasSizeGuarded = (logger: MockLogger): boolean =>
+    logger.write_warn.mock.calls.some(
+      (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_payload_too_large"
+    );
+
+  it("rejects an oversized payload before parsing without touching gauges or source freshness", () => {
+    const payload = Buffer.alloc(MAX_MQTT_PAYLOAD_BYTES + 1, 0x61);
+    const { prom, logger } = driveRawPayload(payload);
+
+    expect(wasSizeGuarded(logger)).toBe(true);
+    expect(logger.write_warn.mock.calls.find(
+      (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_payload_too_large"
+    )![2]).toMatchObject({
+      byteLength: payload.length,
+      maxBytes: MAX_MQTT_PAYLOAD_BYTES,
+      topic: baseConfig.mqttTopicTelemetry,
+    });
+
+    // Not parsed, not routed: no telemetry publisher ran and the freshness
+    // stamp was not written.
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.publish_soil).not.toHaveBeenCalled();
+    expect(prom.publish_water).not.toHaveBeenCalled();
+    expect(prom.publish_light).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+
+    // The rejection is a warn, not a parse error — JSON.parse never ran.
+    expect(logger.write_error).not.toHaveBeenCalled();
+
+    // The oversized contents are never copied into any log line.
+    for (const call of [
+      ...logger.write_warn.mock.calls,
+      ...logger.write_error.mock.calls,
+      ...logger.write_info.mock.calls,
+      ...logger.write_debug.mock.calls,
+    ]) {
+      expect(JSON.stringify(call)).not.toContain("a".repeat(100));
+    }
+  });
+
+  it("does not reject a valid payload whose byte length is exactly the cap", () => {
+    // Build a well-formed telemetry message whose serialized length is
+    // exactly MAX_MQTT_PAYLOAD_BYTES: the size guard must let it through.
+    const doc = {
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "boundary-src",
+      firmware_version: "1.0",
+      payload: { temperature_c: 20, pad: "" },
+    };
+    const baseLength = JSON.stringify(doc).length;
+    doc.payload.pad = "a".repeat(MAX_MQTT_PAYLOAD_BYTES - baseLength);
+    const serialized = JSON.stringify(doc);
+    expect(Buffer.byteLength(serialized, "utf8")).toBe(MAX_MQTT_PAYLOAD_BYTES);
+
+    const { prom, logger } = driveRawPayload(Buffer.from(serialized, "utf8"));
+
+    expect(wasSizeGuarded(logger)).toBe(false);
+    expect(prom.publish_water).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("boundary-src");
+  });
+
+  it("lets a malformed at-cap payload fail in JSON.parse, not the size guard", () => {
+    // Exactly at the cap but not JSON: the guard must not fire, and the
+    // parse-error path is what logs the failure (without payload contents).
+    const payload = Buffer.alloc(MAX_MQTT_PAYLOAD_BYTES, 0x61);
+    const { logger } = driveRawPayload(payload);
+
+    expect(wasSizeGuarded(logger)).toBe(false);
+    expect(logger.write_error.mock.calls.some(
+      (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_message_parse_error"
+    )).toBe(true);
   });
 });

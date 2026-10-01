@@ -11,6 +11,19 @@ import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
+/**
+ * Application-level MQTT payload size cap, checked in on_message before
+ * toString() and JSON.parse(). MQTT.js has already received the packet
+ * into memory by the time the "message" event fires, so this does not
+ * bound what the broker can deliver — it bounds the string conversion,
+ * the JSON parser allocations, the parsed object graph, and all
+ * downstream handling. 64 KiB is far larger than any legitimate
+ * telemetry, health, or log message for this service, consistent with
+ * the application's bounded-input posture elsewhere (HTTP config bodies,
+ * log field lengths, label cardinality).
+ */
+export const MAX_MQTT_PAYLOAD_BYTES = 64 * 1024;
+
 export class MqttNetworking implements IMqttNetworking {
 
     // ********
@@ -499,6 +512,25 @@ export class MqttNetworking implements IMqttNetworking {
         payload: Buffer,
         _packet: mqtt.IPublishPacket
     ): void {
+        // Payload size guard, before toString() and JSON.parse(): an
+        // oversized body would otherwise flow through string conversion
+        // and the JSON parser into a large object graph and downstream
+        // handling. Log only bounded metadata (topic, lengths) — never
+        // the payload contents, which are untrusted.
+        if (payload.length > MAX_MQTT_PAYLOAD_BYTES) {
+            this.logger.write_warn(
+                "networking/onMessageSize",
+                `Dropping MQTT message exceeding ${MAX_MQTT_PAYLOAD_BYTES} bytes`,
+                {
+                    event: "mqtt_payload_too_large",
+                    logType: "sensor",
+                    topic,
+                    byteLength: payload.length,
+                    maxBytes: MAX_MQTT_PAYLOAD_BYTES,
+                }
+            );
+            return;
+        }
         try {
             const parsed: unknown = JSON.parse(payload.toString());
             // A valid-JSON body can still be an array or a primitive, which

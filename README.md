@@ -2,7 +2,7 @@
 
 Series 2 — Sensor Telemetry Services
 
-**Release:** Iron Falcon — firmware 4.0.1.
+**Release:** Iron Falcon — firmware 4.0.2.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -115,6 +115,8 @@ Returns `true` if successful, `false` if the requested level is invalid.
 - Node.js 22.x
 - MQTT broker (e.g., Mosquitto, EMQX)
 - Prometheus server for scraping metrics
+
+The service drops MQTT payloads above 64 KiB (`mqtt_payload_too_large`) before string conversion and JSON parsing. That guard runs after the MQTT client has already received the packet into memory, so the broker should additionally enforce a packet/message-size limit appropriate for this service (e.g. Mosquitto's `max_packet_size`) as the first line of defense.
 
 ## Configuration
 
