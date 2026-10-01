@@ -349,7 +349,7 @@ describe("get_numeric_field", () => {
     expect(get_numeric_field({ raw: 0 }, "raw")).toBe(0);
   });
 
-  it("parses numeric strings (V1/V2 compatibility)", () => {
+  it("parses numeric strings (legacy firmware compatibility)", () => {
     expect(get_numeric_field({ temperature_c: "21.5" }, "temperature_c")).toBe(
       21.5
     );

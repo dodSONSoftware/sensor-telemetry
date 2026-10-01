@@ -670,13 +670,14 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** HANDLE MQTT LOG MESSAGES
 
     /**
-     * Get a value from an object using snake_case field names (V2 format).
-     * Supports both snake_case and camelCase for backward compatibility.
+     * Get a value from an object, trying each field name in order.
+     * Callers pass snake_case names first, with legacy camelCase
+     * fallbacks where older firmware used them.
      */
     private getField(obj: JsonObject | null | undefined, ...fieldNames: string[]): unknown {
-        // A missing object (e.g. optional payload.system_info) is absent data,
-        // not an error — return undefined so callers' fallbacks apply instead
-        // of a TypeError dropping the whole message.
+        // A missing object (e.g. an optional section of the payload) is
+        // absent data, not an error — return undefined so callers'
+        // fallbacks apply instead of a TypeError dropping the whole message.
         if (obj === undefined || obj === null) {
             return undefined;
         }
@@ -708,20 +709,22 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     /**
-     * Get a value from log data using snake_case field names (V2 format).
+     * Get a value from log data, trying each field name in order.
      */
     private getLogField(logData: JsonObject | null | undefined, ...fieldNames: string[]): unknown {
         return this.getField(logData, ...fieldNames);
     }
 
     private handle_mqtt_message_log(json_doc: JsonObject): void {
-        // Extract payload if present (V2 format), otherwise use json_doc directly (V1 format).
-        // A non-object "payload" is not the log data, so it falls back to the
-        // top-level document (V1 format).
+        // Extract the log data from the "payload" envelope when present
+        // (current log messages wrap the fields in "payload"), otherwise
+        // use the top-level document (legacy log messages).
+        // A non-object "payload" is not the log data, so it falls back to
+        // the top-level document.
         let logData: JsonObject = isJsonObject(json_doc["payload"]) ? json_doc["payload"] : json_doc;
 
-        // For V2/V3 format, extract top-level fields for metadata
-        // V3 renamed schema_version to message_schema_version
+        // Extract top-level fields for metadata; V3 renamed schema_version
+        // to message_schema_version, so both keys are accepted.
         const schemaVersion = this.getField(json_doc, "message_schema_version", "schema_version");
         const runtimeId = this.getField(json_doc, "runtime_id");
         const firmwareVersion = this.getField(json_doc, "firmware_version");
@@ -737,8 +740,10 @@ export class MqttNetworking implements IMqttNetworking {
         // Add timestamp as if it came from the sender
         logData["timestamp"] = sysFunc.get_timestamp_iso();
 
-        // Use V2 snake_case field names (with camelCase fallbacks where needed)
-        // Source can be in logData (V1) or at top level (V2)
+        // Snake_case field names, with legacy fallbacks where older
+        // firmware used different keys.
+        // Source can be in the log data (legacy log messages) or at the
+        // top level (V3).
         const source = this.getLogField(logData, "source") ?? json_doc["source"] ?? "unknown";
         const level = this.getLogField(logData, "level", "log_level") ?? "info";
         const message = this.getLogField(logData, "message", "msg") ?? logData;
@@ -769,7 +774,7 @@ export class MqttNetworking implements IMqttNetworking {
             level: sysFunc.truncateForLog(String(level).toLowerCase()),
         };
 
-        // Add V2/V3 format fields to metadata if available
+        // Add remaining top-level fields to metadata if available
         if (runtimeId !== undefined) metadata.runtime_id = sysFunc.truncateForLog(runtimeId);
         // firmware_version here is the raw, unadmitted payload value (the telemetry
         // paths run it through admitFirmwareVersion); bound it for the log channel.
@@ -889,32 +894,25 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** HANDLE MQTT TELEMETRY MESSAGES
 
     /**
-     * Extract firmware version from telemetry message.
-     * Supports both top-level firmware_version field and nested system_info.firmware_version.
+     * Extract firmware version from telemetry message (V3 contract: the
+     * top-level firmware_version field, "unknown" when absent).
      * The value is admitted through PrometheusWriter at extraction time:
      * firmware_version is a Prometheus counter label and MQTT payload values
      * are untrusted, so charset/length sanitization and the distinct-value
      * cardinality cap apply here rather than at each label site.
      */
     private getFirmwareVersion(json_doc: JsonObject): string {
-        // Try top-level firmware_version first (V2 format)
         const fwTopLevel = this.getField(json_doc, "firmware_version");
         if (fwTopLevel !== undefined) {
             return this.promWriter.admitFirmwareVersion(String(fwTopLevel));
-        }
-        // Fallback to system_info.firmware_version
-        const payload = isJsonObject(json_doc?.["payload"]) ? json_doc["payload"] : undefined;
-        const systemInfo = isJsonObject(payload?.["system_info"]) ? payload["system_info"] : undefined;
-        const fwSystem = this.getField(systemInfo, "firmware_version");
-        if (fwSystem !== undefined) {
-            return this.promWriter.admitFirmwareVersion(String(fwSystem));
         }
         return "unknown";
     }
 
     // V3 telemetry is per-device: each message carries a top-level `device`
     // field and a payload with only that device's readings. Map the known
-    // device types to the metric category they feed (V2 section names).
+    // device types to the metric category they feed (the section envelope
+    // name the PrometheusWriter publishers take).
     // Unknown devices are dropped with a warning so new firmware device
     // names surface in the logs instead of being mislabeled.
     private static readonly V3_DEVICE_CATEGORIES: Record<string, string> = {
@@ -982,8 +980,8 @@ export class MqttNetworking implements IMqttNetworking {
             }
         );
 
-        // Reuse the V2 publishers by wrapping the device payload in the
-        // section envelope they expect (e.g. { air: {...} }).
+        // Wrap the device payload in the section envelope the
+        // PrometheusWriter publishers take (e.g. { air: {...} }).
         // `accepted` tracks whether the message was admitted (known device
         // type AND its required fields valid): only then does the source
         // count as "seen" for the freshness gauge — a dropped reading is
@@ -1054,8 +1052,23 @@ export class MqttNetworking implements IMqttNetworking {
             );
             return;
         }
-        // Non-object payloads read as empty rather than indexing a primitive.
-        const payload: JsonObject = isJsonObject(rawPayload) ? rawPayload : {};
+        // Non-object payloads (a string, number, boolean, or array) are not
+        // a health object — reject them rather than coercing to {}, which
+        // would let a garbage body count as accepted activity and refresh
+        // the source's freshness stamp.
+        if (!isJsonObject(rawPayload)) {
+            this.logger.write_warn(
+                "networking/handleHealth",
+                "Invalid health payload, expected an object",
+                {
+                    event: "mqtt_health_invalid_payload",
+                    logType: "sensor",
+                    source: sysFunc.truncateForLog(source),
+                }
+            );
+            return;
+        }
+        const payload: JsonObject = rawPayload;
 
         // Overlapping system-info gauges (V3 field names)
         const cpuTempC = sysFunc.get_numeric_field(payload, "cpu_temperature_c", "cpu_temp_c");
@@ -1159,9 +1172,9 @@ export class MqttNetworking implements IMqttNetworking {
             this.promWriter.set_uptime_seconds(source, uptimeMs / 1000);
         }
 
-        // Freshness: reaching here means the message carried a payload —
-        // accepted sensor activity, stamped once per message rather than
-        // once per gauge.
+        // Freshness: reaching here means the message carried a structurally
+        // valid (object) payload — accepted sensor activity, stamped once
+        // per message rather than once per gauge.
         this.promWriter.mark_source_seen(source);
 
         this.logger.write_debug(
@@ -1179,144 +1192,33 @@ export class MqttNetworking implements IMqttNetworking {
 
     private handle_mqtt_message_telemetry(json_doc: JsonObject): void {
         // V3 format: one message per device, identified by a top-level `device`
-        // field. V2 messages never carry a top-level device key, so its
-        // presence is a reliable format discriminator.
+        // field. The legacy V2 section-based path was removed, so a telemetry
+        // message without a usable device is rejected rather than falling
+        // through to an alternate schema.
         const device = this.getField(json_doc, "device");
-        if (device !== undefined && device !== null && String(device).length > 0) {
-            this.handle_v3_device_telemetry(json_doc, String(device));
-            return;
-        }
-
-        // V2 format: section-based payload (air/light/rain/wind/water/lightning)
-        // Get system-info for timestamp handling
-        const rawPayload = json_doc?.["payload"];
-        if (!rawPayload) {
-            this.logger.write_error(
+        if (
+            device === undefined ||
+            device === null ||
+            String(device).trim().length === 0
+        ) {
+            this.logger.write_warn(
                 "networking/handleTelemetry",
-                "Missing 'payload', dropping telemetry message",
+                "Missing 'device', dropping telemetry message",
                 {
-                    event: "mqtt_telemetry_missing_payload",
+                    event: "mqtt_telemetry_missing_device",
                     logType: "sensor",
+                    source: sysFunc.truncateForLog(String(json_doc["source"] ?? "unknown")),
                 }
             );
             return;
         }
-        // Non-object payloads read as empty rather than indexing a primitive.
-        const payload: JsonObject = isJsonObject(rawPayload) ? rawPayload : {};
-
-        const systemInfoRaw = payload["system_info"];
-        const systemInfo = isJsonObject(systemInfoRaw) ? systemInfoRaw : undefined;
-
-        // Handle timestamp fields - support both V1 (empty strings) and V2 (proper dates)
-        // V2 uses empty strings for unset timestamps; V1 may have missing keys
-        const bootDateUtc = systemInfo?.["boot_date_utc"] ?? systemInfo?.["boot-date-utc"];
-        const restartDateUtc = systemInfo?.["restart_date_utc"] ?? systemInfo?.["restart-date-utc"];
-
-        const boot_date_ok = bootDateUtc !== undefined && bootDateUtc !== "";
-        const restart_date_ok = restartDateUtc !== undefined && restartDateUtc !== "";
-
-        // Add missing timestamps to system-info if needed
-        if (!boot_date_ok || !restart_date_ok) {
-            // get the time_stamp from the time service
-            const time_stamp = sysFunc.get_timestamp_iso();
-
-            // Set both V1 and V2 timestamp keys for compatibility
-            if (systemInfo) {
-                if (!boot_date_ok) {
-                    systemInfo["boot_date_utc"] = time_stamp;
-                    systemInfo["boot-date-utc"] = time_stamp;
-                }
-                if (!restart_date_ok) {
-                    systemInfo["restart_date_utc"] = time_stamp;
-                    systemInfo["restart-date-utc"] = time_stamp;
-                }
-            }
-        }
-
-        // process telemetry
-        // Coerce the untrusted payload value: firmware may emit source as a
-        // number, which would throw in sanitizeSource's .replace and drop the
-        // message. String(123) = "123" — a usable, distinct label.
-        const source = String(json_doc?.["source"] ?? "unknown");
-        const firmwareVersion = this.getFirmwareVersion(json_doc);
-
-        // Debug log for telemetry processing
-        this.logger.write_debug(
-            "networking/handleTelemetry",
-            `Processing telemetry from source: ${sysFunc.truncateForLog(source)} (firmware: ${firmwareVersion})`,
-            {
-                event: "telemetry_processing_start",
-                logType: "sensor",
-                source: sysFunc.truncateForLog(source),
-                firmwareVersion,
-            }
-        );
-
-        const air_telemetry = payload?.["air"];
-        if (air_telemetry !== undefined) {
-            this.logger.write_debug(
-                "networking/handleTelemetry",
-                "Found air telemetry section",
-                {
-                    event: "telemetry_section_found",
-                    logType: "sensor",
-                    source: sysFunc.truncateForLog(source),
-                    section: "air",
-                }
-            );
-            this.publish_air_telemetry(payload, source, firmwareVersion);
-        }
-
-        const light_telemetry = payload?.["light"];
-        if (light_telemetry !== undefined) {
-            this.publish_light_telemetry(payload, source, firmwareVersion);
-        }
-
-        const rain_telemetry = payload?.["rain"];
-        if (rain_telemetry !== undefined) {
-            this.publish_rain_telemetry(payload, source, firmwareVersion);
-        }
-
-        const wind_telemetry = payload?.["wind"];
-        if (wind_telemetry !== undefined) {
-            this.publish_wind_telemetry(payload, source, firmwareVersion);
-        }
-
-        const water_telemetry = payload?.["water"];
-        if (water_telemetry !== undefined) {
-            this.publish_water_telemetry(payload, source, firmwareVersion);
-        }
-
-        const lightning_telemetry = payload?.["lightning"];
-        if (lightning_telemetry !== undefined) {
-            this.publish_lightning_telemetry(payload, source, firmwareVersion);
-        }
-
-        // Publish system info metrics (hardware, wifi, sensor health)
-        this.publish_system_metrics(payload, source);
-
-        // Freshness: a structurally valid V2 message carrying at least one
-        // recognized section counts as an accepted sensor message, even if
-        // individual gauges were skipped for out-of-range values. The
-        // documented meaning is "last accepted message", not "last
-        // successfully updated measurement".
-        const hasRecognizedSection =
-            payload["air"] !== undefined ||
-            payload["light"] !== undefined ||
-            payload["rain"] !== undefined ||
-            payload["wind"] !== undefined ||
-            payload["water"] !== undefined ||
-            payload["lightning"] !== undefined ||
-            payload["system_info"] !== undefined;
-        if (hasRecognizedSection) {
-            this.promWriter.mark_source_seen(source);
-        }
+        this.handle_v3_device_telemetry(json_doc, String(device));
     }
 
     // ******** private telemetry publish helpers
 
     /** Validate numeric fields in a telemetry section before forwarding.
-     *  Uses V2 snake_case field names. Returns true only if ALL fields are valid. */
+     *  Returns true only if ALL fields are valid. */
     private is_telemetry_valid(section: JsonObject, fields: string[], source: string): boolean {
         for (const field of fields) {
             const value = sysFunc.get_numeric_field(section, field);
@@ -1337,137 +1239,4 @@ export class MqttNetworking implements IMqttNetworking {
         return true;
     }
 
-    private publish_air_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const airRaw = payload?.["air"];
-        if (!airRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const air: JsonObject = isJsonObject(airRaw) ? airRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(air, [
-            "temperature_c", "humidity_percent", "pressure_pascal",
-        ], source)) {
-            this.promWriter.publish_air(payload, source, firmwareVersion);
-        }
-    }
-
-    private publish_light_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const lightRaw = payload?.["light"];
-        if (!lightRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const light: JsonObject = isJsonObject(lightRaw) ? lightRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(light, ["uv_index", "lux"], source)) {
-            this.promWriter.publish_light(payload, source, firmwareVersion);
-        }
-    }
-
-    private publish_rain_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const rainRaw = payload?.["rain"];
-        if (!rainRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const rain: JsonObject = isJsonObject(rainRaw) ? rainRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(rain, ["in_h2o"], source)) {
-            this.promWriter.publish_rain(payload, source, firmwareVersion);
-        }
-    }
-
-    private publish_wind_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const windRaw = payload?.["wind"];
-        if (!windRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const wind: JsonObject = isJsonObject(windRaw) ? windRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(wind, ["wind_speed_cm_sec", "gusts_cm_sec"], source)) {
-            this.promWriter.publish_wind(payload, source, firmwareVersion);
-        }
-    }
-
-    private publish_water_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const waterRaw = payload?.["water"];
-        if (!waterRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const water: JsonObject = isJsonObject(waterRaw) ? waterRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(water, ["temperature_c"], source)) {
-            this.promWriter.publish_water(payload, source, firmwareVersion);
-        }
-    }
-
-    private publish_lightning_telemetry(payload: JsonObject, source: string, firmwareVersion: string): void {
-        const lightningRaw = payload?.["lightning"];
-        if (!lightningRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const lightning: JsonObject = isJsonObject(lightningRaw) ? lightningRaw : {};
-        // V2 snake_case field names
-        if (this.is_telemetry_valid(lightning, ["lightning_count"], source)) {
-            this.promWriter.publish_lightning(payload, source, firmwareVersion);
-        }
-    }
-
-    // ****************************************************************
-    // ****************************************************************
-    // ******** PUBLISH SYSTEM INFO METRICS
-
-    /**
-     * Publish system info metrics (hardware, wifi, sensor health).
-     * Extracts data from payload.system_info and publishes to Prometheus.
-     */
-    private publish_system_metrics(payload: JsonObject, source: string): void {
-        const systemInfoRaw = payload?.["system_info"];
-        if (!systemInfoRaw) return;
-        // Non-object sections read as empty rather than indexing a primitive.
-        const systemInfo: JsonObject = isJsonObject(systemInfoRaw) ? systemInfoRaw : {};
-
-        // Hardware info
-        const hardwareInfoRaw = systemInfo["hardware_info"] || systemInfo["hardwareInfo"];
-        if (hardwareInfoRaw) {
-            const hardwareInfo: JsonObject = isJsonObject(hardwareInfoRaw) ? hardwareInfoRaw : {};
-            // CPU temperature
-            const cpuTempC = sysFunc.get_numeric_field(hardwareInfo, "cpu_temp_c", "cpuTemperatureC");
-            if (cpuTempC !== undefined && Number.isFinite(cpuTempC)) {
-                this.promWriter.set_cpu_temp(source, cpuTempC);
-            }
-
-            // Heap free bytes
-            const heapFreeBytes = sysFunc.get_numeric_field(hardwareInfo, "heap_free_bytes", "heapFreeBytes");
-            if (heapFreeBytes !== undefined && Number.isFinite(heapFreeBytes)) {
-                this.promWriter.set_heap_free_bytes(source, heapFreeBytes);
-            }
-
-            // Heap used percent
-            const heapUsedPercent = sysFunc.get_numeric_field(hardwareInfo, "heap_used_percent", "heapUsedPercent");
-            if (heapUsedPercent !== undefined && Number.isFinite(heapUsedPercent)) {
-                this.promWriter.set_heap_used_percent(source, heapUsedPercent);
-            }
-        }
-
-        // Wifi info
-        const wifiInfoRaw = systemInfo["wifi_info"] || systemInfo["wifiInfo"];
-        if (wifiInfoRaw) {
-            const wifiInfo: JsonObject = isJsonObject(wifiInfoRaw) ? wifiInfoRaw : {};
-            // WiFi RSSI
-            const wifiRssiDbm = sysFunc.get_numeric_field(wifiInfo, "wifi_rssi_dbm", "wifiRssiDbm");
-            if (wifiRssiDbm !== undefined && Number.isFinite(wifiRssiDbm)) {
-                this.promWriter.set_wifi_rssi_dbm(source, wifiRssiDbm);
-            }
-        }
-
-        // Sensor info
-        const sensorInfoRaw = systemInfo["sensor_info"] || systemInfo["sensorInfo"];
-        if (sensorInfoRaw) {
-            const sensorInfo: JsonObject = isJsonObject(sensorInfoRaw) ? sensorInfoRaw : {};
-            // Sensor read failures
-            const sensorReadFailures = sysFunc.get_numeric_field(sensorInfo, "sensor_read_failures", "sensorReadFailures");
-            if (sensorReadFailures !== undefined && Number.isFinite(sensorReadFailures)) {
-                this.promWriter.set_sensor_read_failures(source, sensorReadFailures);
-            }
-
-            // Sensor read counter
-            const sensorReadCounter = sysFunc.get_numeric_field(sensorInfo, "sensor_read_counter", "sensorReadCounter");
-            if (sensorReadCounter !== undefined && Number.isFinite(sensorReadCounter)) {
-                this.promWriter.set_sensor_read_counter(source, sensorReadCounter);
-            }
-        }
-    }
 }

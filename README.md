@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.15.
+**Release:** Iron Falcon — firmware 4.0.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -16,7 +16,7 @@ A lightweight Node.js service that listens on MQTT channels for sensor telemetry
 
 This service:
 - Connects to an MQTT broker to receive sensor telemetry messages
-- Parses telemetry payloads (air, light, rain, wind, water, lightning)
+- Parses V3 per-device telemetry payloads (air, light, water, soil)
 - Exposes Prometheus-compatible metrics on HTTP `/metrics` endpoint
 - Runs standalone or in Docker containers
 
@@ -302,7 +302,8 @@ Notes:
 - BME280 `altitude_m` is `null` when the adjusted pressure is non-positive; `air_altitude_ft` is only set when a finite altitude is present.
 - Soil messages are skipped (with a warning) when `relative_moisture_percent` is missing or out of the 0-100 range; `raw` is validated against the 16-bit ADC range (0-65535).
 - Unknown device types are dropped with a warning in the logs.
-- V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path.
+- Telemetry messages must carry a usable `device` field; a telemetry message without one (missing, null, or blank) is dropped with an `mqtt_telemetry_missing_device` warning. The legacy V2 section-based path (`payload.air`, `payload.water`, ...) is no longer accepted.
+- V3 health payloads must be a JSON object; a non-object payload (string, number, boolean, array) is dropped with an `mqtt_health_invalid_payload` warning and does not refresh `sensor_last_seen_timestamp_seconds`. The empty object `{}` is accepted (every V3 health field is optional).
 - V3 health messages additionally populate the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
 - All health/diagnostic metrics share the `sensor_health_` prefix (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, `sensor_health_heap_used_percent`, `sensor_health_read_failure_count`, `sensor_health_read_count`, and `sensor_health_wifi_rssi_dbm`); physical sensor readings do not.
 
@@ -387,11 +388,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `soil_moisture_raw` | Gauge | source | Raw 16-bit soil moisture ADC reading (0-65535) |
 | `light_uv_index` | Gauge | source | UV Index |
 | `light_lux` | Gauge | source | Light level in LUX |
-| `rain_in_h2o` | Gauge | source | Rain accumulation in inches |
-| `wind_speed` | Gauge | source | Wind speed in mph |
-| `wind_gusts` | Gauge | source | Wind gusts in mph |
 | `water_temperature` | Gauge | source | Water temperature in Fahrenheit |
-| `lightning_strike_count` | Gauge | source | Lightning strike count |
 | `sensor_health_cpu_temperature_c` | Gauge | source | CPU temperature in Celsius (health messages) |
 | `sensor_health_heap_free_bytes` | Gauge | source | Free heap memory in bytes (health messages) |
 | `sensor_health_heap_used_percent` | Gauge | source | Percentage of heap memory used (health messages) |

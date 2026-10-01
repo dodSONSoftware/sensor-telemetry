@@ -185,6 +185,10 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
     expect(prom.publish_water).not.toHaveBeenCalled();
     expect(prom.publish_soil).not.toHaveBeenCalled();
     expect(prom.publish_light).not.toHaveBeenCalled();
+    // An accepted telemetry message stamps the source's freshness exactly
+    // once, regardless of how many gauges the publish updates.
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
   });
 
   it("routes sht35 (air) to publish_air without requiring pressure", () => {
@@ -292,6 +296,68 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
     expect(prom.publish_water).not.toHaveBeenCalled();
     expect(prom.publish_light).not.toHaveBeenCalled();
     expect(prom.publish_soil).not.toHaveBeenCalled();
+  });
+});
+
+describe("MqttNetworking telemetry requires device (V2 removal)", () => {
+  // The legacy V2 section-based path was removed: a telemetry message
+  // without a usable `device` is rejected with a warning instead of
+  // falling through to the section parser. It publishes nothing and does
+  // not claim the source is fresh.
+  it("drops a legacy V2 section-based telemetry message", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      source: "v2-src",
+      firmware_version: "2.0.1",
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+        system_info: { firmware_version: "2.0.1" },
+      },
+    });
+
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_telemetry_missing_device"
+    );
+    expect(warns).toHaveLength(1);
+    expect(warns[0][2]).toMatchObject({ source: "v2-src" });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("drops a telemetry message whose device is missing, null, or blank", () => {
+    for (const doc of [
+      { source: "v2-src", payload: { temperature_c: 25 } },
+      { device: null, source: "v2-src", payload: { temperature_c: 25 } },
+      { device: "", source: "v2-src", payload: { temperature_c: 25 } },
+      { device: "   ", source: "v2-src", payload: { temperature_c: 25 } },
+    ]) {
+      const { prom, logger } = driveMessage({
+        message_type: "telemetry",
+        ...doc,
+      });
+
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "mqtt_telemetry_missing_device"
+        )
+      ).toBe(true);
+      expect(prom.publish_air).not.toHaveBeenCalled();
+      expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    }
+  });
+
+  it("coerces a numeric source to its string form in the missing-device warning", () => {
+    const { logger } = driveMessage({
+      message_type: "telemetry",
+      source: 42,
+      payload: { air: {} },
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_telemetry_missing_device"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ source: "42" });
   });
 });
 
@@ -413,8 +479,8 @@ describe("non-string source coercion (regression P3-4)", () => {
 
   // A numeric source must be coerced to its string form at extraction
   // instead of throwing in sanitizeSource's .replace and being dropped
-  // with an error log. Covers all three extraction sites: V3 per-device
-  // telemetry, V2 section telemetry, and V3 health.
+  // with an error log. Covers both extraction sites: V3 per-device
+  // telemetry and V3 health.
   it("publishes V3 telemetry from a numeric source as its string form", () => {
     const airPayload = { temperature_c: 25, humidity_percent: 45, pressure_pa: 100000 };
     const { prom, logger } = driveMessage({
@@ -438,24 +504,6 @@ describe("non-string source coercion (regression P3-4)", () => {
     ).toBe(false);
   });
 
-  it("publishes V2 section telemetry from a numeric source as its string form", () => {
-    const { prom } = driveMessage({
-      message_type: "telemetry",
-      source: 42,
-      firmware_version: fw,
-      payload: {
-        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
-      },
-    });
-
-    expect(prom.publish_air).toHaveBeenCalledTimes(1);
-    expect(prom.publish_air).toHaveBeenCalledWith(
-      expect.anything(),
-      "42",
-      fw
-    );
-  });
-
   it("publishes V3 health from a numeric source as its string form", () => {
     const { prom } = driveMessage({
       message_type: "health",
@@ -467,13 +515,13 @@ describe("non-string source coercion (regression P3-4)", () => {
   });
 });
 
-describe("missing system_info (regression P2-1)", () => {
-  // V3 per-device telemetry does not carry payload.system_info, and V2
-  // messages may omit it too. getFirmwareVersion passed that undefined
-  // system_info to getField, which indexed obj[fieldName] without guarding
-  // the object — a legitimate reading threw a TypeError before the
-  // publisher ran and was dropped. The firmware extraction must fall back
-  // to "unknown" (or to system_info.firmware_version when present) instead.
+describe("firmware version extraction", () => {
+  // getFirmwareVersion follows the V3 contract: the top-level
+  // firmware_version field, falling back to "unknown" when absent. The
+  // legacy payload.system_info.firmware_version fallback was removed with
+  // the V2 section-based path, so a system_info block in the payload is
+  // not consulted (the earlier P2-1 TypeError it could trigger is
+  // unreachable — the fallback lookup itself is gone).
   const airPayload = {
     temperature_c: 25,
     humidity_percent: 45,
@@ -501,8 +549,11 @@ describe("missing system_info (regression P2-1)", () => {
     ).toBe(false);
   });
 
-  it("publishes V3 telemetry using system_info.firmware_version as the fallback", () => {
-    const { prom } = driveMessage({
+  it("does not consult payload.system_info.firmware_version (V2 fallback removed)", () => {
+    // The legacy V2 fallback read the firmware from payload.system_info.
+    // After V2 removal the extraction follows the V3 contract, so this
+    // value is ignored and the label falls back to "unknown".
+    const { prom, logger } = driveMessage({
       message_type: "telemetry",
       device: "bme280",
       source: "v3-src",
@@ -513,41 +564,6 @@ describe("missing system_info (regression P2-1)", () => {
     expect(prom.publish_air).toHaveBeenCalledWith(
       expect.anything(),
       "v3-src",
-      "3.1.0"
-    );
-  });
-
-  it("publishes V2 section telemetry using system_info.firmware_version as the fallback", () => {
-    const { prom } = driveMessage({
-      message_type: "telemetry",
-      source: "v2-src",
-      payload: {
-        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
-        system_info: { firmware_version: "2.0.1" },
-      },
-    });
-
-    expect(prom.publish_air).toHaveBeenCalledTimes(1);
-    expect(prom.publish_air).toHaveBeenCalledWith(
-      expect.anything(),
-      "v2-src",
-      "2.0.1"
-    );
-  });
-
-  it("publishes V2 section telemetry with no firmware version as 'unknown'", () => {
-    const { prom, logger } = driveMessage({
-      message_type: "telemetry",
-      source: "v2-src",
-      payload: {
-        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
-      },
-    });
-
-    expect(prom.publish_air).toHaveBeenCalledTimes(1);
-    expect(prom.publish_air).toHaveBeenCalledWith(
-      expect.anything(),
-      "v2-src",
       "unknown"
     );
     expect(
@@ -594,6 +610,40 @@ describe("sensor freshness (mark_source_seen)", () => {
     expect(prom.mark_source_seen).not.toHaveBeenCalled();
   });
 
+  it("does not mark the source seen when the V3 health payload is not an object", () => {
+    // A garbage payload (string, number, boolean, array) is rejected at
+    // the object-shape boundary instead of being coerced to {}, which
+    // would let a malformed message count as accepted activity.
+    for (const payload of ["garbage", 42, true, [], [1, 2, 3]]) {
+      const { prom, logger } = driveMessage({
+        message_type: "health",
+        source: "v3-src",
+        payload,
+      });
+
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "mqtt_health_invalid_payload"
+        )
+      ).toBe(true);
+      expect(prom.mark_source_seen).not.toHaveBeenCalled();
+      expect(prom.set_health_up).not.toHaveBeenCalled();
+    }
+  });
+
+  it("marks the source seen for an empty health payload object (no mandatory V3 health fields)", () => {
+    // {} is structurally a valid health object; the V3 contract defines
+    // every health field as optional, so it must still count as accepted.
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+      payload: {},
+    });
+
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
+  });
+
   it("marks the source seen once per accepted V3 device telemetry message", () => {
     const { prom } = driveMessage({
       message_type: "telemetry",
@@ -635,7 +685,10 @@ describe("sensor freshness (mark_source_seen)", () => {
     expect(prom.mark_source_seen).not.toHaveBeenCalled();
   });
 
-  it("marks the source seen for a V2 message carrying a recognized section", () => {
+  it("does not mark the source seen when a telemetry message lacks a device", () => {
+    // The message would have carried a recognized V2 section; after V2
+    // removal it is dropped at the device gate and must not claim the
+    // source is fresh.
     const { prom } = driveMessage({
       message_type: "telemetry",
       source: "v2-src",
@@ -646,19 +699,7 @@ describe("sensor freshness (mark_source_seen)", () => {
       },
     });
 
-    expect(prom.publish_air).toHaveBeenCalledTimes(1);
-    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
-    expect(prom.mark_source_seen).toHaveBeenCalledWith("v2-src");
-  });
-
-  it("does not mark the source seen for a V2 message with no recognized section", () => {
-    const { prom } = driveMessage({
-      message_type: "telemetry",
-      source: "v2-src",
-      firmware_version: fw,
-      payload: { something_else: 1 },
-    });
-
+    expect(prom.publish_air).not.toHaveBeenCalled();
     expect(prom.mark_source_seen).not.toHaveBeenCalled();
   });
 });
@@ -866,8 +907,9 @@ describe("bounding untrusted MQTT values before logging", () => {
     const longSource = "s".repeat(1000);
     const { prom, logger } = driveMessage({
       message_type: "telemetry",
+      device: "bme280",
       source: longSource,
-      payload: { air: { temperature_c: 25 } }, // missing humidity_percent / pressure
+      payload: { temperature_c: 25 }, // missing humidity_percent / pressure
     });
 
     const warn = logger.write_warn.mock.calls.find(

@@ -747,6 +747,11 @@ describe("PrometheusWriter", () => {
       expect(res.status).toBe(403);
       expect(await res.text()).toBe("");
       expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      // The rejection is origin-dependent: mark it Vary: Origin and
+      // uncacheable so an intermediary never serves one origin's 403 to
+      // another.
+      expect(variesOnOrigin(res)).toBe(true);
+      expect(res.headers.get("cache-control")).toBe("no-store");
       // The rejection is audited with the offending origin, never the token.
       expect(
         logger.write_warn.mock.calls.some(
@@ -766,6 +771,11 @@ describe("PrometheusWriter", () => {
 
       expect(res.status).toBe(403);
       expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      // The rejection is origin-dependent: mark it Vary: Origin and
+      // uncacheable so an intermediary never serves one origin's 403 to
+      // another.
+      expect(variesOnOrigin(res)).toBe(true);
+      expect(res.headers.get("cache-control")).toBe("no-store");
       const body = (await res.json()) as { success: boolean; message: string };
       expect(body.success).toBe(false);
       expect(body.message).toBe("origin not allowed");
@@ -1216,13 +1226,13 @@ describe("PrometheusWriter", () => {
   });
 
   describe("device-owned cumulative counts (gauges, not counters)", () => {
-    // lightning_strike_count, sensor_health_read_failure_count, and
-    // sensor_health_read_count mirror counter values owned by the sensor.
-    // The exporter publishes the device's absolute value as-is (Gauge.set),
-    // never accumulating deltas, so a device-side reset (102 -> 0) must land
-    // as a lower gauge value rather than be rejected, clamped, or
-    // compensated. These tests pin that the metrics stay Gauges named
-    // *_count and still track decreasing reported values.
+    // sensor_health_read_failure_count and sensor_health_read_count mirror
+    // counter values owned by the sensor. The exporter publishes the
+    // device's absolute value as-is (Gauge.set), never accumulating
+    // deltas, so a device-side reset (102 -> 0) must land as a lower gauge
+    // value rather than be rejected, clamped, or compensated. These tests
+    // pin that the metrics stay Gauges named *_count and still track
+    // decreasing reported values.
     function metricValue(
       metrics: string,
       name: string,
@@ -1235,28 +1245,13 @@ describe("PrometheusWriter", () => {
       return Number(line.split(/\s+/).pop());
     }
 
-    it("exports all three under the *_count names as gauge TYPEs", async () => {
+    it("exports both under the *_count names as gauge TYPEs", async () => {
       const metrics = await getMetrics();
-      expect(metrics).toContain("# TYPE lightning_strike_count gauge");
       expect(metrics).toContain("# TYPE sensor_health_read_failure_count gauge");
       expect(metrics).toContain("# TYPE sensor_health_read_count gauge");
       // Old _total names are gone — no compatibility aliases.
-      expect(metrics).not.toContain("lightning_strikes_total");
       expect(metrics).not.toContain("sensor_health_read_failures_total");
       expect(metrics).not.toContain("sensor_health_read_counter_total");
-    });
-
-    it("lightning_strike_count follows decreasing device values (10 -> 11 -> 0)", async () => {
-      const source = "count-lightning";
-      writer.publish_lightning({ lightning: { lightning_count: 10 } }, source, "1.0.0");
-      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(10);
-
-      writer.publish_lightning({ lightning: { lightning_count: 11 } }, source, "1.0.0");
-      // 11, not 21: the exporter mirrors the absolute value, it does not sum.
-      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(11);
-
-      writer.publish_lightning({ lightning: { lightning_count: 0 } }, source, "1.0.0");
-      expect(metricValue(await getMetrics(), "lightning_strike_count", source)).toBe(0);
     });
 
     it("sensor_health_read_failure_count follows decreasing device values (5 -> 6 -> 0)", async () => {

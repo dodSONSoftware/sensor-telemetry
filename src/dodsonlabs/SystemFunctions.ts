@@ -393,8 +393,8 @@ export function boundForLog(value: unknown, depth: number = 0): unknown {
  *   element — publishing a plausible but wrong reading instead of dropping
  *   malformed telemetry. Non-number/string values are treated as absent
  *   and the next alias is tried.
- * - Empty/whitespace strings are the protocol's "unset" marker (V1/V2 use
- *   them for missing values); Number("") would coerce them to 0 and publish
+ * - Empty/whitespace strings are the protocol's "unset" marker (legacy
+ *   firmware uses them for missing values); Number("") would coerce them to 0 and publish
  *   a false zero reading, so they are treated as absent and the next alias
  *   is tried.
  * - Values that do not parse to a finite number are likewise absent.

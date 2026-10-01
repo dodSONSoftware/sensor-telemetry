@@ -32,11 +32,7 @@ export class PrometheusWriter {
     private prometheus_Gauge_AirPressure: Gauge | undefined;
     private prometheus_Gauge_LightUvIndex: Gauge | undefined;
     private prometheus_Gauge_LightLux: Gauge | undefined;
-    private prometheus_Gauge_RainInches: Gauge | undefined;
-    private prometheus_Gauge_WindSpeed: Gauge | undefined;
-    private prometheus_Gauge_WindGusts: Gauge | undefined;
     private prometheus_Gauge_WaterTemp: Gauge | undefined;
-    private prometheus_Gauge_Lightning: Gauge | undefined;
     // ---- System info gauges
     private prometheus_Gauge_CpuTemp: Gauge | undefined;
     private prometheus_Gauge_HeapFreeBytes: Gauge | undefined;
@@ -233,6 +229,8 @@ export class PrometheusWriter {
                 return;
             }
             if (!this.applyCorsHeaders(req, res)) {
+                this.appendVaryOrigin(res);
+                res.setHeader("Cache-Control", "no-store");
                 this.logCorsOriginRejected(req);
                 this.sendJson(res, 403, { success: false, message: "origin not allowed" });
                 return;
@@ -559,10 +557,13 @@ export class PrometheusWriter {
      * origin that is not allowlisted; the caller must answer 403 with no
      * Access-Control-Allow-Origin header.
      *
-     * Vary: Origin is added only when echoing a specific origin, so an HTTP
-     * cache never serves one allowed origin's response to a different one.
-     * Access-Control-Allow-Credentials is intentionally never set: this API
-     * authenticates with x-config-token, not browser HTTP credentials.
+     * Vary: Origin is added whenever the response is origin-dependent — both
+     * when echoing a specific allowed origin and (in the rejection paths,
+     * which call appendVaryOrigin themselves) when answering a rejected
+     * origin 403 — so an HTTP cache never serves one origin's response to a
+     * different one. Access-Control-Allow-Credentials is intentionally never
+     * set: this API authenticates with x-config-token, not browser HTTP
+     * credentials.
      */
     private applyCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
         const rawOrigin = req.headers.origin;
@@ -615,6 +616,8 @@ export class PrometheusWriter {
             return false;
         }
         if (!this.applyCorsHeaders(req, res)) {
+            this.appendVaryOrigin(res);
+            res.setHeader("Cache-Control", "no-store");
             this.logCorsOriginRejected(req);
             res.writeHead(403);
             res.end();
@@ -657,7 +660,7 @@ export class PrometheusWriter {
                 name: "Sensor Telemetry Services",
                 version: version ?? "unknown",
                 author: "Randy Dodson (dodsonsoftware@gmail.com)",
-                description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports V1, V2, and V3 (per-device) telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, wind speed and gusts, rainfall, UV index, light intensity, lightning strikes, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
+                description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports V3 (per-device) telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, soil moisture, UV index, light intensity, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
                 copyright: "Copyright © 2026 dodson Software ( dodson labs )",
                 license: "MIT License"
             },
@@ -1193,7 +1196,6 @@ export class PrometheusWriter {
         // Non-object sections read as empty rather than indexing a primitive.
         const air: JsonObject = isJsonObject(airRaw) ? airRaw : {};
 
-        // Use V2 snake_case field names
         const temp_f =
             (get_numeric_field(air, "temperature_c") ?? NaN) * 9 / 5 + 32;
         // A missing or non-numeric temperature means the reading is broken;
@@ -1348,7 +1350,6 @@ export class PrometheusWriter {
         // Non-object sections read as empty rather than indexing a primitive.
         const light: JsonObject = isJsonObject(lightRaw) ? lightRaw : {};
 
-        // Use V2 snake_case field names
         const uvIndex = get_numeric_field(light, "uv_index");
         if (uvIndex === undefined) {
             this.logger.write_warn(
@@ -1397,126 +1398,6 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "light", firmware_version: firmwareVersion });
     }
 
-    publish_rain(payload: JsonObject, source: string, firmwareVersion: string) {
-        const sanitized = this.admitSource(source);
-        const rainRaw = payload?.["rain"];
-        if (!rainRaw) {
-            this.logger.write_warn(
-                "prometheus/publishRainMissing",
-                `Source: ${sanitized}, missing 'rain', skipping`,
-                {
-                    event: "telemetry_missing_section",
-                    logType: "sensor",
-                    source: sanitized,
-                    section: "rain",
-                }
-            );
-            return;
-        }
-
-        // Non-object sections read as empty rather than indexing a primitive.
-        const rain: JsonObject = isJsonObject(rainRaw) ? rainRaw : {};
-
-        // Use V2 snake_case field names
-        const inches = get_numeric_field(rain, "in_h2o");
-        if (inches === undefined) {
-            this.logger.write_warn(
-                "prometheus/publishRainInvalid",
-                `Source: ${sanitized}, invalid in_h2o, skipping Rain_In_H2O gauge`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "in_h2o",
-                    value: rain["in_h2o"],
-                }
-            );
-        } else {
-            this.prometheus_Gauge_RainInches!.set({ source: sanitized }, inches);
-        }
-
-        this.logger.write_debug(
-            "prometheus/publishRainData",
-            `Source: ${sanitized}, in_h2o: ${inches}`,
-            {
-                event: "rain_telemetry_published",
-                logType: "sensor",
-                source: sanitized,
-                rainInches: inches,
-            }
-        );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "rain", firmware_version: firmwareVersion });
-    }
-
-    publish_wind(payload: JsonObject, source: string, firmwareVersion: string) {
-        const sanitized = this.admitSource(source);
-        const windRaw = payload?.["wind"];
-        if (!windRaw) {
-            this.logger.write_warn(
-                "prometheus/publishWindMissing",
-                `Source: ${sanitized}, missing 'wind', skipping`,
-                {
-                    event: "telemetry_missing_section",
-                    logType: "sensor",
-                    source: sanitized,
-                    section: "wind",
-                }
-            );
-            return;
-        }
-
-        // Non-object sections read as empty rather than indexing a primitive.
-        const wind: JsonObject = isJsonObject(windRaw) ? windRaw : {};
-
-        // Use V2 snake_case field names
-        const speed = this.cmPerSecToMph(get_numeric_field(wind, "wind_speed_cm_sec") ?? NaN);
-        if (!Number.isFinite(speed)) {
-            this.logger.write_warn(
-                "prometheus/publishWindInvalidSpeed",
-                `Source: ${sanitized}, invalid wind_speed_cm_sec, skipping Wind_Speed gauge`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "wind_speed_cm_sec",
-                    value: wind["wind_speed_cm_sec"],
-                }
-            );
-        } else {
-            this.prometheus_Gauge_WindSpeed!.set({ source: sanitized }, speed);
-        }
-
-        const gusts = this.cmPerSecToMph(get_numeric_field(wind, "gusts_cm_sec") ?? NaN);
-        if (!Number.isFinite(gusts)) {
-            this.logger.write_warn(
-                "prometheus/publishWindInvalidGusts",
-                `Source: ${sanitized}, invalid gusts_cm_sec, skipping Wind_Gusts gauge`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "gusts_cm_sec",
-                    value: wind["gusts_cm_sec"],
-                }
-            );
-        } else {
-            this.prometheus_Gauge_WindGusts!.set({ source: sanitized }, gusts);
-        }
-
-        this.logger.write_debug(
-            "prometheus/publishWindData",
-            `Source: ${sanitized}, speed: ${speed}, gusts: ${gusts}`,
-            {
-                event: "wind_telemetry_published",
-                logType: "sensor",
-                source: sanitized,
-                speedMph: speed,
-                gustsMph: gusts,
-            }
-        );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "wind", firmware_version: firmwareVersion });
-    }
-
     publish_water(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
         const waterRaw = payload?.["water"];
@@ -1537,7 +1418,6 @@ export class PrometheusWriter {
         // Non-object sections read as empty rather than indexing a primitive.
         const water: JsonObject = isJsonObject(waterRaw) ? waterRaw : {};
 
-        // Use V2 snake_case field names
         const temp_f = (get_numeric_field(water, "temperature_c") ?? NaN) * 9 / 5 + 32;
         if (!Number.isFinite(temp_f)) {
             this.logger.write_warn(
@@ -1581,57 +1461,6 @@ export class PrometheusWriter {
             }
         );
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "water", firmware_version: firmwareVersion });
-    }
-
-    publish_lightning(payload: JsonObject, source: string, firmwareVersion: string) {
-        const sanitized = this.admitSource(source);
-        const lightningRaw = payload?.["lightning"];
-        if (!lightningRaw) {
-            this.logger.write_warn(
-                "prometheus/publishLightningMissing",
-                `Source: ${sanitized}, missing 'lightning', skipping`,
-                {
-                    event: "telemetry_missing_section",
-                    logType: "sensor",
-                    source: sanitized,
-                    section: "lightning",
-                }
-            );
-            return;
-        }
-
-        // Non-object sections read as empty rather than indexing a primitive.
-        const lightning: JsonObject = isJsonObject(lightningRaw) ? lightningRaw : {};
-
-        // Use V2 snake_case field names
-        const count = get_numeric_field(lightning, "lightning_count");
-        if (count === undefined) {
-            this.logger.write_warn(
-                "prometheus/publishLightningInvalid",
-                `Source: ${sanitized}, invalid lightning_count, skipping Lightning gauge`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "lightning_count",
-                    value: lightning["lightning_count"],
-                }
-            );
-        } else {
-            this.prometheus_Gauge_Lightning!.set({ source: sanitized }, count);
-        }
-
-        this.logger.write_debug(
-            "prometheus/publishLightningData",
-            `Source: ${sanitized}, Strikes: ${count}`,
-            {
-                event: "lightning_telemetry_published",
-                logType: "sensor",
-                source: sanitized,
-                strikeCount: count,
-            }
-        );
-        this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning", firmware_version: firmwareVersion });
     }
 
     publish_soil(payload: JsonObject, source: string, firmwareVersion: string) {
@@ -2341,41 +2170,11 @@ export class PrometheusWriter {
             labelNames: ["source"],
         });
 
-        // ******** rain
-
-        this.prometheus_Gauge_RainInches = new Gauge({
-            name: "rain_in_h2o",
-            help: "This indicator shows the accumulated Rain inches.",
-            labelNames: ["source"],
-        });
-
-        // ******** wind
-
-        this.prometheus_Gauge_WindSpeed = new Gauge({
-            name: "wind_speed",
-            help: "This indicator shows the Wind Speed in mph.",
-            labelNames: ["source"],
-        });
-
-        this.prometheus_Gauge_WindGusts = new Gauge({
-            name: "wind_gusts",
-            help: "This indicator shows the Wind Gusts in mph.",
-            labelNames: ["source"],
-        });
-
         // ******** water
 
         this.prometheus_Gauge_WaterTemp = new Gauge({
             name: "water_temperature",
             help: "This indicator shows the temperature in fahrenheit.",
-            labelNames: ["source"],
-        });
-
-        // ******** lightning
-
-        this.prometheus_Gauge_Lightning = new Gauge({
-            name: "lightning_strike_count",
-            help: "This indicator shows the number of lightning strikes.",
             labelNames: ["source"],
         });
 
@@ -2554,13 +2353,6 @@ export class PrometheusWriter {
                 }
             },
         });
-    }
-
-    private cmPerSecToMph(cmSec: number): number {
-        const cmToMiles = 1 / 160934.4; // Convert centimeters to miles
-        const secondsToHours = 3600; // Convert seconds to hours
-
-        return cmSec * cmToMiles * secondsToHours;
     }
 
     private pascalToInHg(pa: number): number {

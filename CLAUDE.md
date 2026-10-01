@@ -35,7 +35,7 @@ V3 telemetry messages are per-device rather than per-section: each carries a top
 | `yl69_fc28` | soil | `relative_moisture_percent`, `raw` (+ `digital_state`, nullable, not published) |
 | `plantmate_soil` | soil | `relative_moisture_percent`, `raw` |
 
-Unknown device types are dropped with a warning. V2 section-based payloads (`payload.air`, `payload.water`, ...) are still accepted and take the legacy path. V3 health messages (`iot/v3/health` or `message_type: "health"`) populate the system-info gauges plus `sensor_health_up`, `sensor_health_uptime_seconds`, and the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning (not published as a metric). All health/diagnostic metrics (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, `sensor_health_heap_used_percent`, `sensor_health_read_failure_count`, `sensor_health_read_count`, and `sensor_health_wifi_rssi_dbm`) share the `sensor_health_` prefix; physical sensor readings do not.
+Unknown device types are dropped with a warning. Telemetry messages must carry a usable `device` field (missing, null, or blank values are dropped with an `mqtt_telemetry_missing_device` warning) — the legacy V2 section-based path (`payload.air`, `payload.water`, ...) was removed and no longer accepted; `getFirmwareVersion` follows the V3 contract (top-level `firmware_version` only, `"unknown"` when absent). V3 health messages (`iot/v3/health` or `message_type: "health"`) populate the system-info gauges plus `sensor_health_up`, `sensor_health_uptime_seconds`, and the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning (not published as a metric). All health/diagnostic metrics (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, `sensor_health_heap_used_percent`, `sensor_health_read_failure_count`, `sensor_health_read_count`, and `sensor_health_wifi_rssi_dbm`) share the `sensor_health_` prefix; physical sensor readings do not.
 
 ### Configuration
 
@@ -56,11 +56,7 @@ Unknown device types are dropped with a warning. V2 section-based payloads (`pay
 | soil_moisture_raw | Raw 16-bit soil moisture ADC reading |
 | light_uv_index | UV Index |
 | light_lux | Light level in LUX |
-| rain_in_h2o | Rain accumulation in inches |
-| wind_speed | Wind speed in mph |
-| wind_gusts | Wind gusts in mph |
 | water_temperature | Water temperature in Fahrenheit |
-| lightning_strike_count | Lightning strike count |
 
 ## Commands
 
@@ -101,7 +97,7 @@ Also available:
 
 ### Sensor freshness
 
-`sensor_last_seen_timestamp_seconds{source}` — Unix timestamp in seconds of the most recent **accepted** telemetry or health message from the sensor source. "Accepted" means communication, not measurement: a source reporting the same reading repeatedly stays fresh, while a dropped/malformed message does not advance the timestamp. `MqttNetworking` stamps it once per accepted message (never per gauge — a single health message sets 10+ gauges but stamps once); V3 telemetry is stamped only when the device type is recognized and its required fields pass validation, and V2 telemetry when the message carries at least one recognized section. The label goes through the same `admitSource()` sanitization/cardinality pipeline as every other sensor metric.
+`sensor_last_seen_timestamp_seconds{source}` — Unix timestamp in seconds of the most recent **accepted** telemetry or health message from the sensor source. "Accepted" means communication, not measurement: a source reporting the same reading repeatedly stays fresh, while a dropped/malformed message does not advance the timestamp. `MqttNetworking` stamps it once per accepted message (never per gauge — a single health message sets 10+ gauges but stamps once); V3 telemetry is stamped only when the device type is recognized and its required fields pass validation (telemetry without a usable `device` is dropped before any stamping); a V3 health message is stamped only when its payload is present and is a JSON object (a non-object payload is rejected with an `mqtt_health_invalid_payload` warning and does not advance the timestamp — the empty object `{}` is still accepted, since the V3 contract defines every health field as optional). The label goes through the same `admitSource()` sanitization/cardinality pipeline as every other sensor metric.
 
 Prometheus/Grafana compute sensor age with:
 
