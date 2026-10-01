@@ -177,12 +177,21 @@ export function read_file_yaml_first<T>(
 }
 
 /**
- * Atomically replace `filename` with the YAML serialization of `data`:
- * write to a sibling temp file, then rename it over the target.
- * rename(2) is atomic on POSIX, so readers and the next startup never
- * observe a truncated file — a failure mid-write (ENOSPC, crash, power
- * loss) leaves the previous config byte-for-byte intact, which callers
- * rely on to truthfully report "no changes were applied".
+ * Atomically replace `filename` with the YAML serialization of `data`.
+ *
+ * The new contents are written to a sibling temporary file and then
+ * renamed over the target. On POSIX filesystems the rename is atomic, so
+ * during normal process execution readers and the next startup never
+ * observe a partially replaced target: they see either the old contents
+ * or the new ones, never a truncated file.
+ *
+ * This provides atomic replacement semantics, not durability across
+ * sudden host power loss — the rename and the writes are not fsync'd, so
+ * a power loss can leave either version (or neither) unflushed to disk.
+ * Filesystem durability is outside this helper's contract. On a failure
+ * thrown here (e.g. ENOSPC), the rename did not happen, so the previous
+ * contents are still on disk and callers can truthfully report "no changes
+ * were applied".
  */
 export function write_file_yaml(
   filename: string,
@@ -200,7 +209,9 @@ export function write_file_yaml(
     fs.renameSync(tmpFile, filename);
     return true;
   } catch (error) {
-    // Best-effort cleanup; the original file is untouched either way.
+    // Best-effort cleanup of the temp file. We only reach here if the
+    // write or the rename threw, so the rename never completed and the
+    // target still holds its previous contents.
     try {
       fs.unlinkSync(tmpFile);
     } catch {}
