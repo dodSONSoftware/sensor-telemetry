@@ -355,7 +355,7 @@ export class PrometheusWriter {
                 if (!this.verifyConfigToken(req, res)) {
                     return;
                 }
-                await this.handleWriteConfig(req, res);
+                this.handleWriteConfig(req, res);
             } else if (path === "/reload-config") {
                 if (!this.requireMethod(req, res, "GET")) {
                     return;
@@ -777,7 +777,7 @@ export class PrometheusWriter {
         }
     }
 
-    private async handleWriteConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    private handleWriteConfig(req: http.IncomingMessage, res: http.ServerResponse): void {
         // Accumulate raw bytes and decode once at the end: decoding each TCP
         // chunk independently corrupts multi-byte UTF-8 sequences that
         // straddle chunk boundaries (each half becomes a U+FFFD replacement
