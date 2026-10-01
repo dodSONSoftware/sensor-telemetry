@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.8.
+**Release:** Iron Badger — firmware 3.0.9.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -159,6 +159,34 @@ The configuration schema is strict: unknown keys fail validation with an `Unreco
 | `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/write-config` and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
 
 CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
+
+## Configuration API Security Model
+
+The HTTP configuration API (`/write-config` and `/reload-config`) is intended for deployment on a trusted private network.
+
+When `SENSOR_TELEMETRY_CONFIG_TOKEN` is not configured, those endpoints do not require authentication. This is an intentional trust decision, not a defect: the service is deployed on a private LAN with no external exposure.
+
+In this mode, any client that can reach the HTTP service can update or reload the configuration, including non-browser clients such as `curl`, scripts, or other applications.
+
+CORS restrictions do not provide authentication. CORS only controls which browser origins may access the API; it does not prevent direct HTTP clients from calling the endpoints.
+
+Running without `SENSOR_TELEMETRY_CONFIG_TOKEN` is appropriate when:
+
+- the service is reachable only from a trusted private LAN;
+- the service is not exposed through Internet port forwarding, a public reverse proxy, or another external route;
+- hosts on the LAN are considered trusted to access the configuration API.
+
+If clients on the network are not fully trusted, configure `SENSOR_TELEMETRY_CONFIG_TOKEN`.
+
+Authenticated clients must then send:
+
+```
+x-config-token: <token>
+```
+
+on `/write-config` and `/reload-config` requests. Mismatched or missing headers are rejected with `401`.
+
+The token must be treated as a secret and should not be committed to source control.
 
 ## Sensor Log Messages
 
