@@ -545,6 +545,55 @@ describe("PrometheusWriter", () => {
         )
       ).toBe(false);
     });
+
+    it("records the x-request-id header value in the 404 audit log", async () => {
+      logger.write_warn.mockClear();
+
+      const res = await fetch(`http://127.0.0.1:${port}/no-such-route`, {
+        headers: { Connection: "close", "x-request-id": "req-42" },
+      });
+
+      expect(res.status).toBe(404);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "route_not_found"
+      );
+      expect(call).toBeDefined();
+      expect(call![2].requestId).toBe("req-42");
+    });
+
+    it("normalizes a duplicated x-request-id header to a string, never an array", async () => {
+      // Node's HTTP parser delivers a duplicated header as a single
+      // comma-joined string, but the declared header type is
+      // string | string[] | undefined — the audit log must normalize
+      // explicitly (first value) rather than cast, so the metadata field
+      // is always a string even if an array ever arrives.
+      logger.write_warn.mockClear();
+
+      const response = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(port, "127.0.0.1", () => {
+          socket.write(
+            "GET /no-such-route HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "x-request-id: req-1\r\n" +
+              "x-request-id: req-2\r\n" +
+              "Connection: close\r\n" +
+              "\r\n"
+          );
+        });
+        let data = "";
+        socket.on("data", (d: Buffer) => (data += d.toString("utf8")));
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+      });
+
+      expect(response.startsWith("HTTP/1.1 404")).toBe(true);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "route_not_found"
+      );
+      expect(call).toBeDefined();
+      expect(typeof call![2].requestId).toBe("string");
+      expect(call![2].requestId).toBe("req-1, req-2");
+    });
   });
 
   describe("/metrics", () => {

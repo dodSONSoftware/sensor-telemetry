@@ -363,13 +363,21 @@ export class PrometheusWriter {
                 res.statusCode = 404;
                 res.end("Not Found");
 
+                // Header values are typed string | string[] | undefined by
+                // Node; a duplicated x-request-id is protocol-violating, so
+                // normalize to the first value explicitly rather than
+                // casting away the array case.
+                const requestIdHeader = req.headers["x-request-id"];
+                const requestId = Array.isArray(requestIdHeader)
+                    ? requestIdHeader[0]
+                    : requestIdHeader;
                 this.logger.write_warn(
                     "prometheus/routeNotFound",
                     "HTTP route not found",
                     {
                         event: "route_not_found",
                         logType: "service",
-                        requestId: req.headers["x-request-id"] as string | undefined,
+                        requestId,
                         method: req.method,
                         path: req.url || "/",
                         statusCode: 404,
