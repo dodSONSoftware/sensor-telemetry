@@ -2,7 +2,7 @@
 
 Series 2 — Sensor Telemetry Services
 
-**Release:** Iron Falcon — firmware 4.0.2.
+**Release:** Iron Falcon — firmware 4.0.3.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -307,7 +307,7 @@ Notes:
 - Telemetry messages must carry a usable `device` field; a telemetry message without one (missing, null, or blank) is dropped with an `mqtt_telemetry_missing_device` warning. The legacy V2 section-based path (`payload.air`, `payload.water`, ...) is no longer accepted.
 - V3 health payloads must be a JSON object; a non-object payload (string, number, boolean, array) is dropped with an `mqtt_health_invalid_payload` warning and does not refresh `sensor_last_seen_timestamp_seconds`. The empty object `{}` is accepted (every V3 health field is optional).
 - V3 health messages additionally populate the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
-- All health/diagnostic metrics share the `sensor_health_` prefix (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, `sensor_health_heap_used_percent`, `sensor_health_read_failure_count`, `sensor_health_read_count`, and `sensor_health_wifi_rssi_dbm`); physical sensor readings do not.
+- All health/diagnostic metrics share the `sensor_health_` prefix (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, and `sensor_health_wifi_rssi_dbm`); physical sensor readings do not.
 
 Example V3 SHT35 telemetry message:
 
@@ -393,9 +393,6 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `water_temperature` | Gauge | source | Water temperature in Fahrenheit |
 | `sensor_health_cpu_temperature_c` | Gauge | source | CPU temperature in Celsius (health messages) |
 | `sensor_health_heap_free_bytes` | Gauge | source | Free heap memory in bytes (health messages) |
-| `sensor_health_heap_used_percent` | Gauge | source | Percentage of heap memory used (health messages) |
-| `sensor_health_read_failure_count` | Gauge | source | Total number of sensor read failures (health messages) |
-| `sensor_health_read_count` | Gauge | source | Total number of successful sensor reads (health messages) |
 | `sensor_health_wifi_rssi_dbm` | Gauge | source | WiFi signal strength in dBm (health messages) |
 | `sensor_health_up` | Gauge | source | Sensor health status from V3 health messages (1 = healthy, 0 = degraded) |
 | `sensor_health_uptime_seconds` | Gauge | source | Sensor uptime in seconds from V3 health messages |

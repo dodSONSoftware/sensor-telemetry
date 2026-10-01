@@ -36,9 +36,6 @@ export class PrometheusWriter {
     // ---- System info gauges
     private prometheus_Gauge_CpuTemp: Gauge | undefined;
     private prometheus_Gauge_HeapFreeBytes: Gauge | undefined;
-    private prometheus_Gauge_HeapUsedPercent: Gauge | undefined;
-    private prometheus_Gauge_SensorReadFailures: Gauge | undefined;
-    private prometheus_Gauge_SensorReadCounter: Gauge | undefined;
     private prometheus_Gauge_WifiRssiDbm: Gauge | undefined;
     // ---- V3 health gauges
     private prometheus_Gauge_SensorHealthUp: Gauge | undefined;
@@ -1626,98 +1623,6 @@ export class PrometheusWriter {
         );
     }
 
-    set_heap_used_percent(source: string, percent: number): void {
-        const sanitized = this.admitSource(source);
-        if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
-            this.logger.write_warn(
-                "prometheus/setHeapUsedPercentInvalid",
-                `Source: ${sanitized}, invalid heap_used_percent (${percent})`,
-                {
-                    event: "telemetry_out_of_range",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "heap_used_percent",
-                    value: percent,
-                    minRange: 0,
-                    maxRange: 100,
-                }
-            );
-            return;
-        }
-        this.prometheus_Gauge_HeapUsedPercent!.set({ source: sanitized }, percent);
-        this.logger.write_debug(
-            "prometheus/setHeapUsedPercent",
-            `Set Heap_Used_Percent gauge: ${percent}%`,
-            {
-                event: "gauge_set",
-                logType: "sensor",
-                source: sanitized,
-                gauge: "Heap_Used_Percent",
-                value: percent,
-            }
-        );
-    }
-
-    set_sensor_read_failures(source: string, failures: number): void {
-        const sanitized = this.admitSource(source);
-        if (!Number.isFinite(failures) || failures < 0) {
-            this.logger.write_warn(
-                "prometheus/setSensorReadFailuresInvalid",
-                `Source: ${sanitized}, invalid sensor_read_failures`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "sensor_read_failures",
-                    value: failures,
-                }
-            );
-            return;
-        }
-        this.prometheus_Gauge_SensorReadFailures!.set({ source: sanitized }, failures);
-        this.logger.write_debug(
-            "prometheus/setSensorReadFailures",
-            `Set Sensor_Read_Failures gauge: ${failures}`,
-            {
-                event: "gauge_set",
-                logType: "sensor",
-                source: sanitized,
-                gauge: "Sensor_Read_Failures",
-                value: failures,
-            }
-        );
-    }
-
-    set_sensor_read_counter(source: string, counter: number): void {
-        const sanitized = this.admitSource(source);
-        if (!Number.isFinite(counter) || counter < 0) {
-            this.logger.write_warn(
-                "prometheus/setSensorReadCounterInvalid",
-                `Source: ${sanitized}, invalid sensor_read_counter`,
-                {
-                    event: "telemetry_invalid_value",
-                    logType: "sensor",
-                    source: sanitized,
-                    field: "sensor_read_counter",
-                    value: counter,
-                }
-            );
-            return;
-        }
-        this.prometheus_Gauge_SensorReadCounter!.set({ source: sanitized }, counter);
-        this.logger.write_debug(
-            "prometheus/setSensorReadCounter",
-            `Set Sensor_Read_Counter gauge: ${counter}`,
-            {
-                event: "gauge_set",
-                logType: "sensor",
-                source: sanitized,
-                gauge: "Sensor_Read_Counter",
-                value: counter,
-            }
-        );
-    }
-
     set_wifi_rssi_dbm(source: string, rssi: number): void {
         const sanitized = this.admitSource(source);
         if (!Number.isFinite(rssi)) {
@@ -2203,24 +2108,6 @@ export class PrometheusWriter {
         this.prometheus_Gauge_HeapFreeBytes = new Gauge({
             name: "sensor_health_heap_free_bytes",
             help: "Free heap memory in bytes.",
-            labelNames: ["source"],
-        });
-
-        this.prometheus_Gauge_HeapUsedPercent = new Gauge({
-            name: "sensor_health_heap_used_percent",
-            help: "Percentage of heap memory used.",
-            labelNames: ["source"],
-        });
-
-        this.prometheus_Gauge_SensorReadFailures = new Gauge({
-            name: "sensor_health_read_failure_count",
-            help: "Total number of sensor read failures.",
-            labelNames: ["source"],
-        });
-
-        this.prometheus_Gauge_SensorReadCounter = new Gauge({
-            name: "sensor_health_read_count",
-            help: "Total number of successful sensor reads.",
             labelNames: ["source"],
         });
 
