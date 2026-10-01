@@ -13,7 +13,7 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 - **MqttNetworking** (`src/dodsonlabs/MqttNetworking.ts`) — MQTT client and Prometheus writer integration
 - **PrometheusWriter** (`src/dodsonlabs/PrometheusWriter.ts`) — Prometheus metric registration and HTTP server
 - **Logger** (`src/dodsonlabs/Logger.ts`) — Winston-based logging abstraction
-- **SystemFunctions** (`src/dodsonlabs/SystemFunctions.ts`) — File I/O, error handling, formatting utilities
+- **SystemFunctions** (`src/dodsonlabs/SystemFunctions.ts`) — File I/O, error handling, formatting utilities, and log-value bounding (`truncateForLog` / `truncateForLogList` cap untrusted MQTT values before they reach the log)
 - **Interfaces** (`src/dodsonlabs/Interfaces.ts`) — Type definitions for the service, including `JsonObject` (the untrusted-MQTT-JSON contract: `Record<string, unknown>`) and the `isJsonObject` type guard
 
 ### Entry Point
@@ -122,6 +122,10 @@ Source names from MQTT payloads are sanitized before being used as Prometheus la
 3. Sources that sanitize to an empty string fall back to the `unknown` label so distinct sources never collide on `source=""`; `sensorSourceValidCharsRegex` must be non-empty (the schema rejects `""`, which would otherwise defeat the `??` default and blank every label) and must be constructible via `SystemFunctions.buildSourceValidCharsRegex` (the schema's refine and the `PrometheusWriter` constructor share that one helper, so the escape rule cannot drift between validation and use)
 
 Sanitization bounds each label *value* but not how many distinct values appear, so a distinct-value cap (`sensorSourceCardinalityCap`) bounds cardinality: once the cap is reached, each new distinct source maps to the fixed `unknown_source` fallback label and increments `sensor_sources_rejected_total`, and each new distinct firmware version (admitted in `MqttNetworking.getFirmwareVersion`, which also strips invalid characters and truncates to the source length limit) maps to `unknown_firmware` and increments `sensor_firmware_versions_rejected_total`. Each rejection is counted; the warning fires once per cap. The cap is captured at construction, so changing it requires a restart (it is a `restartOnly` key in `updateConfig`).
+
+### Log Value Bounding
+
+The logging path is bounded the same way the label path is. Untrusted, free-form MQTT payload values are length-capped before being written to the log, in **both** the human-readable message text and the structured log metadata, so a malformed or hostile publisher cannot produce disproportionately large log entries. Bounded via `SystemFunctions.truncateForLog` (256 chars; a `…` marks a truncation; short values unchanged) and `SystemFunctions.truncateForLogList` (10 elements × 256 chars): `source`, `device`, `message_type`, `degraded_reasons`, and the forwarded sensor-log `message` body and raw `firmware_version`. The bounds apply to log output only — metric processing is unchanged and payload objects are not mutated (the truncated values are new strings/arrays, and `degraded_reasons` is re-derived for the log rather than rewritten in place).
 
 ## Graceful Shutdown
 

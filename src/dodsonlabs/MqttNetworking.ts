@@ -540,8 +540,8 @@ export class MqttNetworking implements IMqttNetworking {
                     isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
                     isHealthTopic: !!this.mqtt_topic_health && topicLower === healthTopicLower,
                     isTelemetryTopic: topicLower === telemetryTopicLower,
-                    messageType: json_doc.message_type,
-                    source: json_doc.source === undefined || json_doc.source === null ? undefined : String(json_doc.source),
+                    messageType: json_doc.message_type === undefined || json_doc.message_type === null ? undefined : sysFunc.truncateForLog(json_doc.message_type),
+                    source: json_doc.source === undefined || json_doc.source === null ? undefined : sysFunc.truncateForLog(json_doc.source),
                 }
             );
 
@@ -653,11 +653,11 @@ export class MqttNetworking implements IMqttNetworking {
         default:
             this.logger.write_warn(
                 "networking/handleMessage",
-                `Unknown message_type '${msg_type}', dropping message`,
+                `Unknown message_type '${sysFunc.truncateForLog(msg_type)}', dropping message`,
                 {
                     event: "mqtt_unknown_message_type",
                     logType: "sensor",
-                    messageType: msg_type,
+                    messageType: sysFunc.truncateForLog(msg_type),
                 }
             );
         }
@@ -749,15 +749,18 @@ export class MqttNetworking implements IMqttNetworking {
             return;
         }
 
-        // Forward sensor log messages to the application logger at the appropriate level
-        const logMessage = `[${source}] ${JSON.stringify(message)}`;
+        // Forward sensor log messages to the application logger at the appropriate level.
+        // The source prefix and the JSON body are both untrusted, attacker-controlled
+        // MQTT payload content — bound each so a hostile publisher cannot emit an
+        // unbounded log entry (the body can be the entire forwarded payload object).
+        const logMessage = `[${sysFunc.truncateForLog(source)}] ${sysFunc.truncateForLog(JSON.stringify(message))}`;
 
         // Build metadata from log data for Loki compatibility
         // Loki uses labels for indexing: source, module, function, level
         const metadata: Record<string, unknown> = {
             event: this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic",
             logType: "sensor",
-            source,
+            source: sysFunc.truncateForLog(source),
             // Add Loki-compatible labels
             module: this.getLogField(logData, "module"),
             function: this.getLogField(logData, "function"),
@@ -766,7 +769,9 @@ export class MqttNetworking implements IMqttNetworking {
 
         // Add V2/V3 format fields to metadata if available
         if (runtimeId !== undefined) metadata.runtime_id = runtimeId;
-        if (firmwareVersion !== undefined) metadata.firmware_version = firmwareVersion;
+        // firmware_version here is the raw, unadmitted payload value (the telemetry
+        // paths run it through admitFirmwareVersion); bound it for the log channel.
+        if (firmwareVersion !== undefined) metadata.firmware_version = sysFunc.truncateForLog(firmwareVersion);
         if (uptimeMs !== undefined) metadata.uptime_ms = uptimeMs;
         if (schemaVersion !== undefined) metadata.schema_version = schemaVersion;
         if (sequence !== undefined) metadata.sequence = sequence;
@@ -934,8 +939,8 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "mqtt_telemetry_missing_payload",
                     logType: "sensor",
-                    source,
-                    device,
+                    source: sysFunc.truncateForLog(source),
+                    device: sysFunc.truncateForLog(device),
                 }
             );
             return;
@@ -947,12 +952,12 @@ export class MqttNetworking implements IMqttNetworking {
         if (category === undefined) {
             this.logger.write_warn(
                 "networking/handleV3Telemetry",
-                `Unknown V3 device type '${device}', dropping message`,
+                `Unknown V3 device type '${sysFunc.truncateForLog(device)}', dropping message`,
                 {
                     event: "mqtt_unknown_v3_device",
                     logType: "sensor",
-                    source,
-                    device,
+                    source: sysFunc.truncateForLog(source),
+                    device: sysFunc.truncateForLog(device),
                 }
             );
             return;
@@ -962,12 +967,12 @@ export class MqttNetworking implements IMqttNetworking {
 
         this.logger.write_debug(
             "networking/handleV3Telemetry",
-            `Processing V3 telemetry: device ${device} -> ${category} for source: ${source}`,
+            `Processing V3 telemetry: device ${sysFunc.truncateForLog(device)} -> ${category} for source: ${sysFunc.truncateForLog(source)}`,
             {
                 event: "v3_telemetry_processing_start",
                 logType: "sensor",
-                source,
-                device,
+                source: sysFunc.truncateForLog(source),
+                device: sysFunc.truncateForLog(device),
                 category,
                 firmwareVersion,
             }
@@ -1040,7 +1045,7 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "mqtt_health_missing_payload",
                     logType: "sensor",
-                    source,
+                    source: sysFunc.truncateForLog(source),
                 }
             );
             return;
@@ -1126,15 +1131,18 @@ export class MqttNetworking implements IMqttNetworking {
         const degradedReasonsRaw = payload["degraded_reasons"];
         const degradedReasons = Array.isArray(degradedReasonsRaw) ? degradedReasonsRaw : undefined;
         if (degradedReasons !== undefined && degradedReasons.length > 0) {
+            // Bound both the number of reasons and each reason's length for the log
+            // channel; the payload array itself is left untouched.
+            const boundedDegradedReasons = sysFunc.truncateForLogList(degradedReasons);
             this.logger.write_warn(
                 "networking/handleHealth",
-                `Source: ${source} reports degraded health: ${degradedReasons.join(", ")}`,
+                `Source: ${sysFunc.truncateForLog(source)} reports degraded health: ${boundedDegradedReasons.join(", ")}`,
                 {
                     event: "v3_health_degraded",
                     logType: "sensor",
-                    source,
+                    source: sysFunc.truncateForLog(source),
                     status,
-                    degraded_reasons: degradedReasons,
+                    degraded_reasons: boundedDegradedReasons,
                 }
             );
         }
@@ -1154,13 +1162,13 @@ export class MqttNetworking implements IMqttNetworking {
 
         this.logger.write_debug(
             "networking/handleHealth",
-            `Processed V3 health for source: ${source}`,
+            `Processed V3 health for source: ${sysFunc.truncateForLog(source)}`,
             {
                 event: "v3_health_processed",
                 logType: "sensor",
-                source,
+                source: sysFunc.truncateForLog(source),
                 status,
-                degraded_reasons: degradedReasons,
+                degraded_reasons: degradedReasons === undefined ? undefined : sysFunc.truncateForLogList(degradedReasons),
             }
         );
     }
@@ -1231,11 +1239,11 @@ export class MqttNetworking implements IMqttNetworking {
         // Debug log for telemetry processing
         this.logger.write_debug(
             "networking/handleTelemetry",
-            `Processing telemetry from source: ${source} (firmware: ${firmwareVersion})`,
+            `Processing telemetry from source: ${sysFunc.truncateForLog(source)} (firmware: ${firmwareVersion})`,
             {
                 event: "telemetry_processing_start",
                 logType: "sensor",
-                source,
+                source: sysFunc.truncateForLog(source),
                 firmwareVersion,
             }
         );
@@ -1248,7 +1256,7 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "telemetry_section_found",
                     logType: "sensor",
-                    source,
+                    source: sysFunc.truncateForLog(source),
                     section: "air",
                 }
             );
@@ -1311,11 +1319,11 @@ export class MqttNetworking implements IMqttNetworking {
             if (value === undefined) {
                 this.logger.write_warn(
                     "networking/isTelemetryValid",
-                    `Source: ${source}, missing or invalid field '${field}', skipping`,
+                    `Source: ${sysFunc.truncateForLog(source)}, missing or invalid field '${field}', skipping`,
                     {
                         event: "telemetry_field_missing",
                         logType: "sensor",
-                        source,
+                        source: sysFunc.truncateForLog(source),
                         field,
                     }
                 );

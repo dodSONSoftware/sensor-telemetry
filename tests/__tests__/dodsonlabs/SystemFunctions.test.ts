@@ -12,6 +12,8 @@ import {
   get_numeric_field,
   get_timestamp_iso,
   read_file_yaml_first,
+  truncateForLog,
+  truncateForLogList,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
 
@@ -339,5 +341,83 @@ describe("buildSourceValidCharsRegex", () => {
     ["a--b", "hyphen forming an out-of-order range with its neighbor"],
   ])("throws for %s (%s) instead of returning a broken regex", (chars, _label) => {
     expect(() => buildSourceValidCharsRegex(chars)).toThrow(SyntaxError);
+  });
+});
+
+describe("truncateForLog", () => {
+  it("returns short values unchanged (no ellipsis)", () => {
+    expect(truncateForLog("air")).toBe("air");
+    // Exactly at the limit: not over, so unchanged.
+    expect(truncateForLog("a".repeat(256))).toBe("a".repeat(256));
+  });
+
+  it("bounds values over the limit to the first 256 chars plus an ellipsis", () => {
+    const long = "x".repeat(1000);
+    const result = truncateForLog(long);
+    expect(result).toBe(`${"x".repeat(256)}…`);
+    // Bounded: the log field cannot grow with the input length.
+    expect(result.length).toBeLessThanOrEqual(257);
+    expect(result).not.toBe(long);
+  });
+
+  it("coerces non-string values to their string form", () => {
+    expect(truncateForLog(123)).toBe("123");
+    expect(truncateForLog(null)).toBe("null");
+    expect(truncateForLog(undefined)).toBe("undefined");
+    expect(truncateForLog(true)).toBe("true");
+    // Objects coerce via String() to their default representation — already
+    // short and bounded, which is all the log bound needs (no deep serialize).
+    expect(truncateForLog({ a: 1 })).toBe("[object Object]");
+  });
+
+  it("honors a custom maxLength", () => {
+    expect(truncateForLog("abcdefghij", 4)).toBe("abcd…");
+    expect(truncateForLog("abcd", 4)).toBe("abcd");
+  });
+});
+
+describe("truncateForLogList", () => {
+  it("returns short lists unchanged", () => {
+    expect(truncateForLogList(["low_free_heap", "mqtt"])).toEqual([
+      "low_free_heap",
+      "mqtt",
+    ]);
+  });
+
+  it("returns an empty array for an empty input", () => {
+    expect(truncateForLogList([])).toEqual([]);
+  });
+
+  it("caps the number of elements at maxItems (default 10)", () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => `reason_${i}`);
+    const result = truncateForLogList(twelve);
+    expect(result).toHaveLength(10);
+    expect(result).toEqual(
+      Array.from({ length: 10 }, (_, i) => `reason_${i}`)
+    );
+  });
+
+  it("bounds the length of each element", () => {
+    const result = truncateForLogList(["y".repeat(500)]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe(`${"y".repeat(256)}…`);
+    expect(result[0].length).toBeLessThanOrEqual(257);
+  });
+
+  it("caps both count and per-element length together", () => {
+    const many = Array.from({ length: 20 }, () => "z".repeat(400));
+    const result = truncateForLogList(many);
+    expect(result).toHaveLength(10);
+    for (const element of result) {
+      expect(element.length).toBeLessThanOrEqual(257);
+    }
+  });
+
+  it("returns a new array and does not mutate the input", () => {
+    const input: unknown[] = ["a".repeat(300), "short"];
+    const snapshot = [...input];
+    const result = truncateForLogList(input);
+    expect(result).not.toBe(input);
+    expect(input).toEqual(snapshot);
   });
 });

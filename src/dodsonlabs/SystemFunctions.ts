@@ -269,6 +269,46 @@ export function buildSourceValidCharsRegex(validChars: string): RegExp {
   return new RegExp(`[^${escaped}]+`, "g");
 }
 
+// **** log output bounding
+
+/**
+ * Bound an untrusted value for inclusion in a log message or structured log
+ * metadata. Prometheus label values are already charset/length/cardinality
+ * bounded, but the logging path was not: MQTT payload values such as source,
+ * device, message_type, and individual degraded reasons are attacker
+ * controlled and can be arbitrarily long, so logging them raw lets a hostile
+ * publisher create disproportionately large log entries.
+ *
+ * The value is coerced to a string; if it exceeds `maxLength` the first
+ * `maxLength` characters are kept followed by a Unicode ellipsis, so the value
+ * stays recognizable rather than being silently dropped. Values at or under
+ * `maxLength` are returned unchanged. A new string is always produced; the
+ * input is never mutated.
+ */
+export function truncateForLog(value: unknown, maxLength: number = 256): string {
+  const text = String(value);
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}…`;
+}
+
+/**
+ * Bound a list of untrusted values for logging: keep at most `maxItems`
+ * elements, each truncated to `maxLength` via truncateForLog. Used for
+ * degraded_reasons so a hostile publisher cannot emit an unbounded number of
+ * unbounded-length reasons in a single log entry (both the number of emitted
+ * elements and the length of each are bounded). Returns a new array; the
+ * input is not mutated.
+ */
+export function truncateForLogList(
+  values: readonly unknown[],
+  maxItems: number = 10,
+  maxLength: number = 256,
+): string[] {
+  return values.slice(0, maxItems).map((value) => truncateForLog(value, maxLength));
+}
+
 // **** payload field extraction
 
 /**

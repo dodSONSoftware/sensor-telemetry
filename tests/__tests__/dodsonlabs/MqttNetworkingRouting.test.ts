@@ -831,3 +831,140 @@ describe("subscription SUBACK handling (regression P2-3)", () => {
     ]);
   });
 });
+
+describe("bounding untrusted MQTT values before logging", () => {
+  // The logging path applies a size bound to attacker-controlled payload
+  // values (source, device, message_type, degraded_reasons, and the
+  // forwarded sensor-log body) that the Prometheus label path already bounds
+  // for labels. These assert the values supplied to the logger abstraction
+  // are bounded (message text AND structured metadata) while the warning/debug
+  // event still fires, and that short values pass through unchanged.
+  const ELL = "…";
+  const CAP = 256;
+
+  it("bounds a very long device value in the unknown-device warning (message + metadata)", () => {
+    const longDevice = "d".repeat(1000);
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: longDevice,
+      source: "v3-src",
+      payload: { temperature_c: 25 },
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_unknown_v3_device"
+    );
+    expect(warn).toBeDefined();
+    const bounded = `${"d".repeat(CAP)}${ELL}`;
+    expect(warn?.[1]).toContain(bounded);
+    expect(warn?.[1]).not.toContain(longDevice);
+    expect(warn?.[2]).toMatchObject({ device: bounded, source: "v3-src" });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+  });
+
+  it("bounds a very long source value in the missing-field warning (message + metadata)", () => {
+    const longSource = "s".repeat(1000);
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      source: longSource,
+      payload: { air: { temperature_c: 25 } }, // missing humidity_percent / pressure
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "telemetry_field_missing"
+    );
+    expect(warn).toBeDefined();
+    const bounded = `${"s".repeat(CAP)}${ELL}`;
+    expect(warn?.[1]).toContain(bounded);
+    expect(warn?.[1]).not.toContain(longSource);
+    expect(warn?.[2]).toMatchObject({ source: bounded });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+  });
+
+  it("bounds a very long message_type value in the unknown-type warning (message + metadata)", () => {
+    const longType = "t".repeat(1000);
+    const { prom, logger } = driveMessage({
+      message_type: longType,
+      source: "v3-src",
+      payload: { temperature_c: 25 },
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_unknown_message_type"
+    );
+    expect(warn).toBeDefined();
+    const bounded = `${"t".repeat(CAP)}${ELL}`;
+    expect(warn?.[1]).toContain(bounded);
+    expect(warn?.[1]).not.toContain(longType);
+    expect(warn?.[2]).toMatchObject({ messageType: bounded });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+  });
+
+  it("bounds degraded_reasons by both element count and element length (message + metadata)", () => {
+    const reasons = Array.from({ length: 20 }, () => "r".repeat(500));
+    const { logger } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+      payload: { status: "degraded", degraded_reasons: reasons },
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "v3_health_degraded"
+    );
+    expect(warn).toBeDefined();
+    const bounded = warn?.[2] as Record<string, unknown>;
+    const boundedReasons = bounded.degraded_reasons as string[];
+    // Element count capped at 10, each element capped at 256 chars + ellipsis.
+    expect(boundedReasons).toHaveLength(10);
+    for (const element of boundedReasons) {
+      expect(element).toBe(`${"r".repeat(CAP)}${ELL}`);
+      expect(element.length).toBeLessThanOrEqual(CAP + 1);
+    }
+    // The joined message is bounded and does not carry any original 500-char reason.
+    expect(warn?.[1]).toContain(`${"r".repeat(CAP)}${ELL}`);
+    expect(warn?.[1]).not.toContain("r".repeat(500));
+  });
+
+  it("bounds the forwarded sensor-log body, source, and firmware_version (message + metadata)", () => {
+    const longMessage = "m".repeat(1000);
+    const longSource = "s".repeat(1000);
+    const longFirmware = "f".repeat(1000);
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: longSource,
+      firmware_version: longFirmware,
+      payload: { level: "info", message: longMessage },
+    });
+
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    const message = info?.[1] as string;
+    const meta = info?.[2] as Record<string, unknown>;
+    // The whole entry stays bounded even though source + body are each 1000 chars.
+    expect(message.length).toBeLessThan(1000);
+    expect(message).toContain(`${"s".repeat(CAP)}${ELL}`);
+    expect(message).not.toContain(longSource);
+    expect(message).not.toContain(longMessage);
+    expect(meta.source).toBe(`${"s".repeat(CAP)}${ELL}`);
+    expect(meta.firmware_version).toBe(`${"f".repeat(CAP)}${ELL}`);
+  });
+
+  it("leaves normal short values unchanged (no ellipsis)", () => {
+    const { logger } = driveMessage({
+      message_type: "telemetry",
+      device: "mystery9000",
+      source: "v3-src",
+      payload: { temperature_c: 25 },
+    });
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_unknown_v3_device"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[1]).toBe(`Unknown V3 device type 'mystery9000', dropping message`);
+    expect(warn?.[2]).toMatchObject({ device: "mystery9000", source: "v3-src" });
+    expect(warn?.[1]).not.toContain(ELL);
+  });
+});

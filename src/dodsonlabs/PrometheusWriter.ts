@@ -12,7 +12,7 @@ import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, write_file_yaml } from "./SystemFunctions";
+import { buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
 
 // Load version from package.json at module load time
 const pkgRequire = createRequire(__filename);
@@ -975,11 +975,11 @@ export class PrometheusWriter {
         if (sanitized === "") {
             this.logger.write_warn(
                 "prometheus/sourceSanitized",
-                `Source '${normalized}' contains no valid characters — using 'unknown' label`,
+                `Source '${truncateForLog(normalized)}' contains no valid characters — using 'unknown' label`,
                 {
                     event: "sensor_source_sanitized",
                     logType: "sensor",
-                    originalSource: normalized,
+                    originalSource: truncateForLog(normalized),
                     sanitizedSource: "unknown",
                 }
             );
@@ -991,11 +991,11 @@ export class PrometheusWriter {
         if (sanitized !== normalized) {
             this.logger.write_debug(
                 "prometheus/sourceSanitized",
-                `Sanitized source '${normalized}' -> '${sanitized}'`,
+                `Sanitized source '${truncateForLog(normalized)}' -> '${sanitized}'`,
                 {
                     event: "sensor_source_sanitized",
                     logType: "sensor",
-                    originalSource: normalized,
+                    originalSource: truncateForLog(normalized),
                     sanitizedSource: sanitized,
                 }
             );

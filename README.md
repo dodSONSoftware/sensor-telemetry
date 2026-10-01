@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.5.
+**Release:** Iron Badger — firmware 3.0.6.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -88,6 +88,16 @@ Sensitive values are automatically redacted before logging:
 - `apiKey`, `privateKey`
 
 Redaction is recursive and case-insensitive. Error objects passed in the `error:` log field are preserved with their `name`, `message`, and `stack`, so failure and crash stack traces are not lost in the log output.
+
+### Untrusted Payload Value Bounding
+
+Untrusted, free-form MQTT payload values are length-bounded before being written to the log, in both the human-readable message text and the structured log metadata. This mirrors the bounds already applied to Prometheus label values and stops a malformed or hostile publisher from producing disproportionately large log entries. Bounded fields (truncated to 256 characters — a `…` marks a truncation; short values are logged unchanged):
+
+- `source`, `device`, `message_type`
+- `degraded_reasons` (capped at 10 reasons, each 256 characters)
+- the forwarded sensor-log `message` body and `firmware_version`
+
+The bounds apply to log output only; the metric-processing behavior is unchanged and payload objects are not mutated.
 
 ### Runtime Log Level Changes
 
