@@ -86,7 +86,7 @@ npm run test:coverage # Run tests with coverage report
 | `sensorSourceValidCharsRegex` | Valid characters for source names. The value is escaped into a negated character class (`[^...]`) at construction, so it must form a valid character class: `-` is the range separator (ranges like `a-z` work), but an out-of-order range (e.g. `z-a`) throws in the `PrometheusWriter` constructor, which runs before index.ts's structured startup try — the schema rejects it via the same `buildSourceValidCharsRegex` helper the writer uses, so `/write-config` cannot persist a value that crash-loops the next restart | a-zA-Z0-9._- |
 | `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; overflow maps to a fallback label | 1024 |
 | `forwardSensorLogs` | Forward sensor logs to main logger | true |
-| `forwardSensorLogsLevel` | Log level for forwarded sensor logs (error, warn, info, debug, critical) | info |
+| `forwardSensorLogsLevel` | Log level for forwarded sensor logs (error, warn, info, debug, critical) | debug |
 
 ## Prometheus Metrics Endpoint
 
