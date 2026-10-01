@@ -547,6 +547,66 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("/metrics", () => {
+    // A collector that throws rejects the /metrics scrape. The handler must
+    // contain that rejection (log + 500) rather than let it escape as an
+    // unhandledRejection, which index.ts treats as fatal (exit 1).
+    it("returns 500, logs the error, and does not let the rejection escape the request handler when a collector throws", async () => {
+      // Sentinel: if the rejection escaped the handler, Node would raise
+      // unhandledRejection (and, without the fix, the process would treat it
+      // as fatal). Capturing it here proves containment instead of crashing.
+      // Attached for the whole body — including the settle wait below.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.prependListener("unhandledRejection", onUnhandled);
+
+      let metricsSpy: jest.SpyInstance | undefined;
+      try {
+        logger.write_error.mockClear();
+        metricsSpy = jest
+          .spyOn(register, "metrics")
+          .mockRejectedValueOnce(new Error("collector exploded"));
+
+        // The request completes (fetch resolves) rather than hanging or
+        // crashing the process.
+        const res = await fetch(`http://127.0.0.1:${port}/metrics`, {
+          headers: { Connection: "close" },
+        });
+
+        expect(res.status).toBe(500);
+        // No internal error details leak to the caller.
+        expect(await res.text()).toBe("");
+
+        // The failure is logged with the service error event.
+        expect(
+          logger.write_error.mock.calls.some(
+            (call) => call[2]?.event === "prometheus_metrics_collection_failed"
+          )
+        ).toBe(true);
+
+        // Give an escaped rejection a tick to surface, then assert none did.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        metricsSpy?.mockRestore();
+        process.removeListener("unhandledRejection", onUnhandled);
+      }
+    });
+
+    it("recovers on the next scrape after a collector failure", async () => {
+      // A single failing collector must not wedge the endpoint: once the
+      // rejection is contained, the next scrape succeeds normally.
+      const res = await fetch(`http://127.0.0.1:${port}/metrics`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("# HELP");
+    });
+  });
+
   describe("CORS (browser clients)", () => {
     // Node's fetch() does not enforce browser CORS policy, so these tests
     // send Origin/OPTIONS explicitly and inspect the raw response headers.

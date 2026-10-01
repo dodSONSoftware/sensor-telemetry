@@ -262,8 +262,37 @@ export class PrometheusWriter {
                 if (!this.requireMethod(req, res, "GET")) {
                     return;
                 }
-                res.setHeader("Content-Type", register.contentType);
-                res.end(await register.metrics());
+                // A collector that throws would otherwise reject this async
+                // callback, whose returned promise the http server never
+                // awaits — surfacing as an unhandledRejection, which index.ts
+                // treats as fatal (exit 1). Contain it here: log, answer 500,
+                // and let the service keep serving.
+                try {
+                    const metrics = await register.metrics();
+                    if (!res.writableEnded) {
+                        res.setHeader("Content-Type", register.contentType);
+                        res.end(metrics);
+                    }
+                } catch (error) {
+                    this.logger.write_error(
+                        "prometheus/metricsCollectionFailed",
+                        "Failed to collect Prometheus metrics",
+                        {
+                            event: "prometheus_metrics_collection_failed",
+                            logType: "service",
+                            error: ensureError(error),
+                        }
+                    );
+                    // Empty body on purpose: the Prometheus endpoint returns
+                    // text format, and internal error details must never be
+                    // echoed to the scraper.
+                    if (!res.headersSent) {
+                        res.statusCode = 500;
+                    }
+                    if (!res.writableEnded) {
+                        res.end();
+                    }
+                }
             } else if (path === "/health") {
                 if (!this.requireMethod(req, res, "GET")) {
                     return;
