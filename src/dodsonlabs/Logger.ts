@@ -96,7 +96,7 @@ function createRedactionFormat() {
     const sanitizedMeta = redactSensitiveValues(info) as Record<string, unknown>;
 
     // Remove the original meta property since we're merging it back
-    delete (sanitizedMeta as any).meta;
+    delete sanitizedMeta.meta;
 
     // Merge sanitized metadata back into info
     return { ...info, ...sanitizedMeta };

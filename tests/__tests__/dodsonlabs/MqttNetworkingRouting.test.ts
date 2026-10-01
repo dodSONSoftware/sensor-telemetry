@@ -663,6 +663,110 @@ describe("sensor freshness (mark_source_seen)", () => {
   });
 });
 
+describe("untrusted JSON body handling (type-safety regression)", () => {
+  // on_message narrows the JSON.parse result to JsonObject before routing:
+  // valid JSON that is not an object is dropped with a warning instead of
+  // flowing into the handlers, and a null message_type is stringified to
+  // "null" and routed to the unknown-type branch instead of throwing in
+  // msg_type_raw.toString().
+
+  function driveRawBody(
+    body: string
+  ): { prom: MockProm; logger: MockLogger & ILogger } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
+    const messageCall = messageCalls.at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    handler(baseConfig.mqttTopicTelemetry, Buffer.from(body), {});
+    return {
+      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+      logger,
+    };
+  }
+
+  it("drops a valid-JSON body that is an array with a warning and publishes nothing", () => {
+    const { prom, logger } = driveRawBody("[1, 2, 3]");
+
+    expect(
+      logger.write_warn.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_not_object"
+      )
+    ).toBe(true);
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("drops a valid-JSON body that is a primitive with a warning and publishes nothing", () => {
+    const { prom, logger } = driveRawBody('"just a string"');
+
+    expect(
+      logger.write_warn.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_not_object"
+      )
+    ).toBe(true);
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("drops a message whose only message_type is null as missing (the ?? coalesces null to undefined)", () => {
+    const { prom, logger } = driveMessage({
+      message_type: null,
+      source: "v3-src",
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+      },
+    });
+
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_missing_type"
+      )
+    ).toBe(true);
+    expect(prom.publish_air).not.toHaveBeenCalled();
+  });
+
+  it("stringifies a null message_type surviving the ?? (both keys null) to the unknown-type branch instead of throwing", () => {
+    // With both keys null, msg_type_raw is null (not undefined), so the
+    // missing-type check passes. String(null) = "null" routes to the
+    // unknown-type warning; the previous msg_type_raw.toString() threw a
+    // TypeError here, which surfaced as a handling error and dropped the
+    // message without the structured warning.
+    const { prom, logger } = driveMessage({
+      message_type: null,
+      "message-type": null,
+      source: "v3-src",
+      payload: {
+        air: { temperature_c: 25, humidity_percent: 45, pressure_pascal: 100000 },
+      },
+    });
+
+    const unknownTypeWarns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_unknown_message_type"
+    );
+    expect(unknownTypeWarns).toHaveLength(1);
+    expect(unknownTypeWarns[0][2]).toMatchObject({ messageType: "null" });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) =>
+          call[2]?.event === "mqtt_message_parse_error" ||
+          call[2]?.event === "mqtt_message_handling_error"
+      )
+    ).toBe(false);
+  });
+});
+
 describe("subscription SUBACK handling (regression P2-3)", () => {
   // Fire the constructor's "connect" handler so on_connect() issues the
   // subscribe() calls, then capture the (topic, callback) pairs the fake

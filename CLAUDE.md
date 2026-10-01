@@ -14,13 +14,15 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 - **PrometheusWriter** (`src/dodsonlabs/PrometheusWriter.ts`) — Prometheus metric registration and HTTP server
 - **Logger** (`src/dodsonlabs/Logger.ts`) — Winston-based logging abstraction
 - **SystemFunctions** (`src/dodsonlabs/SystemFunctions.ts`) — File I/O, error handling, formatting utilities
-- **Interfaces** (`src/dodsonlabs/Interfaces.ts`) — Type definitions for the service
+- **Interfaces** (`src/dodsonlabs/Interfaces.ts`) — Type definitions for the service, including `JsonObject` (the untrusted-MQTT-JSON contract: `Record<string, unknown>`) and the `isJsonObject` type guard
 
 ### Entry Point
 
 - **index.ts** (`src/index.ts`) — Main entry point with config loading, shutdown handling, and signal trapping
 
 ### V3 Message Format (per-device telemetry)
+
+Every incoming body is narrowed once at the parse site: valid JSON that is not an object is dropped with a `mqtt_message_not_object` warning before routing, and all handlers receive a `JsonObject` whose fields are read through the `SystemFunctions`/`MqttNetworking` field helpers (no handler indexes an untrusted value directly; present-but-non-object payloads/sections read as empty).
 
 V3 telemetry messages are per-device rather than per-section: each carries a top-level `device` field and a `payload` with only that device's readings. `MqttNetworking` maps known device types to the metric category they feed:
 

@@ -5,6 +5,24 @@
 
 // **** Common
 
+/**
+ * Untrusted JSON object parsed from an MQTT payload.
+ *
+ * Field names and values come from sensor firmware, so the document is
+ * treated as opaque: reads go through the field helpers in
+ * SystemFunctions/MqttNetworking, which validate each value per field.
+ */
+export type JsonObject = Record<string, unknown>;
+
+/**
+ * Type guard for JsonObject. JSON.parse of a well-formed body can still
+ * yield an array or a primitive, which the handlers cannot index, so
+ * on_message narrows once and every handler receives a JsonObject.
+ */
+export function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export interface SystemInfo {
   key: string;
   value: string;

@@ -7,7 +7,8 @@ import http from "http";
 import { timingSafeEqual } from "crypto";
 import { register, Gauge, Counter } from "prom-client";
 import { createRequire } from "module";
-import type { ILogger, IMqttNetworking } from "./Interfaces";
+import { isJsonObject } from "./Interfaces";
+import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
@@ -1137,10 +1138,10 @@ export class PrometheusWriter {
         });
     }
 
-    publish_air(payload: any, source: string, firmwareVersion: string) {
+    publish_air(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const air = payload?.["air"];
-        if (!air) {
+        const airRaw = payload?.["air"];
+        if (!airRaw) {
             this.logger.write_warn(
                 "prometheus/publishAirMissing",
                 `Source: ${sanitized}, missing 'air', skipping`,
@@ -1153,6 +1154,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const air: JsonObject = isJsonObject(airRaw) ? airRaw : {};
 
         // Use V2 snake_case field names
         const temp_f =
@@ -1289,10 +1293,10 @@ export class PrometheusWriter {
         );
     }
 
-    publish_light(payload: any, source: string, firmwareVersion: string) {
+    publish_light(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const light = payload?.["light"];
-        if (!light) {
+        const lightRaw = payload?.["light"];
+        if (!lightRaw) {
             this.logger.write_warn(
                 "prometheus/publishLightMissing",
                 `Source: ${sanitized}, missing 'light', skipping`,
@@ -1305,6 +1309,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const light: JsonObject = isJsonObject(lightRaw) ? lightRaw : {};
 
         // Use V2 snake_case field names
         const uvIndex = get_numeric_field(light, "uv_index");
@@ -1355,10 +1362,10 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "light", firmware_version: firmwareVersion });
     }
 
-    publish_rain(payload: any, source: string, firmwareVersion: string) {
+    publish_rain(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const rain = payload?.["rain"];
-        if (!rain) {
+        const rainRaw = payload?.["rain"];
+        if (!rainRaw) {
             this.logger.write_warn(
                 "prometheus/publishRainMissing",
                 `Source: ${sanitized}, missing 'rain', skipping`,
@@ -1371,6 +1378,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const rain: JsonObject = isJsonObject(rainRaw) ? rainRaw : {};
 
         // Use V2 snake_case field names
         const inches = get_numeric_field(rain, "in_h2o");
@@ -1403,10 +1413,10 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "rain", firmware_version: firmwareVersion });
     }
 
-    publish_wind(payload: any, source: string, firmwareVersion: string) {
+    publish_wind(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const wind = payload?.["wind"];
-        if (!wind) {
+        const windRaw = payload?.["wind"];
+        if (!windRaw) {
             this.logger.write_warn(
                 "prometheus/publishWindMissing",
                 `Source: ${sanitized}, missing 'wind', skipping`,
@@ -1419,6 +1429,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const wind: JsonObject = isJsonObject(windRaw) ? windRaw : {};
 
         // Use V2 snake_case field names
         const speed = this.cmPerSecToMph(get_numeric_field(wind, "wind_speed_cm_sec") ?? NaN);
@@ -1469,10 +1482,10 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "wind", firmware_version: firmwareVersion });
     }
 
-    publish_water(payload: any, source: string, firmwareVersion: string) {
+    publish_water(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const water = payload?.["water"];
-        if (!water) {
+        const waterRaw = payload?.["water"];
+        if (!waterRaw) {
             this.logger.write_warn(
                 "prometheus/publishWaterMissing",
                 `Source: ${sanitized}, missing 'water', skipping`,
@@ -1485,6 +1498,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const water: JsonObject = isJsonObject(waterRaw) ? waterRaw : {};
 
         // Use V2 snake_case field names
         const temp_f = (get_numeric_field(water, "temperature_c") ?? NaN) * 9 / 5 + 32;
@@ -1532,10 +1548,10 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "water", firmware_version: firmwareVersion });
     }
 
-    publish_lightning(payload: any, source: string, firmwareVersion: string) {
+    publish_lightning(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const lightning = payload?.["lightning"];
-        if (!lightning) {
+        const lightningRaw = payload?.["lightning"];
+        if (!lightningRaw) {
             this.logger.write_warn(
                 "prometheus/publishLightningMissing",
                 `Source: ${sanitized}, missing 'lightning', skipping`,
@@ -1548,6 +1564,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const lightning: JsonObject = isJsonObject(lightningRaw) ? lightningRaw : {};
 
         // Use V2 snake_case field names
         const count = get_numeric_field(lightning, "lightning_count");
@@ -1580,10 +1599,10 @@ export class PrometheusWriter {
         this.prometheus_counter_telemetry_messages?.inc({ source_type: "lightning", firmware_version: firmwareVersion });
     }
 
-    publish_soil(payload: any, source: string, firmwareVersion: string) {
+    publish_soil(payload: JsonObject, source: string, firmwareVersion: string) {
         const sanitized = this.admitSource(source);
-        const soil = payload?.["soil"];
-        if (!soil) {
+        const soilRaw = payload?.["soil"];
+        if (!soilRaw) {
             this.logger.write_warn(
                 "prometheus/publishSoilMissing",
                 `Source: ${sanitized}, missing 'soil', skipping`,
@@ -1596,6 +1615,9 @@ export class PrometheusWriter {
             );
             return;
         }
+
+        // Non-object sections read as empty rather than indexing a primitive.
+        const soil: JsonObject = isJsonObject(soilRaw) ? soilRaw : {};
 
         // V3 snake_case field names (yl69_fc28 / plantmate_soil)
         const percent = get_numeric_field(soil, "relative_moisture_percent");

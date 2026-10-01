@@ -5,6 +5,7 @@
 
 import fs from "fs";
 import { ILogger, LogLevel } from "./Interfaces";
+import type { JsonObject } from "./Interfaces";
 import * as yaml from "js-yaml";
 
 // **** error functions
@@ -292,7 +293,7 @@ export function buildSourceValidCharsRegex(validChars: string): RegExp {
  * Returns undefined if no field holds a valid finite number.
  */
 export function get_numeric_field(
-  obj: any,
+  obj: JsonObject,
   ...fieldNames: string[]
 ): number | undefined {
   for (const fieldName of fieldNames) {
