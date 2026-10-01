@@ -296,13 +296,20 @@ describe("MqttNetworking.close() shutdown ordering", () => {
 
     expect(elapsed).toBeLessThan(400);
     // The deadline was exhausted by the drain, so the wait was abandoned
-    // with an audit error and the MQTT close became a best-effort forced
-    // disconnect that does not wait.
+    // with an audit error.
     const drainTimeout = logger.write_error.mock.calls.find(
       (call) => call[2]?.event === "prometheus_server_close_timeout",
     );
     expect(drainTimeout).toBeDefined();
-    expect(mockClient.end).toHaveBeenCalledWith(true);
+    // The MQTT phase then ran one of two valid branches on the timing
+    // boundary: the direct best-effort end(true) when the drain consumed
+    // the entire deadline, or the graceful end(cb) followed by the forced
+    // end(true, cb) once the remaining sliver of budget elapsed. Both are
+    // correct shutdowns, so assert the invariant — a forced disconnect was
+    // attempted — instead of one specific call signature, which is what
+    // made this expectation flake under scheduling variance.
+    expect(mockClient.end).toHaveBeenCalled();
+    expect(mockClient.end.mock.calls.some((call) => call[0] === true)).toBe(true);
   });
 
   it("gives the MQTT close only the time the HTTP drain leaves on the deadline", async () => {
@@ -329,6 +336,110 @@ describe("MqttNetworking.close() shutdown ordering", () => {
     expect(budgetMs).toBeLessThan(200);
     expect(budgetMs).toBeGreaterThan(20);
     // The stuck MQTT close was force-disconnected with a callback.
+    expect(mockClient.end).toHaveBeenCalledWith(true, expect.any(Function));
+  });
+});
+
+describe("MqttNetworking.close() shutdown branches (deterministic)", () => {
+  // The real-time tests above cover the wall-clock guarantee (close
+  // settles within the budget), but the branch taken at the deadline
+  // boundary is a coin flip under real timers: the deadline is computed
+  // from Date.now() while setTimeout runs on the event-loop clock, so
+  // remainingMs lands on either side of 0 depending on scheduling. Fake
+  // timers advance Date.now() and the timers in lockstep, making each
+  // branch decision an exact constant so both valid shutdown paths are
+  // pinned deterministically.
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+    sensorSourceMaxLength: 30,
+    sensorSourceValidCharsRegex: "a-zA-Z0-9._-",
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockConnect.mockReset();
+    (PrometheusWriter as unknown as jest.Mock).mockClear();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function getMockWriter() {
+    return (PrometheusWriter as unknown as jest.Mock).mock.instances.at(
+      -1
+    ) as unknown as { close: jest.Mock };
+  }
+
+  it("forces a best-effort MQTT disconnect without waiting when the drain consumes the whole deadline", async () => {
+    const logger = createMockLogger();
+    const mockClient = createHangingMqttClient();
+    mockConnect.mockReturnValue(mockClient);
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    // The drain never finishes, so the shared deadline expires with it
+    // still open: remainingMs is exactly 0 at the deadline.
+    writerMock.close.mockReturnValue(new Promise<void>(() => {}));
+
+    const closePromise = networking.close(50);
+    await jest.advanceTimersByTimeAsync(50);
+    await closePromise;
+
+    // The drain timeout was recorded...
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "prometheus_server_close_timeout"
+      )
+    ).toBe(true);
+    // ...and the MQTT close became a best-effort forced disconnect that
+    // does not wait for the client.
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_close_forced_deadline_exhausted"
+      )
+    ).toBe(true);
+    expect(mockClient.end).toHaveBeenCalledTimes(1);
+    expect(mockClient.end).toHaveBeenCalledWith(true);
+  });
+
+  it("force-disconnects a hanging MQTT close after the remaining budget elapses", async () => {
+    const logger = createMockLogger();
+    const mockClient = createHangingMqttClient();
+    mockConnect.mockReturnValue(mockClient);
+    const networking = new MqttNetworking(baseConfig, logger);
+    const writerMock = getMockWriter();
+
+    // The drain eats 30 ms of the 100 ms deadline, leaving exactly 70 ms
+    // for the MQTT phase. The graceful end(cb) hangs, so the phase must
+    // time out against the remaining slice — not the full 100 ms.
+    writerMock.close.mockReturnValue(
+      new Promise<void>((resolve) => setTimeout(resolve, 30))
+    );
+
+    const closePromise = networking.close(100);
+    await jest.advanceTimersByTimeAsync(30);
+    // The drain finished in time: the graceful disconnect was attempted
+    // with the remaining budget, and no false drain-timeout error fired.
+    expect(mockClient.end).toHaveBeenCalledWith(expect.any(Function));
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "prometheus_server_close_timeout"
+      )
+    ).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(70);
+    await closePromise;
+
+    const mqttTimeout = logger.write_error.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_client_close_timeout"
+    );
+    expect(mqttTimeout).toBeDefined();
+    expect(mqttTimeout?.[2]?.timeoutMs).toBe(70);
+    // The stuck graceful close was rescued by the forced disconnect.
     expect(mockClient.end).toHaveBeenCalledWith(true, expect.any(Function));
   });
 });
