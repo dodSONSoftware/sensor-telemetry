@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.12.
+**Release:** Iron Badger — firmware 3.0.13.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -95,7 +95,9 @@ Untrusted, free-form MQTT payload values are length-bounded before being written
 
 - `source`, `device`, `message_type`
 - `degraded_reasons` (capped at 10 reasons, each 256 characters)
-- the forwarded sensor-log `message` body and `firmware_version`
+- the forwarded sensor-log `message` body, `firmware_version`, and every forwarded-log metadata field (`event`, `module`, `function`, `level`, `runtime_id`, `schema_version`, `command_id`, `target`, `targeted`, `response_topic`, `device_ip`, `device_source`)
+
+The V3 forwarded-log `data` object is bounded as a structure by `SystemFunctions.boundForLog`, which preserves its shape for Loki indexing while capping string values and object keys at 256 characters, arrays at 10 elements, and objects at 10 properties. Subtrees nested deeper than 8 levels are replaced with a `[truncated: max depth]` marker — the depth cap protects the Logger's recursive redaction pass from call-stack exhaustion on an arbitrarily deep payload.
 
 The bounds apply to log output only; the metric-processing behavior is unchanged and payload objects are not mutated.
 

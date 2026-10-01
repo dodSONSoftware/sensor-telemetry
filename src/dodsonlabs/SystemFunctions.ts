@@ -320,6 +320,56 @@ export function truncateForLogList(
   return values.slice(0, maxItems).map((value) => truncateForLog(value, maxLength));
 }
 
+// Caps for bounding untrusted STRUCTURED metadata (boundForLog). String
+// length and list length match truncateForLog/truncateForLogList so every
+// bounding path enforces the same per-value limits; the property-count and
+// depth caps are what structured data additionally needs, and the depth cap
+// exists because the Logger's redaction pass recurses through the metadata —
+// an arbitrarily deep MQTT payload would exhaust the call stack otherwise.
+const LOG_BOUND_MAX_ITEMS = 10;
+const LOG_BOUND_MAX_KEYS = 10;
+const LOG_BOUND_MAX_DEPTH = 8;
+const LOG_BOUND_DEPTH_MARKER = "[truncated: max depth]";
+
+/**
+ * Bound an untrusted structured value (object/array graph) for inclusion in
+ * log metadata, preserving its structure so Loki can keep indexing the
+ * fields it uses:
+ *
+ * - strings (values AND object keys — keys become Loki labels too) are
+ *   truncated via truncateForLog (256 chars + ellipsis)
+ * - arrays keep at most LOG_BOUND_MAX_ITEMS elements
+ * - objects keep at most LOG_BOUND_MAX_KEYS properties (the first, in
+ *   insertion order; note two keys that truncate identically collapse,
+ *   which is acceptable for a bounded log view)
+ * - nesting deeper than LOG_BOUND_MAX_DEPTH is replaced wholesale with a
+ *   marker string instead of recursing
+ * - numbers, booleans, and null pass through unchanged
+ *
+ * A new graph is always produced; the input is never mutated.
+ */
+export function boundForLog(value: unknown, depth: number = 0): unknown {
+  if (value === null || typeof value !== "object") {
+    return typeof value === "string" ? truncateForLog(value) : value;
+  }
+  if (depth >= LOG_BOUND_MAX_DEPTH) {
+    return LOG_BOUND_DEPTH_MARKER;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, LOG_BOUND_MAX_ITEMS)
+      .map((item) => boundForLog(item, depth + 1));
+  }
+  const result: Record<string, unknown> = {};
+  let keys = 0;
+  for (const [key, val] of Object.entries(value)) {
+    if (keys >= LOG_BOUND_MAX_KEYS) break;
+    result[truncateForLog(key)] = boundForLog(val, depth + 1);
+    keys++;
+  }
+  return result;
+}
+
 // **** payload field extraction
 
 /**

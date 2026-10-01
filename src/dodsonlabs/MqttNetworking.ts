@@ -757,47 +757,51 @@ export class MqttNetworking implements IMqttNetworking {
 
         // Build metadata from log data for Loki compatibility
         // Loki uses labels for indexing: source, module, function, level
+        // Every label value comes from the untrusted payload, so each is
+        // bounded for the log channel the same way the message text is.
         const metadata: Record<string, unknown> = {
-            event: this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic",
+            event: sysFunc.truncateForLog(this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic"),
             logType: "sensor",
             source: sysFunc.truncateForLog(source),
             // Add Loki-compatible labels
-            module: this.getLogField(logData, "module"),
-            function: this.getLogField(logData, "function"),
-            level: String(level).toLowerCase(),
+            module: sysFunc.truncateForLog(this.getLogField(logData, "module")),
+            function: sysFunc.truncateForLog(this.getLogField(logData, "function")),
+            level: sysFunc.truncateForLog(String(level).toLowerCase()),
         };
 
         // Add V2/V3 format fields to metadata if available
-        if (runtimeId !== undefined) metadata.runtime_id = runtimeId;
+        if (runtimeId !== undefined) metadata.runtime_id = sysFunc.truncateForLog(runtimeId);
         // firmware_version here is the raw, unadmitted payload value (the telemetry
         // paths run it through admitFirmwareVersion); bound it for the log channel.
         if (firmwareVersion !== undefined) metadata.firmware_version = sysFunc.truncateForLog(firmwareVersion);
         if (uptimeMs !== undefined) metadata.uptime_ms = uptimeMs;
-        if (schemaVersion !== undefined) metadata.schema_version = schemaVersion;
+        if (schemaVersion !== undefined) metadata.schema_version = sysFunc.truncateForLog(schemaVersion);
         if (sequence !== undefined) metadata.sequence = sequence;
 
         // V3 log messages carry a nested 'data' object with event details —
-        // include it as structured metadata for Loki compatibility
+        // include it as structured metadata for Loki compatibility, bounded
+        // (string length, property/item counts, nesting depth) so the
+        // structure stays queryable without becoming an unbounded log entry.
         const data = this.getLogField(logData, "data");
-        if (data !== undefined) metadata.data = data;
+        if (data !== undefined) metadata.data = sysFunc.boundForLog(data);
 
         // Add optional fields if present (snake_case preferred, with camelCase fallbacks)
         const commandId = this.getLogField(logData, "command_id", "commandId");
-        if (commandId !== undefined) metadata.commandId = commandId;
+        if (commandId !== undefined) metadata.commandId = sysFunc.truncateForLog(commandId);
         const target = this.getLogField(logData, "target", "Target");
-        if (target !== undefined) metadata.target = target;
+        if (target !== undefined) metadata.target = sysFunc.truncateForLog(target);
         const targeted = this.getLogField(logData, "targeted", "Targeted");
-        if (targeted !== undefined) metadata.targeted = targeted;
+        if (targeted !== undefined) metadata.targeted = sysFunc.truncateForLog(targeted);
         const responseTopic = this.getLogField(logData, "response_topic", "responseTopic");
-        if (responseTopic !== undefined) metadata.responseTopic = responseTopic;
+        if (responseTopic !== undefined) metadata.responseTopic = sysFunc.truncateForLog(responseTopic);
         const payloadSize = sysFunc.get_numeric_field(logData, "payload_size", "payloadSize");
         if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
         const durationMs = sysFunc.get_numeric_field(logData, "duration_ms", "durationMs");
         if (durationMs !== undefined) metadata.durationMs = durationMs;
         const deviceIp = this.getLogField(logData, "device_ip", "deviceIp");
-        if (deviceIp !== undefined) metadata.deviceIp = deviceIp;
+        if (deviceIp !== undefined) metadata.deviceIp = sysFunc.truncateForLog(deviceIp);
         const deviceSource = this.getLogField(logData, "device_source", "deviceSource");
-        if (deviceSource !== undefined) metadata.deviceSource = deviceSource;
+        if (deviceSource !== undefined) metadata.deviceSource = sysFunc.truncateForLog(deviceSource);
 
         switch (sensor_level) {
         case LogLevel.Critical:

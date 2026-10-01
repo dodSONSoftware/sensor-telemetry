@@ -7,6 +7,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
+  boundForLog,
   buildSourceValidCharsRegex,
   CONFIG_FILE_CANDIDATES,
   get_numeric_field,
@@ -419,5 +420,113 @@ describe("truncateForLogList", () => {
     const result = truncateForLogList(input);
     expect(result).not.toBe(input);
     expect(input).toEqual(snapshot);
+  });
+});
+
+describe("boundForLog", () => {
+  const ELL = "…";
+
+  it("leaves small structured data structurally equivalent", () => {
+    const input = {
+      event: "command_ack",
+      count: 3,
+      ok: true,
+      nothing: null,
+      detail: { sensor: "bme280", retries: 1 },
+      list: ["a", "b"],
+    };
+    expect(boundForLog(input)).toEqual(input);
+  });
+
+  it("truncates long string values with the ellipsis marker", () => {
+    const result = boundForLog({ detail: "x".repeat(5000) }) as Record<
+      string,
+      unknown
+    >;
+    expect(result.detail).toBe(`${"x".repeat(256)}${ELL}`);
+    expect((result.detail as string).length).toBeLessThanOrEqual(257);
+  });
+
+  it("truncates long object keys too (they become Loki labels)", () => {
+    const longKey = "k".repeat(5000);
+    const result = boundForLog({ [longKey]: "v" }) as Record<string, unknown>;
+    const keys = Object.keys(result);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toBe(`${"k".repeat(256)}${ELL}`);
+    expect(result[keys[0]]).toBe("v");
+  });
+
+  it("keeps short keys exact so the Logger's secret redaction still matches", () => {
+    const result = boundForLog({ password: "hunter2", apiKey: "abc" }) as Record<
+      string,
+      unknown
+    >;
+    // Key names are unchanged; the Logger's redaction pass is what replaces
+    // the values, and it matches on these names.
+    expect(Object.keys(result).sort()).toEqual(["apiKey", "password"]);
+  });
+
+  it("caps arrays at 10 elements", () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => i);
+    expect(boundForLog(twelve)).toEqual(Array.from({ length: 10 }, (_, i) => i));
+  });
+
+  it("caps objects at 10 properties, keeping the first in insertion order", () => {
+    const input: Record<string, number> = {};
+    for (let i = 0; i < 15; i++) input[`key_${i}`] = i;
+    const result = boundForLog(input) as Record<string, number>;
+    expect(Object.keys(result)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `key_${i}`)
+    );
+  });
+
+  it("bounds large strings nested inside arrays and objects", () => {
+    const result = boundForLog({
+      list: [{ detail: "d".repeat(500) }],
+    }) as { list: Array<{ detail: string }> };
+    expect(result.list[0].detail).toBe(`${"d".repeat(256)}${ELL}`);
+  });
+
+  it("replaces subtrees beyond the depth cap with a marker instead of recursing", () => {
+    // 50 nested levels: without the depth cap this would both produce a
+    // 50-level log graph and (via the Logger's recursive redaction) consume
+    // 50 stack frames per log line.
+    let node: Record<string, unknown> = { leaf: "bottom" };
+    for (let i = 0; i < 50; i++) node = { child: node };
+    expect(() => boundForLog(node)).not.toThrow();
+
+    // Walk down: the chain is flat at the cap depth, marked, and shallow.
+    let depth = 0;
+    let current: unknown = boundForLog(node);
+    while (
+      current !== null &&
+      typeof current === "object" &&
+      !Array.isArray(current) &&
+      "child" in (current as Record<string, unknown>)
+    ) {
+      current = (current as Record<string, unknown>).child;
+      depth++;
+    }
+    expect(depth).toBeLessThanOrEqual(10);
+    expect(typeof current).toBe("string");
+  });
+
+  it("does not mutate the input graph", () => {
+    const input = {
+      detail: "x".repeat(5000),
+      list: Array.from({ length: 12 }, (_, i) => `item_${i}`),
+      nested: { deep: "y".repeat(500) },
+    };
+    const snapshot = JSON.parse(JSON.stringify(input)) as unknown;
+    boundForLog(input);
+    expect(input).toEqual(snapshot);
+  });
+
+  it("passes numbers, booleans, and null through unchanged", () => {
+    expect(boundForLog(42)).toBe(42);
+    expect(boundForLog(0)).toBe(0);
+    expect(boundForLog(true)).toBe(true);
+    expect(boundForLog(false)).toBe(false);
+    expect(boundForLog(null)).toBe(null);
   });
 });

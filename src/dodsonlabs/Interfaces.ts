@@ -246,5 +246,13 @@ export interface IMqttNetworking {
   subscriptions_active(): boolean;
   /** Per-topic subscription state, consumed by the mqtt_subscription_active gauge. */
   get_subscription_states(): Array<{ topic: string; active: boolean }>;
-  close(): Promise<void>;
+  /**
+   * Shut down the MQTT client and the Prometheus HTTP server. timeout_ms is a
+   * deadline for the ENTIRE close path (the HTTP drain and the MQTT
+   * disconnect share one budget), so callers typed against this interface
+   * can bound shutdown the same way index.ts does.
+   */
+  close(timeout_ms?: number): Promise<void>;
+  /** True once the Prometheus HTTP server is listening and can serve /metrics. */
+  prometheus_server_ready(): boolean;
 }

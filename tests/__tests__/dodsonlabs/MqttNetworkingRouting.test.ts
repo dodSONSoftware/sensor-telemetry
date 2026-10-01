@@ -968,3 +968,155 @@ describe("bounding untrusted MQTT values before logging", () => {
     expect(warn?.[1]).not.toContain(ELL);
   });
 });
+
+describe("bounded structured metadata in forwarded sensor logs (regression P2-2)", () => {
+  const ELL = "…";
+  const CAP = 256;
+
+  // Every assertion targets the metadata the forwarded log reaches the
+  // logger with: the message TEXT was already bounded, but the structured
+  // metadata was an unrestricted side channel around those limits.
+
+  function logMeta(doc: Record<string, unknown>): Record<string, unknown> {
+    const { logger } = driveMessage(doc);
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    return info?.[2] as Record<string, unknown>;
+  }
+
+  it("bounds a 5000-character command_id", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", command_id: "c".repeat(5000) },
+    });
+    expect(meta.commandId).toBe(`${"c".repeat(CAP)}${ELL}`);
+  });
+
+  it("bounds a 5000-character target", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", target: "t".repeat(5000) },
+    });
+    expect(meta.target).toBe(`${"t".repeat(CAP)}${ELL}`);
+  });
+
+  it("bounds the Loki label fields (module, function, runtime_id, schema_version, level)", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      runtime_id: "r".repeat(5000),
+      schema_version: "s".repeat(5000),
+      payload: {
+        level: "INFO",
+        message: "m",
+        module: "u".repeat(5000),
+        function: "f".repeat(5000),
+      },
+    });
+    expect(meta.module).toBe(`${"u".repeat(CAP)}${ELL}`);
+    expect(meta.function).toBe(`${"f".repeat(CAP)}${ELL}`);
+    expect(meta.runtime_id).toBe(`${"r".repeat(CAP)}${ELL}`);
+    expect(meta.schema_version).toBe(`${"s".repeat(CAP)}${ELL}`);
+    expect(meta.level).toBe("info");
+  });
+
+  it("bounds large strings nested inside data", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: {
+        level: "info",
+        message: "m",
+        data: { detail: "d".repeat(5000), count: 3 },
+      },
+    });
+    const data = meta.data as Record<string, unknown>;
+    expect(data.detail).toBe(`${"d".repeat(CAP)}${ELL}`);
+    // Structure and non-string fields are preserved for Loki.
+    expect(data.count).toBe(3);
+  });
+
+  it("caps data arrays at 10 elements", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: {
+        level: "info",
+        message: "m",
+        data: { reasons: Array.from({ length: 25 }, (_, i) => `r${i}`) },
+      },
+    });
+    const data = meta.data as Record<string, unknown>;
+    expect(data.reasons).toEqual(
+      Array.from({ length: 10 }, (_, i) => `r${i}`)
+    );
+  });
+
+  it("survives deeply nested data without stack exhaustion and marks the depth cap", () => {
+    let node: Record<string, unknown> = { leaf: "bottom" };
+    for (let i = 0; i < 100; i++) node = { child: node };
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", data: node },
+    });
+
+    // Walk the bounded chain: it must be flat (depth cap) and terminate in
+    // the marker string rather than a 100-level object graph.
+    let depth = 0;
+    let current: unknown = meta.data;
+    while (
+      current !== null &&
+      typeof current === "object" &&
+      !Array.isArray(current) &&
+      "child" in (current as Record<string, unknown>)
+    ) {
+      current = (current as Record<string, unknown>).child;
+      depth++;
+    }
+    expect(depth).toBeLessThanOrEqual(10);
+    expect(typeof current).toBe("string");
+  });
+
+  it("does not mutate the original MQTT payload object", () => {
+    const data = { detail: "x".repeat(5000), list: Array.from({ length: 12 }, (_, i) => `i${i}`) };
+    const doc = {
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", data },
+    };
+    const snapshot = JSON.parse(JSON.stringify(doc)) as Record<string, unknown>;
+    logMeta(doc);
+    expect(doc).toEqual(snapshot);
+  });
+
+  it("keeps small structured data structurally equivalent (Loki queryability)", () => {
+    const data = { event: "command_ack", count: 2, ok: true, detail: { sensor: "bme280" } };
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", data },
+    });
+    expect(meta.data).toEqual(data);
+  });
+
+  it("preserves secret-looking key names in data so the Logger's redaction still matches", () => {
+    const meta = logMeta({
+      message_type: "log",
+      source: "src",
+      payload: {
+        level: "info",
+        message: "m",
+        data: { password: "hunter2", apiKey: "abc" },
+      },
+    });
+    // boundForLog must not rename short keys: the Logger's recursive
+    // redaction matches on exactly these names downstream.
+    const data = meta.data as Record<string, unknown>;
+    expect(Object.keys(data).sort()).toEqual(["apiKey", "password"]);
+  });
+});
