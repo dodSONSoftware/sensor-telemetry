@@ -865,9 +865,19 @@ export class PrometheusWriter {
         // event on the request stream throws ERR_UNHANDLED_ERROR and takes the
         // process down. Both paths are made explicit here: mark the request
         // rejected so the 'end' handler never parses a partial body, log an
-        // audit warning, and end the response if it is still open. (Not
-        // reproducible on the pinned Node runtime, but defensive against a
-        // runtime that does surface the error.)
+        // audit warning, and end the response if it is still open — with an
+        // explicit 400 first (matching the malformed-body path below) so a
+        // response that can still reach the client does not default to 200.
+        // (Not reproducible on the pinned Node runtime, but defensive against
+        // a runtime that does surface the error.)
+        const endWithFailure = () => {
+            if (!res.headersSent) {
+                res.statusCode = 400;
+            }
+            if (!res.writableEnded) {
+                res.end();
+            }
+        };
         req.on("error", (err: Error) => {
             if (rejected) return;
             rejected = true;
@@ -880,9 +890,7 @@ export class PrometheusWriter {
                     error: err.message,
                 }
             );
-            if (!res.writableEnded) {
-                res.end();
-            }
+            endWithFailure();
         });
         req.on("aborted", () => {
             if (rejected) return;
@@ -895,9 +903,7 @@ export class PrometheusWriter {
                     logType: "audit",
                 }
             );
-            if (!res.writableEnded) {
-                res.end();
-            }
+            endWithFailure();
         });
     }
 
