@@ -220,6 +220,75 @@ describe("MQTT topic uniqueness under case folding (regression P3-1)", () => {
   });
 });
 
+describe("MQTT topics must be exact, not wildcard filters (regression)", () => {
+  // MqttNetworking.on_message routes by exact (case-folded) string
+  // equality against the configured topics and implements no wildcard
+  // matching. A configured filter like "iot/v3/health/#" would subscribe
+  // fine at the broker, but deliveries to matching concrete topics would
+  // never equal the configured value and would fall through to another
+  // route. The schema rejects + and # in every configured topic so the
+  // supported contract fails fast with a clear message.
+  it.each([
+    ["iot/v3/telemetry/#", "mqttTopicTelemetry"],
+    ["iot/+/log", "mqttTopicTelemetry"],
+    ["#", "mqttTopicTelemetry"],
+    ["+", "mqttTopicTelemetry"],
+  ])("rejects %s as mqttTopicTelemetry", (topic) => {
+    expect(() =>
+      validateConfig({ ...validConfig, mqttTopicTelemetry: topic })
+    ).toThrow(
+      /mqttTopicTelemetry must be an exact MQTT topic; wildcard filters \(\+ and #\) are not supported/
+    );
+  });
+
+  it.each([
+    ["iot/v3/log/#", "mqttTopicLog"],
+    ["iot/+/log", "mqttTopicLog"],
+    ["#", "mqttTopicLog"],
+  ])("rejects %s as mqttTopicLog", (topic) => {
+    expect(() =>
+      validateConfig({ ...validConfig, mqttTopicLog: topic })
+    ).toThrow(
+      /mqttTopicLog must be an exact MQTT topic; wildcard filters \(\+ and #\) are not supported/
+    );
+  });
+
+  it.each([
+    ["iot/v3/health/#", "mqttTopicHealth"],
+    ["iot/+/health", "mqttTopicHealth"],
+    ["+", "mqttTopicHealth"],
+  ])("rejects %s as mqttTopicHealth", (topic) => {
+    expect(() =>
+      validateConfig({ ...validConfig, mqttTopicHealth: topic })
+    ).toThrow(
+      /mqttTopicHealth must be an exact MQTT topic; wildcard filters \(\+ and #\) are not supported/
+    );
+  });
+
+  it("still accepts plain exact topics", () => {
+    expect(() =>
+      validateConfig({
+        ...validConfig,
+        mqttTopicTelemetry: "iot/v3/telemetry",
+        mqttTopicLog: "iot/v3/log",
+        mqttTopicHealth: "iot/v3/health",
+      })
+    ).not.toThrow();
+  });
+
+  it("still enforces case-insensitive topic uniqueness alongside the wildcard check", () => {
+    // A duplicate that does NOT contain wildcards must still hit the
+    // uniqueness rule, not the wildcard rule.
+    expect(() =>
+      validateConfig({
+        ...validConfig,
+        mqttTopicTelemetry: "iot/v3/telemetry",
+        mqttTopicLog: "IOT/V3/TELEMETRY",
+      })
+    ).toThrow(/mqttTopicTelemetry and mqttTopicLog/i);
+  });
+});
+
 describe("sensorSourceValidCharsRegex constructibility (regression P2-1)", () => {
   // The value is escaped into a negated character class in the
   // PrometheusWriter constructor, which runs before index.ts's structured

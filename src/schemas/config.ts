@@ -32,13 +32,25 @@ export const configSchema = z.object({
         ),
     mqttTopicTelemetry: z.string({
         error: "mqttTopicTelemetry must be a string",
-    }).min(1, "mqttTopicTelemetry must not be empty"),
+    }).min(1, "mqttTopicTelemetry must not be empty")
+        .refine(
+            isExactMqttTopic,
+            "mqttTopicTelemetry must be an exact MQTT topic; wildcard filters (+ and #) are not supported"
+        ),
     mqttTopicLog: z.string({
         error: "mqttTopicLog must be a string",
-    }).min(1, "mqttTopicLog must not be empty").optional(),
+    }).min(1, "mqttTopicLog must not be empty")
+        .refine(
+            isExactMqttTopic,
+            "mqttTopicLog must be an exact MQTT topic; wildcard filters (+ and #) are not supported"
+        ).optional(),
     mqttTopicHealth: z.string({
         error: "mqttTopicHealth must be a string",
-    }).min(1, "mqttTopicHealth must not be empty").optional(),
+    }).min(1, "mqttTopicHealth must not be empty")
+        .refine(
+            isExactMqttTopic,
+            "mqttTopicHealth must be an exact MQTT topic; wildcard filters (+ and #) are not supported"
+        ).optional(),
     sensorSourceMaxLength: z.number({
         error: "sensorSourceMaxLength must be a number",
     }).int("sensorSourceMaxLength must be an integer")
@@ -107,6 +119,21 @@ export const configSchema = z.object({
         }
     }
 });
+
+/**
+ * Configured MQTT topics must be EXACT topics, not subscription filters.
+ * MqttNetworking.on_message routes delivered messages by comparing the
+ * topic string for case-folded equality against the configured values —
+ * it does not (and should not) implement MQTT wildcard matching. A
+ * filter like "iot/v3/health/#" would subscribe fine at the broker, but
+ * a delivery to "iot/v3/health/soil-1" would never equal the configured
+ * value and would fall through to another route, misclassified or
+ * dropped. Rejecting + and # at validation time makes the supported
+ * contract fail fast instead of silently mis-routing.
+ */
+export function isExactMqttTopic(value: string): boolean {
+    return !value.includes("+") && !value.includes("#");
+}
 
 function isValidPort(port: string): boolean {
     if (!/^\d{1,5}$/.test(port)) {

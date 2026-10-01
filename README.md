@@ -2,7 +2,7 @@
 
 Series 2 — Sensor Telemetry Services
 
-**Release:** Iron Falcon — firmware 4.0.3.
+**Release:** Iron Falcon — firmware 4.0.4.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -153,7 +153,7 @@ forwardSensorLogsLevel: debug
 
 ### Strict Configuration Validation
 
-The configuration schema is strict: unknown keys fail validation with an `Unrecognized key` error instead of being silently discarded. This applies at startup and to `/write-config` and `/reload-config` alike. A misspelled optional key (e.g. `forwardSensorLog` for `forwardSensorLogs`) therefore fails loudly rather than booting the service on the default the operator did not ask for. If an obsolete key remains in a deployed `config.yml` after an upgrade, remove it before starting the service. The three MQTT topics (`mqttTopicTelemetry`, `mqttTopicLog`, `mqttTopicHealth`) must also be unique when compared case-insensitively: incoming messages are routed by case-folded topic, so two configured topics that differ only in case are distinct to the broker but identical to the router, and one would silently shadow the other.
+The configuration schema is strict: unknown keys fail validation with an `Unrecognized key` error instead of being silently discarded. This applies at startup and to `/write-config` and `/reload-config` alike. A misspelled optional key (e.g. `forwardSensorLog` for `forwardSensorLogs`) therefore fails loudly rather than booting the service on the default the operator did not ask for. If an obsolete key remains in a deployed `config.yml` after an upgrade, remove it before starting the service. The three MQTT topics (`mqttTopicTelemetry`, `mqttTopicLog`, `mqttTopicHealth`) must be exact topics — the schema rejects MQTT wildcard filter characters `+` and `#` — and must be unique when compared case-insensitively: incoming messages are routed by case-folded topic equality against the configured values (no wildcard matching), so a configured filter like `iot/v3/health/#` would subscribe fine at the broker yet never match a delivery to `iot/v3/health/soil-1`, and two configured topics that differ only in case would silently shadow each other.
 
 ## Environment Variables
 
