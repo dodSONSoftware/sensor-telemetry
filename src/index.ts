@@ -79,60 +79,12 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   // get api port (for logging)
   const apiPort = config.apiPort;
 
-  try {
-    // Wait for Prometheus server to be ready
-    const maxWaitMs = 5000;
-    const waitInterval = 100;
-    let elapsed = 0;
-    while (!networking.prometheus_server_ready() && elapsed < maxWaitMs) {
-      await new Promise((resolve) => setTimeout(resolve, waitInterval));
-      elapsed += waitInterval;
-    }
-
-    if (!networking.prometheus_server_ready()) {
-      appLogger.write_error(
-        "index.ts/prometheusStartupFailed",
-        "Prometheus server failed to start within timeout",
-        {
-          event: "prometheus_startup_failed",
-          logType: "service",
-          maxWaitMs,
-        }
-      );
-      process.exit(1);
-    }
-
-    appLogger.write_info("index.ts/applicationStarted", `${dude.about.name} v${dude.about.version} started.`, {
-      event: "application_started",
-      logType: "service",
-      version: dude.about.version,
-      apiPort,
-      mqttTopic: config.mqttTopicTelemetry,
-    });
-    appLogger.write_info("index.ts/listeningOnMqtt", `Listening on MQTT topic: ${config.mqttTopicTelemetry}`, {
-      event: "mqtt_subscription_started",
-      logType: "service",
-      mqttTopic: config.mqttTopicTelemetry,
-    });
-  } catch (err: unknown) {
-    // log error
-    appLogger.write_error(
-      "index.ts/startupError",
-      `Application startup failed: ${(err as Error).message}`,
-      {
-        event: "application_startup_failed",
-        logType: "service",
-        fatal: true,
-        exitCode: 1,
-        error: err,
-      }
-    );
-
-    // terminate application
-    process.exit(1);
-  }
-
   // **** graceful shutdown
+  // Wired up before the Prometheus readiness wait below so a stop signal
+  // arriving during that startup window (up to 5 s) is handled by the
+  // graceful close path instead of the platform's default termination.
+  // appLogger and networking are already constructed at this point, and
+  // networking.close() is safe to call before the HTTP server reports ready.
 
   const start_time = Date.now();
 
@@ -242,4 +194,57 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     );
     shutdown("unhandledRejection", 1);
   });
+
+  try {
+    // Wait for Prometheus server to be ready
+    const maxWaitMs = 5000;
+    const waitInterval = 100;
+    let elapsed = 0;
+    while (!networking.prometheus_server_ready() && elapsed < maxWaitMs) {
+      await new Promise((resolve) => setTimeout(resolve, waitInterval));
+      elapsed += waitInterval;
+    }
+
+    if (!networking.prometheus_server_ready()) {
+      appLogger.write_error(
+        "index.ts/prometheusStartupFailed",
+        "Prometheus server failed to start within timeout",
+        {
+          event: "prometheus_startup_failed",
+          logType: "service",
+          maxWaitMs,
+        }
+      );
+      process.exit(1);
+    }
+
+    appLogger.write_info("index.ts/applicationStarted", `${dude.about.name} v${dude.about.version} started.`, {
+      event: "application_started",
+      logType: "service",
+      version: dude.about.version,
+      apiPort,
+      mqttTopic: config.mqttTopicTelemetry,
+    });
+    appLogger.write_info("index.ts/listeningOnMqtt", `Listening on MQTT topic: ${config.mqttTopicTelemetry}`, {
+      event: "mqtt_subscription_started",
+      logType: "service",
+      mqttTopic: config.mqttTopicTelemetry,
+    });
+  } catch (err: unknown) {
+    // log error
+    appLogger.write_error(
+      "index.ts/startupError",
+      `Application startup failed: ${(err as Error).message}`,
+      {
+        event: "application_startup_failed",
+        logType: "service",
+        fatal: true,
+        exitCode: 1,
+        error: err,
+      }
+    );
+
+    // terminate application
+    process.exit(1);
+  }
 })();

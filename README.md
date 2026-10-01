@@ -2,7 +2,7 @@
 
 Series 1 — Sensor Telemetry Services
 
-**Release:** Iron Badger — firmware 3.0.11.
+**Release:** Iron Badger — firmware 3.0.12.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -428,7 +428,7 @@ Sanitization bounds each label *value* but not how many distinct values appear, 
 
 ## Graceful Shutdown
 
-The service handles SIGTERM and SIGINT signals gracefully. The close timeout is a single deadline for the **entire** shutdown path: the Prometheus HTTP connection drain and the MQTT disconnect share one budget, so the process settles within roughly that window even when an in-flight HTTP request (e.g. a stuck `/write-config` body) would otherwise hold the server's drain open indefinitely. If the drain outlives the deadline the wait is abandoned (the process is exiting anyway), and if the deadline is already exhausted the MQTT client is force-disconnected without waiting.
+The service handles SIGTERM and SIGINT signals gracefully. The signal handlers are registered **before** the startup wait for the Prometheus server to become ready, so a stop signal arriving during that startup window (rather than mid-serve) is also routed through the graceful close path instead of the platform's default immediate termination. The close timeout is a single deadline for the **entire** shutdown path: the Prometheus HTTP connection drain and the MQTT disconnect share one budget, so the process settles within roughly that window even when an in-flight HTTP request (e.g. a stuck `/write-config` body) would otherwise hold the server's drain open indefinitely. If the drain outlives the deadline the wait is abandoned (the process is exiting anyway), and if the deadline is already exhausted the MQTT client is force-disconnected without waiting.
 1. Shuts down Prometheus server (drain bounded by the shared deadline)
 2. Closes MQTT connection with whatever time the drain left on the deadline
 3. Logs uptime statistics
