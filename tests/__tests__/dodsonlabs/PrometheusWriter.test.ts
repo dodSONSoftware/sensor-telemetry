@@ -195,6 +195,11 @@ describe("PrometheusWriter", () => {
   let port: number;
   let configDir: string;
   let configSource: string;
+  // Stands in for the runtime (MqttNetworking.updateConfig) in production:
+  // every successful config commit is passed here, so the tests can
+  // observe the runtime's copy of the configuration. Inert for every test
+  // that does not assert on it.
+  let configChangeCallback: jest.Mock;
   let savedToken: string | undefined;
   let savedCorsOrigins: string | undefined;
 
@@ -224,10 +229,12 @@ describe("PrometheusWriter", () => {
     configSource = path.join(configDir, "config.yml");
 
     logger = createMockLogger();
+    configChangeCallback = jest.fn();
     writer = new PrometheusWriter(
       { ...baseConfig, apiPort: port } as z.infer<typeof configSchema>,
       logger,
-      configSource
+      configSource,
+      configChangeCallback
     );
     await until(() => writer.is_ready());
   });
@@ -315,6 +322,7 @@ describe("PrometheusWriter", () => {
       // this.config before the write would leave the process split-brain
       // (new memory, stale disk) even though the response reports 500.
       (write_file_yaml as unknown as jest.Mock).mockReturnValueOnce(false);
+      configChangeCallback.mockClear();
 
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
@@ -332,9 +340,16 @@ describe("PrometheusWriter", () => {
       const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
       expect(onDisk.logLevel).toBe("info");
 
+      // The runtime was never told about the failed write: the commit
+      // (and its callback) happens only after a successful persistence.
+      expect(configChangeCallback).not.toHaveBeenCalled();
+
       // The in-memory commit is observable through the next write: if the
       // failed request had already set this.config.logLevel to "warn", the
       // retry would see no level change and skip setLogLevel entirely.
+      // The retry succeeding is also the queue-recovery check: a failed
+      // write must not poison the serialization chain and block (or
+      // silently drop) subsequent writes.
       logger.setLogLevel.mockClear();
       const retry = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
@@ -345,6 +360,8 @@ describe("PrometheusWriter", () => {
       expect(retry.status).toBe(200);
       expect(retryResponse.success).toBe(true);
       expect(logger.setLogLevel).toHaveBeenCalledWith("warn");
+      expect(configChangeCallback).toHaveBeenCalledTimes(1);
+      expect(configChangeCallback.mock.calls.at(-1)![0].logLevel).toBe("warn");
 
       // Restore the "info" baseline the /reload-config tests depend on.
       const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
@@ -353,6 +370,7 @@ describe("PrometheusWriter", () => {
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
       });
       expect(restore.status).toBe(200);
+      expect(configChangeCallback.mock.calls.at(-1)![0].logLevel).toBe("info");
     });
 
     it("answers 413 for a body over the size cap without persisting anything", async () => {
@@ -500,6 +518,136 @@ describe("PrometheusWriter", () => {
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true }),
       });
       expect(restore.status).toBe(200);
+    });
+
+    it("leaves persisted, in-memory, and runtime config agreeing after concurrent writes", async () => {
+      // Regression: the whole write transaction (validate -> persist ->
+      // this.config -> callback) is serialized on the config write chain.
+      // Without it, two in-flight writes could interleave their persist
+      // and commit steps: the file would end at the last persist while
+      // this.config — and the runtime, updated through the callback —
+      // held the other request's config until a restart or /reload-config
+      // happened to restore the disk version.
+      configChangeCallback.mockClear();
+      (write_file_yaml as unknown as jest.Mock).mockClear();
+      const configA = { ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true };
+      const configB = { ...baseConfig, apiPort: port, logLevel: "warn", forwardSensorLogs: false };
+
+      const [resA, resB] = await Promise.all([
+        fetch(`http://127.0.0.1:${port}/write-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify(configA),
+        }),
+        fetch(`http://127.0.0.1:${port}/write-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify(configB),
+        }),
+      ]);
+      // Both requests complete; whichever the chain processed last wins.
+      expect(resA.status).toBe(200);
+      expect(resB.status).toBe(200);
+
+      // Both transactions committed to the runtime, exactly once each.
+      expect(configChangeCallback).toHaveBeenCalledTimes(2);
+
+      // State invariant: the file, what /read-config reports, and what the
+      // runtime received (the callback's last config — in production,
+      // MqttNetworking.updateConfig) all agree, field for field.
+      const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
+      const readRes = await fetch(`http://127.0.0.1:${port}/read-config`, {
+        headers: { Connection: "close" },
+      });
+      const readConfig = (await readRes.json()) as z.infer<typeof configSchema>;
+      const runtime = configChangeCallback.mock.calls.at(-1)![0] as z.infer<typeof configSchema>;
+      expect(runtime).toEqual(onDisk);
+      expect(runtime).toEqual(readConfig);
+
+      // Serialization: the configs the runtime was committed in are
+      // exactly the configs persisted to disk, in the same order — one
+      // write's commit steps never straddle another write's persist.
+      const persisted = (write_file_yaml as unknown as jest.Mock).mock.calls.map(
+        (call) => call[1]
+      );
+      const applied = configChangeCallback.mock.calls.map((call) => call[0]);
+      expect(applied).toEqual(persisted);
+      // Every committed config is one whole request, never a mix.
+      for (const config of applied) {
+        const isA = config.forwardSensorLogs === true;
+        const isB = config.forwardSensorLogs === false;
+        expect(isA || isB).toBe(true);
+        expect(config.logLevel).toBe(isA ? "info" : "warn");
+      }
+
+      // Restore the baseline the /reload-config tests depend on.
+      const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true }),
+      });
+      expect(restore.status).toBe(200);
+    });
+  });
+
+  describe("config write chain (serialization mechanism)", () => {
+    // Drive the private queue directly with controlled promises: the HTTP
+    // path's transactions are synchronous today, so this pins the
+    // serialization property deterministically — each queued transaction
+    // runs to completion before the next starts, even one that yields
+    // mid-transaction — instead of relying on probabilistic socket
+    // interleaving.
+    function queueConfigWrite(transaction: () => Promise<void>): void {
+      (
+        writer as unknown as { queueConfigWrite(t: () => Promise<void>): void }
+      ).queueConfigWrite(transaction);
+    }
+
+    it("runs each queued transaction to completion before starting the next, even when one yields mid-transaction", async () => {
+      const steps: string[] = [];
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+
+      queueConfigWrite(async () => {
+        steps.push("first-persist");
+        await gate;
+        steps.push("first-commit");
+      });
+      queueConfigWrite(async () => {
+        steps.push("second-persist");
+        steps.push("second-commit");
+      });
+
+      // Let the first transaction start and hit the gate.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(steps).toEqual(["first-persist"]);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // The first commit completed before the second transaction even
+      // started: the WHOLE transaction is serialized, not just the file
+      // write. Without the chain the order would be
+      // first-persist, second-persist, second-commit, first-commit.
+      expect(steps).toEqual([
+        "first-persist",
+        "first-commit",
+        "second-persist",
+        "second-commit",
+      ]);
+    });
+
+    it("keeps the queue alive after a transaction fails, so the next write still runs", async () => {
+      const steps: string[] = [];
+
+      queueConfigWrite(async () => {
+        throw new Error("boom");
+      });
+      queueConfigWrite(async () => {
+        steps.push("after-failure");
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(steps).toEqual(["after-failure"]);
     });
   });
 

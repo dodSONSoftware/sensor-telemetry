@@ -74,6 +74,14 @@ export class PrometheusWriter {
     // ---- config storage for read/write/reload endpoints
     private config: z.infer<typeof configSchema>;
     private configSource: string;
+    // ---- serialized /write-config transactions. Each write appends its
+    // full transaction (validate -> persist -> this.config -> callback) to
+    // this chain and the next write starts only after it completes: the
+    // atomic temp-file + rename covers the file, not the commit steps, so
+    // without serialization two in-flight writes could interleave persist
+    // and commit and leave the file at one config while this.config — and
+    // the runtime, updated through the callback — holds the other's.
+    private configWriteChain: Promise<void> = Promise.resolve();
     // ---- system start date
     private startDate: string;
     // ---- MQTT networking reference for health checks
@@ -817,54 +825,15 @@ export class PrometheusWriter {
             }
             chunks.push(chunk);
         });
-        req.on("end", async () => {
+        req.on("end", () => {
             if (rejected) return;
-            try {
-                const body = Buffer.concat(chunks).toString("utf8");
-                const newConfigRaw = JSON.parse(body);
-                const validatedConfig = validateConfig(newConfigRaw);
-
-                // Extract old and new log levels
-                const oldLogLevel = this.config.logLevel;
-                const newLogLevel = validatedConfig.logLevel;
-
-                // Persist before committing: the on-disk file is the
-                // authoritative config (/read-config and /reload-config both
-                // read it), so a failed write must leave every in-memory
-                // copy untouched. Committing this.config first would split
-                // the process (new memory, stale disk) even though the
-                // response reports 500.
-                const writeSuccess = write_file_yaml(this.configSource, validatedConfig, this.logger);
-                if (!writeSuccess) {
-                    this.sendJson(res, 500, {
-                        success: false,
-                        message: "Failed to persist configuration; no changes were applied"
-                    });
-                    return;
-                }
-
-                // Disk write succeeded — commit the runtime state.
-                this.config = { ...validatedConfig };
-
-                // Apply log level change if it differs
-                this.applyLogLevelChange(oldLogLevel, newLogLevel);
-
-                // Notify callback of config change
-                if (this.configChangeCallback) {
-                    this.configChangeCallback(validatedConfig);
-                }
-
-                this.sendJson(res, 200, {
-                    success: true,
-                    message: "Configuration updated successfully"
-                });
-            } catch (error) {
-                const err = ensureError(error);
-                this.sendJson(res, 400, {
-                    success: false,
-                    message: err.message
-                });
-            }
+            // The body is bounded by the 'data' handler's size cap above,
+            // so this concatenation/decode is bounded. The write
+            // transaction itself is appended to the config write chain
+            // (queueConfigWrite) so concurrent requests run it one at a
+            // time, each to completion.
+            const body = Buffer.concat(chunks).toString("utf8");
+            this.queueConfigWrite(() => this.performConfigWrite(body, res));
         });
 
         // A client that vanishes mid-body (aborted fetch, dropped TCP) makes
@@ -913,6 +882,89 @@ export class PrometheusWriter {
             );
             endWithFailure();
         });
+    }
+
+    /**
+     * Append a configuration write transaction to the serialization
+     * chain. Each transaction runs to completion before the next one
+     * starts, so one /write-config's persist/commit/callback steps can
+     * never interleave with another's.
+     *
+     * The chain itself never rejects: a failed transaction is already
+     * reported to its own HTTP response inside performConfigWrite, and
+     * swallowing any rejection here keeps a single failed write from
+     * permanently poisoning the queue — a rejected chain would silently
+     * skip every later write's transaction while each still answered
+     * nothing.
+     */
+    private queueConfigWrite(transaction: () => Promise<void> | void): void {
+        this.configWriteChain = this.configWriteChain.then(async () => {
+            try {
+                await transaction();
+            } catch {
+                // See the note above: the rejection is handled by the
+                // transaction's own response path, so nothing to do here
+                // beyond keeping the chain alive for the next write.
+            }
+        });
+    }
+
+    /**
+     * Complete configuration write transaction: validate -> persist ->
+     * commit the in-memory config -> apply the runtime-effective keys ->
+     * notify the config change callback. Runs serialized on the config
+     * write chain (queueConfigWrite), preserving the persist-before-
+     * commit order: a failed persistence leaves this.config and the
+     * runtime untouched, and on success all three representations of the
+     * configuration (disk, in-memory, runtime) end up on the same config
+     * before the response goes out.
+     */
+    private async performConfigWrite(body: string, res: http.ServerResponse): Promise<void> {
+        try {
+            const newConfigRaw = JSON.parse(body);
+            const validatedConfig = validateConfig(newConfigRaw);
+
+            // Extract old and new log levels
+            const oldLogLevel = this.config.logLevel;
+            const newLogLevel = validatedConfig.logLevel;
+
+            // Persist before committing: the on-disk file is the
+            // authoritative config (/read-config and /reload-config both
+            // read it), so a failed write must leave every in-memory
+            // copy untouched. Committing this.config first would split
+            // the process (new memory, stale disk) even though the
+            // response reports 500.
+            const writeSuccess = write_file_yaml(this.configSource, validatedConfig, this.logger);
+            if (!writeSuccess) {
+                this.sendJson(res, 500, {
+                    success: false,
+                    message: "Failed to persist configuration; no changes were applied"
+                });
+                return;
+            }
+
+            // Disk write succeeded — commit the runtime state.
+            this.config = { ...validatedConfig };
+
+            // Apply log level change if it differs
+            this.applyLogLevelChange(oldLogLevel, newLogLevel);
+
+            // Notify callback of config change
+            if (this.configChangeCallback) {
+                this.configChangeCallback(validatedConfig);
+            }
+
+            this.sendJson(res, 200, {
+                success: true,
+                message: "Configuration updated successfully"
+            });
+        } catch (error) {
+            const err = ensureError(error);
+            this.sendJson(res, 400, {
+                success: false,
+                message: err.message
+            });
+        }
     }
 
     private async handleReloadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
