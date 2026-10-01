@@ -2,7 +2,7 @@
 
 Series 2 — Sensor Telemetry Services
 
-**Release:** Iron Falcon — firmware 4.0.9.
+**Release:** Iron Falcon — firmware 4.0.10.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -167,6 +167,8 @@ CORS is a browser-side policy, not authentication: it controls which cross-origi
 ## Configuration API Security Model
 
 The HTTP configuration API (`/write-config` and `/reload-config`) is intended for deployment on a trusted private network.
+
+`/read-config` is intentionally readable without the configuration token: the current strict configuration schema carries no secret-bearing fields, so there is nothing to protect. If secret-bearing configuration fields are introduced in the future, `/read-config` must redact them or become authenticated.
 
 When `SENSOR_TELEMETRY_CONFIG_TOKEN` is not configured, those endpoints do not require authentication. This is an intentional trust decision, not a defect: the service is deployed on a private LAN with no external exposure.
 
