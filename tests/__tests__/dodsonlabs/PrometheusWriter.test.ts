@@ -10,6 +10,7 @@ import path from "path";
 import * as yaml from "js-yaml";
 import { register } from "prom-client";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
+import { validateConfig } from "../../../src/schemas/config";
 import { write_file_yaml } from "../../../src/dodsonlabs/SystemFunctions";
 import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
@@ -350,6 +351,153 @@ describe("PrometheusWriter", () => {
         method: "POST",
         headers: { "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
+      });
+      expect(restore.status).toBe(200);
+    });
+
+    it("answers 413 for a body over the size cap without persisting anything", async () => {
+      (write_file_yaml as unknown as jest.Mock).mockClear();
+      const diskBefore = fs.readFileSync(configSource, "utf8");
+
+      // A valid config is < 2 KiB; pad the body well past the 64 KiB cap
+      // so the rejection happens mid-stream before the 'end' handler.
+      const oversized = {
+        ...baseConfig,
+        apiPort: port,
+        pad: "x".repeat(64 * 1024),
+      };
+      const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify(oversized),
+      });
+      const response = (await res.json()) as { success: boolean; message: string };
+
+      // The response terminates correctly with 413 and a failure body.
+      expect(res.status).toBe(413);
+      expect(response.success).toBe(false);
+      expect(response.message).toContain("65536");
+
+      // No partial write: the persisted config is byte-identical and the
+      // write helper never ran, so neither the in-memory nor the on-disk
+      // config changed.
+      expect(fs.readFileSync(configSource, "utf8")).toBe(diskBefore);
+      expect(write_file_yaml).not.toHaveBeenCalled();
+
+      // The rejection is audited with a bounded warning.
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "config_body_too_large"
+        )
+      ).toBe(true);
+
+      // The endpoint still serves a normal write afterward.
+      const retry = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
+      });
+      expect(retry.status).toBe(200);
+    });
+
+    it("does not commit configuration when the client disconnects mid-body", async () => {
+      (write_file_yaml as unknown as jest.Mock).mockClear();
+      const diskBefore = fs.readFileSync(configSource, "utf8");
+
+      // Declare a large Content-Length, send only a partial (invalid)
+      // body, then destroy the socket: the request stream emits
+      // 'aborted'/'error' instead of 'end', so the handler must never
+      // parse or persist the partial body.
+      await new Promise<void>((resolve) => {
+        const socket = net.connect(port, "127.0.0.1", () => {
+          socket.write(
+            "POST /write-config HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Content-Type: application/json\r\n" +
+              "Content-Length: 4096\r\n" +
+              "\r\n"
+          );
+          socket.write('{"logLevel":"info","apiPort":');
+          socket.destroy();
+        });
+        // The local side of destroy can surface ECONNRESET; the point of
+        // the test is what the SERVER did, not the local socket outcome.
+        socket.on("error", () => undefined);
+        // Give the server time to process the reset and (not) commit.
+        setTimeout(resolve, 300);
+      });
+
+      // No commit: the write helper never ran and the file is untouched —
+      // no temporary partial configuration replaced the target.
+      expect(write_file_yaml).not.toHaveBeenCalled();
+      expect(fs.readFileSync(configSource, "utf8")).toBe(diskBefore);
+      // No stray temp files in the config directory.
+      expect(fs.readdirSync(configDir)).toEqual(["config.yml"]);
+
+      // The audit warning fired (aborted or error path, either is the
+      // expected handling on this runtime).
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) =>
+            call[2]?.event === "config_request_aborted" ||
+            call[2]?.event === "config_request_error"
+        )
+      ).toBe(true);
+
+      // No unhandled rejection took the process down: the endpoint still
+      // answers a normal request.
+      const after = await fetch(`http://127.0.0.1:${port}/read-config`, {
+        headers: { Connection: "close" },
+      });
+      expect(after.status).toBe(200);
+    });
+
+    it("resolves concurrent writes to one complete valid config, never a mix", async () => {
+      // Two concurrent POSTs with different valid configs. Each write is
+      // atomic (unique temp file + rename), so the on-disk file must end
+      // as exactly one complete request, never a field-by-field mix.
+      const configA = { ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true };
+      const configB = { ...baseConfig, apiPort: port, logLevel: "warn", forwardSensorLogs: false };
+
+      const [resA, resB] = await Promise.all([
+        fetch(`http://127.0.0.1:${port}/write-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify(configA),
+        }),
+        fetch(`http://127.0.0.1:${port}/write-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify(configB),
+        }),
+      ]);
+
+      // Both requests complete: they serialize on the atomic write.
+      expect(resA.status).toBe(200);
+      expect(resB.status).toBe(200);
+
+      // The file is valid YAML, passes the schema, and is one whole
+      // request or the other — logLevel and forwardSensorLogs agree.
+      const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
+      expect(() => validateConfig(onDisk)).not.toThrow();
+      const isA = onDisk.forwardSensorLogs === true;
+      const isB = onDisk.forwardSensorLogs === false;
+      expect(isA || isB).toBe(true);
+      if (isA) {
+        expect(onDisk.logLevel).toBe("info");
+      } else {
+        expect(onDisk.logLevel).toBe("warn");
+      }
+      expect(onDisk.mqttTopicTelemetry).toBe(baseConfig.mqttTopicTelemetry);
+
+      // No temp files remain.
+      expect(fs.readdirSync(configDir)).toEqual(["config.yml"]);
+
+      // Restore the baseline the /reload-config tests depend on.
+      const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Connection: "close" },
+        body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true }),
       });
       expect(restore.status).toBe(200);
     });
