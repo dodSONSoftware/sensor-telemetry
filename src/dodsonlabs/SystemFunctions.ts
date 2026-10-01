@@ -4,6 +4,7 @@
  */
 
 import fs from "fs";
+import { randomUUID } from "crypto";
 import { ILogger, LogLevel } from "./Interfaces";
 import type { JsonObject } from "./Interfaces";
 import * as yaml from "js-yaml";
@@ -183,7 +184,11 @@ export function read_file_yaml_first<T>(
  * renamed over the target. On POSIX filesystems the rename is atomic, so
  * during normal process execution readers and the next startup never
  * observe a partially replaced target: they see either the old contents
- * or the new ones, never a truncated file.
+ * or the new ones, never a truncated file. Each call uses its own
+ * temporary file (a per-call unique name), so concurrent calls on the
+ * same target cannot interleave through a shared temp path — one
+ * writer's partial write or failed cleanup cannot corrupt another
+ * writer's in-flight contents.
  *
  * This provides atomic replacement semantics, not durability across
  * sudden host power loss — the rename and the writes are not fsync'd, so
@@ -199,7 +204,13 @@ export function write_file_yaml(
   logger?: ILogger
 ): boolean {
   // Sibling in the same directory so the rename stays on one filesystem.
-  const tmpFile = `${filename}.tmp-${process.pid}`;
+  // The name is unique per call (pid + randomUUID), not just per process:
+  // concurrent writers (two in-flight /write-config requests) would
+  // otherwise share one temp file, letting one writer's partial write or
+  // failed cleanup corrupt the other writer's in-flight temp contents —
+  // which the rename could then promote over the target, or leave the
+  // on-disk and in-memory configs diverged.
+  const tmpFile = `${filename}.tmp-${process.pid}-${randomUUID()}`;
   try {
     const yamlStr = yaml.dump(data, {
       indent: 2,

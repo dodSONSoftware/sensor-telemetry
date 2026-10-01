@@ -6,6 +6,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import * as yaml from "js-yaml";
 import {
   boundForLog,
   buildSourceValidCharsRegex,
@@ -232,6 +233,97 @@ describe("write_file_yaml", () => {
 
     expect(result).toBe(false);
     expect(fs.readFileSync(file, "utf8")).toBe(original);
+    expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+
+  // Regression P2-1: the temp file name must be unique per call, not per
+  // process. Two calls that share a name (the old pid-only suffix) let one
+  // writer overwrite or clean up the other's in-flight temp file — the
+  // root of the diverged/inconsistent-config failures behind concurrent
+  // /write-config requests.
+  it("uses a distinct temp file per call (regression P2-1)", () => {
+    const file = path.join(workDir, "config.yml");
+    const realWrite = fs.writeFileSync as (...a: unknown[]) => unknown;
+    const tempPaths: string[] = [];
+    jest
+      .spyOn(fs, "writeFileSync")
+      .mockImplementation((...args: unknown[]) => {
+        const target = args[0] as string;
+        if (target.includes(".tmp-")) {
+          tempPaths.push(target);
+        }
+        return realWrite(...(args as [string, string, string]));
+      });
+
+    expect(write_file_yaml(file, { apiPort: 3400 })).toBe(true);
+    expect(write_file_yaml(file, { apiPort: 3401 })).toBe(true);
+
+    // Two calls, two distinct temp paths — a per-process name would make
+    // both equal `${file}.tmp-${process.pid}`.
+    expect(tempPaths).toHaveLength(2);
+    expect(new Set(tempPaths).size).toBe(2);
+    // ...and the second rename still lands cleanly with nothing left behind.
+    expect(fs.readFileSync(file, "utf8")).toContain("apiPort: 3401");
+    expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
+  });
+
+  // Regression P2-1, interleaved failure: two concurrent writers where the
+  // second one's temp write fails mid-flight (ENOSPC). The interleave is
+  // modelled by running the second call inside the first call's rename —
+  // the second writer is in flight when the first reaches its rename. With
+  // a shared temp name, the second writer's failed-write cleanup (unlink)
+  // removes the first writer's complete temp file, so the first writer's
+  // rename then fails with ENOENT and its contents are lost; with a
+  // per-call name the first writer promotes its own complete contents and
+  // only the second reports failure.
+  it("lets the first writer complete when a concurrent second writer fails mid-write (regression P2-1)", () => {
+    const file = path.join(workDir, "config.yml");
+    fs.writeFileSync(file, VALID_CONFIG_YAML, "utf8");
+
+    const configA = { apiPort: 3400, mqttTopicTelemetry: "iot/telemetry" };
+    const configB = { apiPort: 3500, mqttTopicTelemetry: "iot/telemetry" };
+    const enospc = new Error("no space left on device") as Error & {
+      code: string;
+    };
+    enospc.code = "ENOSPC";
+    // Capture the originals before spying: inside the mock implementations,
+    // the fs members are the mocks themselves.
+    const realWrite = fs.writeFileSync as (...a: unknown[]) => unknown;
+    const realRename = fs.renameSync as (...a: unknown[]) => unknown;
+    let secondAttempted = false;
+    let secondResult: boolean | undefined;
+    jest
+      .spyOn(fs, "writeFileSync")
+      .mockImplementation((...args: unknown[]) => {
+        // The second writer's temp write fails mid-flight; the first
+        // writer's real write (which happens before the second call is
+        // started) goes through.
+        const target = args[0] as string;
+        if (secondAttempted && target.includes(".tmp-")) {
+          throw enospc;
+        }
+        return realWrite(...(args as [string, string, string]));
+      });
+    jest
+      .spyOn(fs, "renameSync")
+      .mockImplementation((...args: unknown[]) => {
+        if (!secondAttempted) {
+          secondAttempted = true;
+          secondResult = write_file_yaml(file, configB);
+        }
+        return realRename(...(args as [string, string]));
+      });
+
+    const firstResult = write_file_yaml(file, configA);
+
+    // The first writer's complete contents are promoted to the target ...
+    expect(firstResult).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      yaml.dump(configA, { indent: 2, lineWidth: -1 })
+    );
+    // ...the second writer reports failure ...
+    expect(secondResult).toBe(false);
+    // ...and no temp files remain.
     expect(fs.readdirSync(workDir)).toEqual(["config.yml"]);
   });
 });
