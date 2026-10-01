@@ -1213,18 +1213,34 @@ export class PrometheusWriter {
 
         // air telemetry
         if (humidity !== undefined) {
-            this.prometheus_Gauge_AirHumidity!.set({ source: sanitized }, humidity);
-            this.logger.write_debug(
-                "prometheus/publishAirData",
-                `Set Air_Humidity gauge: ${humidity}`,
-                {
-                    event: "gauge_set",
-                    logType: "sensor",
-                    source: sanitized,
-                    gauge: "Air_Humidity",
-                    value: humidity,
-                }
-            );
+            if (humidity < 0 || humidity > 100) {
+                this.logger.write_warn(
+                    "prometheus/publishAirHumidityOutOfRange",
+                    `Source: ${sanitized}, humidity_percent out of physical range (${humidity}%), skipping Air_Humidity gauge`,
+                    {
+                        event: "telemetry_out_of_range",
+                        logType: "sensor",
+                        source: sanitized,
+                        field: "humidity_percent",
+                        value: humidity,
+                        minRange: 0,
+                        maxRange: 100,
+                    }
+                );
+            } else {
+                this.prometheus_Gauge_AirHumidity!.set({ source: sanitized }, humidity);
+                this.logger.write_debug(
+                    "prometheus/publishAirData",
+                    `Set Air_Humidity gauge: ${humidity}`,
+                    {
+                        event: "gauge_set",
+                        logType: "sensor",
+                        source: sanitized,
+                        gauge: "Air_Humidity",
+                        value: humidity,
+                    }
+                );
+            }
         }
         // NaN check (not undefined): SHT35 messages carry no pressure, and
         // writing NaN would poison the gauge for sources that do report it.
@@ -1264,12 +1280,11 @@ export class PrometheusWriter {
 
         this.logger.write_debug(
             "prometheus/publishAirComplete",
-            `Published all air metrics for source: ${sanitized}`,
+            `Processed air telemetry for source: ${sanitized}`,
             {
                 event: "metrics_published",
                 logType: "sensor",
                 source: sanitized,
-                metricsCount: 4, // temp, humidity, pressure, altitude
             }
         );
     }

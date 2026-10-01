@@ -925,6 +925,80 @@ describe("PrometheusWriter", () => {
       expect(metrics).toContain(`air_humidity{source="${source}"}`);
       expect(metrics).toContain(`air_altitude_ft{source="${source}"}`);
     });
+
+    it.each([
+      ["below-zero", -0.1],
+      ["above-hundred", 100.2],
+    ])(
+      "skips the humidity gauge when humidity_percent is %s",
+      async (_label, humidity) => {
+        const source = `gate-air-humidity-${humidity}`;
+        writer.publish_air(
+          {
+            air: {
+              temperature_c: 25,
+              humidity_percent: humidity,
+              pressure_pa: 100000,
+            },
+          },
+          source,
+          "1.0.0"
+        );
+
+        // Physically impossible humidity is audited as telemetry_out_of_range;
+        // only the humidity gauge is skipped — the rest of the message
+        // (temperature) is still published, matching the temperature
+        // out-of-range behavior.
+        expect(
+          logger.write_warn.mock.calls.some(
+            (call) =>
+              call[2]?.event === "telemetry_out_of_range" &&
+              call[2]?.field === "humidity_percent" &&
+              call[2]?.minRange === 0 &&
+              call[2]?.maxRange === 100
+          )
+        ).toBe(true);
+
+        const metrics = await getMetrics();
+        expect(metrics).not.toContain(`air_humidity{source="${source}"}`);
+        expect(metrics).toContain(`air_temperature{source="${source}"}`);
+      }
+    );
+
+    it.each([["zero", 0], ["hundred", 100]])(
+      "accepts the boundary humidity value %s",
+      async (_label, humidity) => {
+        const source = `gate-air-humidity-${humidity}`;
+        writer.publish_air(
+          { air: { temperature_c: 25, humidity_percent: humidity } },
+          source,
+          "1.0.0"
+        );
+
+        const metrics = await getMetrics();
+        expect(metrics).toContain(`air_humidity{source="${source}"}`);
+      }
+    );
+
+    it("logs the completion event without claiming a fixed metric count", async () => {
+      // SHT35-style payload: temperature and humidity only, no pressure or
+      // altitude. Only 2 gauges are published, so the old completion log's
+      // metricsCount: 4 / "Published all air metrics" was inaccurate.
+      const source = "gate-air-log-contract";
+      writer.publish_air(
+        { air: { temperature_c: 25, humidity_percent: 42 } },
+        source,
+        "1.0.0"
+      );
+
+      const completionCall = logger.write_debug.mock.calls.find(
+        (call) => call[2]?.event === "metrics_published" && call[2]?.source === source
+      );
+      expect(completionCall).toBeDefined();
+      expect(completionCall?.[2]).not.toHaveProperty("metricsCount");
+      expect(completionCall?.[1]).not.toMatch(/Published all air metrics/);
+      expect(completionCall?.[1]).toContain("Processed air telemetry for source");
+    });
   });
 
   describe("source label sanitization", () => {

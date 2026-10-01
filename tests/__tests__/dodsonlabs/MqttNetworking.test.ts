@@ -77,6 +77,44 @@ function createMockLogger(): MockLogger & ILogger {
   };
 }
 
+describe("MqttNetworking.connect options", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+    sensorSourceMaxLength: 30,
+    sensorSourceValidCharsRegex: "a-zA-Z0-9._-",
+  };
+
+  beforeEach(() => {
+    mockConnect.mockReset();
+    mockConnect.mockReturnValue(createMockMqttClient());
+  });
+
+  it("disables the mqtt library's built-in resubscribe", () => {
+    const logger = createMockLogger();
+    new MqttNetworking(baseConfig, logger);
+
+    // The app's on_connect() is the single owner of subscription: it
+    // subscribes every configured topic and their SUBACKs drive the
+    // subscription state /ready and the mqtt_subscription_active gauge
+    // report. Leaving the library default resubscribe: true in place
+    // would let the internal _resubscribe() replay on every reconnect on
+    // top of the app's own subscribe calls, sending one duplicate
+    // SUBSCRIBE per topic. A mocked client cannot reproduce the library's
+    // internal replay (a "subscribe called once" test would pass either
+    // way), so the regression guard asserts on the connect options
+    // themselves.
+    expect(mockConnect).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        resubscribe: false,
+      }),
+    );
+  });
+});
+
 describe("MqttNetworking.updateConfig restart-only key warning", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",

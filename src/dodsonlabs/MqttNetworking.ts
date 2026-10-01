@@ -102,6 +102,15 @@ export class MqttNetworking implements IMqttNetworking {
             clean: true,
             connectTimeout: 10000,
             reconnectPeriod: 5000,
+            // The application owns subscription establishment: on_connect()
+            // subscribes every configured topic and their SUBACK callbacks
+            // drive subscription_active (/ready and the
+            // mqtt_subscription_active gauge). MQTT.js defaults to
+            // resubscribe: true, which would replay the internal
+            // _resubscribe() on every reconnect on top of our on_connect(),
+            // sending a duplicate SUBSCRIBE per topic — disable it so the
+            // app is the single owner of resubscription.
+            resubscribe: false,
         });
 
         // ----
