@@ -27,8 +27,15 @@ describe("CONFIG_FILE_CANDIDATES", () => {
     expect(CONFIG_FILE_CANDIDATES[0]).toBe("/app/configs/config.yml");
   });
 
-  it("falls back to the repo-root config.yml for fresh clones (npm run dev)", () => {
-    expect(CONFIG_FILE_CANDIDATES).toContain("./config.yml");
+  it("tries the current working directory config before the build-output copy", () => {
+    expect(CONFIG_FILE_CANDIDATES.indexOf("./config.yml")).toBeLessThan(
+      CONFIG_FILE_CANDIDATES.indexOf("./dist/config.yml")
+    );
+    // The dist/ copy is the last resort, so an edited root config (not yet
+    // rebuilt) is never shadowed by a stale build snapshot.
+    expect(CONFIG_FILE_CANDIDATES[CONFIG_FILE_CANDIDATES.length - 1]).toBe(
+      "./dist/config.yml"
+    );
   });
 });
 
@@ -71,7 +78,10 @@ describe("read_file_yaml_first", () => {
     });
   });
 
-  it("prefers dist/config.yml over the root config when both exist (npm start)", () => {
+  it("prefers ./config.yml over a stale dist/config.yml when both exist (npm start)", () => {
+    // Regression: after `npm run build` the root config is copied to dist/,
+    // but editing the root config without rebuilding must take effect —
+    // the current config wins over the stale build snapshot.
     writeConfig(path.join(workDir, "dist"), "logLevel: debug");
     writeConfig(workDir);
 
@@ -80,8 +90,13 @@ describe("read_file_yaml_first", () => {
     );
 
     expect(result.error).toBeNull();
-    expect(result.source).toBe("./dist/config.yml");
-    expect(result.data).toEqual({ logLevel: "debug" });
+    expect(result.source).toBe("./config.yml");
+    expect(result.data).toEqual({
+      logLevel: "info",
+      apiPort: 3301,
+      mqttBrokerIpAddress: "127.0.0.1",
+      mqttTopicTelemetry: "iot/telemetry",
+    });
   });
 
   it("resolves from inside dist/ when the config was copied there (cd dist && node index.js)", () => {

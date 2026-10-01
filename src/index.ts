@@ -30,7 +30,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
 // **** start up code
 
 (async () => {
-  // read the configuration file (try container mount, then build output, then repo root)
+  // read the configuration file (try container mount, then current working directory, then build output)
   const configResult = read_file_yaml_first<z.infer<typeof configSchema>>(
     CONFIG_FILE_CANDIDATES
   );

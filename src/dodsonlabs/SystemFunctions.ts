@@ -93,13 +93,13 @@ export function read_file_yaml<T>(
 /**
  * Candidate locations for config.yml, tried in order:
  *  - /app/configs/config.yml — Docker container mount (see docker-compose.yml)
- *  - ./dist/config.yml       — build output (npm run build copies it there)
- *  - ./config.yml            — repo root, the single source of truth
+ *  - ./config.yml            — configuration for the current working directory
+ *  - ./dist/config.yml       — build-output fallback when running from repo root
  */
 export const CONFIG_FILE_CANDIDATES: string[] = [
   "/app/configs/config.yml",
-  "./dist/config.yml",
   "./config.yml",
+  "./dist/config.yml",
 ];
 
 /** Result of resolving a YAML file from a list of candidate paths. */
@@ -129,8 +129,7 @@ export interface ResolveYamlResult<T> {
  * candidate would let the service boot on a stale snapshot (e.g. a
  * previous build's dist/config.yml) that may point at a different broker
  * or topic. The check applies to every existing candidate, so a corrupted
- * source-of-truth ./config.yml is caught even when an earlier candidate
- * (dist/) is still valid.
+ * ./config.yml is caught even when the dist/ fallback is still valid.
  */
 export function read_file_yaml_first<T>(
   candidates: readonly string[],
