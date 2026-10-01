@@ -166,3 +166,131 @@ describe("Logger error serialization and secret redaction", () => {
     expect(error.stack).toMatch(/at /);
   });
 });
+
+describe("Logger printf-token messages keep structured metadata", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  /**
+   * Regression guard: when the message carries a winston printf token,
+   * the three-argument log(level, message, metadata) form routed the
+   * metadata through the SPLAT path and the JSON record lost it. Every
+   * test here asserts the message stays literal AND the structured fields
+   * survive.
+   */
+  async function captureRecord(
+    level: "info" | "warn" | "error",
+    originator: string,
+    message: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      // Call through the instance (not a detached method reference), so
+      // the write_* path keeps its `this`.
+      if (level === "warn") {
+        logger.write_warn(originator, message, metadata);
+      } else if (level === "error") {
+        logger.write_error(originator, message, metadata);
+      } else {
+        logger.write_info(originator, message, metadata);
+      }
+    });
+    return parseSingleLogLine(out);
+  }
+
+  function parseSingleLogLine(out: string): Record<string, unknown> {
+    const line = out.trim().split("\n").pop();
+    if (!line) {
+      throw new Error(`no log line captured (output: ${JSON.stringify(out)})`);
+    }
+    return JSON.parse(line);
+  }
+
+  it("keeps all structured metadata for a message containing %s", async () => {
+    const record = await captureRecord(
+      "info",
+      "module/function",
+      "Sanitized source 'a%sb'",
+      { event: "evt", source: "sensor-1" },
+    );
+
+    // The message is a literal string, not a printf template: nothing is
+    // interpolated into it.
+    expect(record.message).toBe("Sanitized source 'a%sb'");
+    expect(record.level).toBe("info");
+    expect(record.event).toBe("evt");
+    expect(record.source).toBe("sensor-1");
+    expect(record.module).toBe("module");
+    expect(record.function).toBe("function");
+    expect(record.logType).toBe("service");
+  });
+
+  it("keeps structured metadata for a forwarded-log-shaped message containing %d", async () => {
+    const record = await captureRecord(
+      "info",
+      "networking/logInfo",
+      '[sensor-1] {"body":"value=%d"}',
+      {
+        event: "evt",
+        logType: "sensor",
+        source: "sensor-1",
+        module: "firmware",
+        version: undefined,
+      },
+    );
+
+    expect(record.message).toBe('[sensor-1] {"body":"value=%d"}');
+    expect(record.level).toBe("info");
+    expect(record.event).toBe("evt");
+    expect(record.source).toBe("sensor-1");
+    expect(record.module).toBe("firmware");
+    expect(record.logType).toBe("sensor");
+    // version: undefined intentionally suppresses the defaultMeta version
+    // for forwarded sensor logs; it must stay suppressed.
+    expect(record.version).toBeUndefined();
+  });
+
+  it("keeps structured metadata for a message containing %%", async () => {
+    const record = await captureRecord(
+      "warn",
+      "module/function",
+      "humidity at 100%% of range",
+      { event: "evt", source: "sensor-2" },
+    );
+
+    expect(record.message).toBe("humidity at 100%% of range");
+    expect(record.level).toBe("warn");
+    expect(record.event).toBe("evt");
+    expect(record.source).toBe("sensor-2");
+    expect(record.module).toBe("module");
+    expect(record.function).toBe("function");
+    expect(record.logType).toBe("service");
+  });
+
+  it("produces the same effective fields as before for a token-free message", async () => {
+    const record = await captureRecord(
+      "info",
+      "module/function",
+      "an ordinary message",
+      { event: "evt", source: "sensor-3" },
+    );
+
+    expect(record.message).toBe("an ordinary message");
+    expect(record.level).toBe("info");
+    expect(record.event).toBe("evt");
+    expect(record.source).toBe("sensor-3");
+    expect(record.module).toBe("module");
+    expect(record.function).toBe("function");
+    expect(record.logType).toBe("service");
+    // defaultMeta merging is unchanged: service metadata is applied first
+    // and visible unless overridden.
+    expect(record.service).toBe("sensor-telemetry");
+    expect(typeof record.version).toBe("string");
+    expect(record.environment).toBe(process.env.NODE_ENV ?? "development");
+  });
+});

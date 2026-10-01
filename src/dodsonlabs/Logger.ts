@@ -224,7 +224,11 @@ export class Logger implements ILogger {
   public setLogLevel(level: string): boolean {
     const validatedLevel = validateLogLevel(level);
     if (validatedLevel === null) {
-      this.logger.warn("Invalid log level requested", {
+      // Route through the common write() path (the single ownership point
+      // for winston calls) rather than a direct this.logger.warn(), so a
+      // future printf token in the message cannot resurrect the splat
+      // metadata-loss path.
+      this.write("warn", "logger/setLogLevel", "Invalid log level requested", {
         event: "log_level_change_rejected",
         logType: "service",
         requestedLevel: level,
@@ -246,7 +250,7 @@ export class Logger implements ILogger {
       transport.level = validatedLevel.winstonLevel;
     }
 
-    this.logger.info("Log level changed", {
+    this.write("info", "logger/setLogLevel", "Log level changed", {
       event: "log_level_changed",
       logType: "service",
       previousLevel,
@@ -274,7 +278,25 @@ export class Logger implements ILogger {
       function: metadata?.function ?? normalizedOriginator.function,
     };
 
-    this.logger.log(level, message, finalMetadata);
+    // Write the fully-constructed info object directly instead of winston's
+    // three-argument log(level, message, metadata) form: when the message
+    // contains printf-style tokens (%s, %d, %j, %% ...), that form routes
+    // the extra arguments through winston's SPLAT path and DROPS the
+    // metadata object entirely (the pipeline deliberately has no
+    // format.splat() — these messages are literal strings, often untrusted
+    // MQTT content, not printf templates). logger.write() has no splat
+    // handling and keeps the message literal. It also does NOT merge
+    // defaultMeta (only the log() convenience form does), so spread it
+    // explicitly first — preserving the merge order the three-argument
+    // form used (defaultMeta applied first, finalMetadata overriding it,
+    // including forwarded sensor logs' `version: undefined` suppressing
+    // the default version field).
+    this.logger.write({
+      ...(this.logger.defaultMeta ?? {}),
+      ...finalMetadata,
+      level,
+      message,
+    });
   }
 
   public write_info(
