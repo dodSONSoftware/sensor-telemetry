@@ -10,6 +10,7 @@ import {
   ensureError,
   formatElapsedTime,
   read_file_yaml_first,
+  wait_for_prometheus,
 } from "./dodsonlabs/SystemFunctions";
 import { validateConfig, type configSchema } from "./schemas/config";
 import type { z } from "zod";
@@ -196,16 +197,33 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   });
 
   try {
-    // Wait for Prometheus server to be ready
+    // Wait for the Prometheus server to become ready. The wait is
+    // shutdown-aware (see wait_for_prometheus): the moment a shutdown is in
+    // flight — an operator stop signal OR a fatal error that began the close
+    // during this startup window — it bails out and defers to the shutdown
+    // path, which owns termination. Without this, close() clears the server's
+    // ready flag and the wait would run its full 5 s deadline and report a
+    // spurious prometheus_startup_failed + exit(1), masking a clean operator
+    // stop (exit 0) as a startup crash.
     const maxWaitMs = 5000;
     const waitInterval = 100;
-    let elapsed = 0;
-    while (!networking.prometheus_server_ready() && elapsed < maxWaitMs) {
-      await new Promise((resolve) => setTimeout(resolve, waitInterval));
-      elapsed += waitInterval;
+    const startupResult = await wait_for_prometheus(
+      () => networking.prometheus_server_ready(),
+      () => shuttingDown,
+      maxWaitMs,
+      waitInterval
+    );
+
+    if (startupResult === "shutdown") {
+      // A shutdown is already in flight and owns the exit (shutdown's finally
+      // calls process.exit). Return rather than racing it with our own
+      // process.exit: the close path cleared the ready flag, so logging a
+      // startup failure or exiting here would mislabel an intentional stop
+      // as a crash.
+      return;
     }
 
-    if (!networking.prometheus_server_ready()) {
+    if (startupResult === "timeout") {
       appLogger.write_error(
         "index.ts/prometheusStartupFailed",
         "Prometheus server failed to start within timeout",
@@ -218,6 +236,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
       process.exit(1);
     }
 
+    // startupResult === "ready": the server is up; startup succeeds.
     appLogger.write_info("index.ts/applicationStarted", `${dude.about.name} v${dude.about.version} started.`, {
       event: "application_started",
       logType: "service",

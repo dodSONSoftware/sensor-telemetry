@@ -460,3 +460,52 @@ export function formatElapsedTime(ms: number): string {
 }
 
 // **** process functions
+
+/**
+ * Outcome of the startup wait for the Prometheus server to become ready.
+ *
+ * - "ready"    — the server reported ready; startup proceeds.
+ * - "shutdown" — a shutdown is in flight (an operator stop signal or a
+ *                fatal error that began the close); termination is owned by
+ *                the shutdown path, so the caller must NOT report a startup
+ *                failure or call process.exit on its own.
+ * - "timeout"  — the deadline elapsed with no readiness and no shutdown;
+ *                the caller reports prometheus_startup_failed and exits 1.
+ */
+export type StartupWaitResult = "ready" | "shutdown" | "timeout";
+
+/**
+ * Poll until the Prometheus server reports ready, a shutdown is initiated,
+ * or the timeout elapses.
+ *
+ * The shutdown check comes first on purpose: the shutdown path's close()
+ * clears the server's ready flag, so a wait that polled readiness alone
+ * would run to its full deadline and report a spurious
+ * "prometheus_startup_failed" while an operator stop (exit 0) or a fatal
+ * error (exit 1) is already owning the exit. When a shutdown is in flight
+ * the wait bails out early and reports "shutdown", so the caller defers to
+ * the shutdown path instead of racing it with its own process.exit.
+ *
+ * isReady/isShuttingDown are injected as callbacks (rather than a networking
+ * object) so the wait is pure control flow, unit-testable without a live
+ * HTTP server or a real signal, and independent of MqttNetworking's shape.
+ */
+export async function wait_for_prometheus(
+  isReady: () => boolean,
+  isShuttingDown: () => boolean,
+  maxWaitMs: number = 5000,
+  waitIntervalMs: number = 100
+): Promise<StartupWaitResult> {
+  let elapsed = 0;
+  while (!isShuttingDown() && !isReady() && elapsed < maxWaitMs) {
+    await new Promise<void>((resolve) => setTimeout(resolve, waitIntervalMs));
+    elapsed += waitIntervalMs;
+  }
+  // Re-check shutdown after the loop (not just in the condition) so a
+  // shutdown that begins on the final iteration is still reported as
+  // "shutdown" rather than misread as a readiness "timeout".
+  if (isShuttingDown()) {
+    return "shutdown";
+  }
+  return isReady() ? "ready" : "timeout";
+}
