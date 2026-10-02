@@ -121,6 +121,17 @@ export class PrometheusWriter {
     // Prometheus identity (see resolveSourceLabel). Fallback labels
     // (unknown / unknown_source) are shared identities and never claimed.
     private readonly sourceLabelOwnership = new Map<string, string>();
+    // Labels of sources currently rejected by the cardinality cap, keyed by
+    // the resolved (bounded-length) label. One increment of
+    // sensor_sources_rejected_total per distinct rejected source per
+    // rejection episode — not per admitSource() call, since a single health
+    // message calls it once per gauge (17+ times) — so the counter counts
+    // a stable logical event. Reclaimable: admission deletes the entry.
+    // Bounded: cleared once it grows to 4× the cap (a hostile publisher
+    // minting fresh identities while the cap is full); a cleared source may
+    // then be counted again on its next message, which is the documented
+    // approximation that keeps memory bounded.
+    private readonly rejectedSources = new Set<string>();
     private readonly admittedFirmwareVersions = new Set<string>();
     // Warn-once latches: a rejected value is counted on every occurrence,
     // but the warning fires once per cap so a sustained flood stays a
@@ -1387,7 +1398,10 @@ export class PrometheusWriter {
      * A source whose resolved label would exceed the cap maps to the fixed
      * "unknown_source" fallback label and is counted in
      * sensor_sources_rejected_total instead of minting a new series. The
-     * warning fires once per cap; each rejection is counted.
+     * warning fires once per cap; the counter increments once per DISTINCT
+     * rejected source per rejection episode (tracked in rejectedSources —
+     * a single health message resolves the label 17+ times and must not
+     * count 17 times).
      *
      * Invariant: sourceLabelOwnership and admittedSources stay in
      * lockstep — a label is claimed only when it is admitted here and
@@ -1418,9 +1432,21 @@ export class PrometheusWriter {
             if (!PrometheusWriter.NON_EVICTABLE_SOURCES.has(label)) {
                 this.sourceLabelOwnership.set(label, source);
             }
+            // Admission ends any rejection episode for this label: a
+            // later re-rejection (after cap churn) counts again.
+            this.rejectedSources.delete(label);
             return label;
         }
-        this.prometheus_counter_sources_rejected?.inc();
+        if (!this.rejectedSources.has(label)) {
+            // First rejection of this label in the current episode: count
+            // the logical event once, however many label resolutions the
+            // rejected source's messages trigger.
+            if (this.rejectedSources.size >= this.sourceCardinalityCap * 4) {
+                this.rejectedSources.clear();
+            }
+            this.rejectedSources.add(label);
+            this.prometheus_counter_sources_rejected?.inc();
+        }
         if (!this.sourceCapExceededWarned) {
             this.sourceCapExceededWarned = true;
             this.logger.write_warn(
