@@ -199,10 +199,10 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
 
   it("warns again when an already-changed restart-only value is written a second time", () => {
     // updateConfig diffs the new config against the STARTUP baseline, not the
-    // last desired config (which this.configuration becomes after the first
-    // commit). The running process still holds the original startup value, so
-    // a second write of the same unapplied restart-only value must warn again
-    // — diffing against desired config would incorrectly report no change.
+    // last desired config. The running process still holds the original
+    // startup value, so a second write of the same unapplied restart-only
+    // value must warn again — diffing against desired config would
+    // incorrectly report no change.
     const logger = createMockLogger();
     const networking = new MqttNetworking(baseConfig, logger);
 

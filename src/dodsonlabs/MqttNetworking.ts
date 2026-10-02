@@ -70,8 +70,6 @@ export class MqttNetworking implements IMqttNetworking {
         configSource: string = "/app/configs/config.yml",
         configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void
     ) {
-        // save parameters
-        this.configuration = config;
         // Snapshot the restart-only values once at startup. These are the
         // values the RUNNING process actually uses (captured before any
         // /write-config or /reload-config can persist a different value),
@@ -105,7 +103,7 @@ export class MqttNetworking implements IMqttNetworking {
         this.mqtt_client = this.connect_to_mqtt_broker();
 
         // Create PrometheusWriter with callback (registered before server starts)
-        this.promWriter = new PrometheusWriter(this.configuration, this.logger, configSource, configChangeCallback);
+        this.promWriter = new PrometheusWriter(config, this.logger, configSource, configChangeCallback);
         this.promWriter.setMqttNetworking(this);
 
         // log-it
@@ -129,8 +127,6 @@ export class MqttNetworking implements IMqttNetworking {
     // ********
     // ******** PRIVATE PROPERTIES
 
-    private configuration: z.infer<typeof configSchema>;
-    // ----
     private mqtt_client: mqtt.MqttClient;
     private readonly logger: ILogger;
     private promWriter: PrometheusWriter;
@@ -158,14 +154,11 @@ export class MqttNetworking implements IMqttNetworking {
     // ----
     // Baseline values for the restart-only keys, captured once at
     // construction and immutable for the process lifetime. updateConfig
-    // diffs a new configuration's restart-only values against these — NOT
-    // against this.configuration, which tracks the latest DESIRED config
-    // after each commit — so a restart-required warning describes the
-    // difference from the value actually running in this process: repeating
-    // an unapplied value keeps the warning, and reverting a value back to
-    // the running one clears it. this.configuration keeps its current role
-    // as the latest desired/persisted config; these two states must not be
-    // conflated.
+    // diffs a new configuration's restart-only values against these, so a
+    // restart-required warning describes the difference from the values
+    // actually running in this process: repeating an unapplied value keeps
+    // the warning, and reverting a value back to the running one clears
+    // it.
     private readonly startupRestartOnlyConfig: Pick<
         z.infer<typeof configSchema>,
         RestartOnlyKey
@@ -426,16 +419,13 @@ export class MqttNetworking implements IMqttNetworking {
      */
     public updateConfig(newConfig: z.infer<typeof configSchema>): void {
         // Diff the new configuration's restart-only values against the STARTUP
-        // baseline, not this.configuration: the next line replaces
-        // this.configuration with the latest DESIRED config, so diffing
-        // against it would report no change when an unapplied restart-only
-        // value is written twice (the running process still holds the original
+        // baseline, not the latest desired config: diffing against desired
+        // would report no change when an unapplied restart-only value is
+        // written twice (the running process still holds the original
         // startup value, which is what the operator needs to be told).
         const restartOnlyChanged = RESTART_ONLY_KEYS.filter(
             (key) => !Object.is(this.startupRestartOnlyConfig[key], newConfig[key])
         );
-
-        this.configuration = { ...newConfig };
 
         // Update forward_sensor_logs settings
         this.forward_sensor_logs = newConfig.forwardSensorLogs !== undefined ? newConfig.forwardSensorLogs : true;
