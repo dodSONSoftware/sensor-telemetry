@@ -125,14 +125,16 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     shuttingDown = true;
     pendingExitCode = exitCode;
 
-    appLogger.write_info("index.ts/shutdown", `Received ${signal}. Starting graceful shutdown...`, {
-      event: "shutdown_initiated",
-      logType: "service",
-      signal,
-      exitCode,
-    });
-
     try {
+      // Inside the try so a throw here cannot skip the finally, which owns
+      // process.exit — a stop must terminate even if logging fails.
+      appLogger.write_info("index.ts/shutdown", `Received ${signal}. Starting graceful shutdown...`, {
+        event: "shutdown_initiated",
+        logType: "service",
+        signal,
+        exitCode,
+      });
+
       // Single 5 s deadline for the entire close path: the Prometheus HTTP
       // drain and the MQTT disconnect share one budget, so the shutdown is
       // bounded even when an in-flight HTTP request holds the drain open.
