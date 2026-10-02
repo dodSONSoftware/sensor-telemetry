@@ -4,3 +4,6 @@ coverage/
 *.log
 .DS_Store
 memory/
+# Local environment for docker-compose (SENSOR_TELEMETRY_CONFIG_TOKEN etc.) —
+# secrets must never be committed.
+.env

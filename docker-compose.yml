@@ -11,6 +11,11 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
+      # Shared secret protecting /write-config and /reload-config. Sourced
+      # from the local .env file (git-ignored — never commit it). When unset
+      # the config endpoints stay open and the service logs a warning at
+      # startup; set it in .env to enable the x-config-token check.
+      - SENSOR_TELEMETRY_CONFIG_TOKEN=${SENSOR_TELEMETRY_CONFIG_TOKEN}
       # Browser origins allowed to call the HTTP API cross-origin
       # (comma-separated, exact scheme://host:port matches). Omit or set to
       # * to allow all origins, the previous default. Does not replace
