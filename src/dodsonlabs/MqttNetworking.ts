@@ -399,7 +399,7 @@ export class MqttNetworking implements IMqttNetworking {
     // ****************************************************************
     // ******** MQTT HANDLER FUNCTIONS
 
-    private async on_connect(): Promise<void> {
+    private on_connect(): void {
         if (this.consecutive_connection_failures > 0) {
             // A failed attempt preceded this connect: surface the recovery
             // at INFO — an operator watching the logs should see the outage
@@ -645,12 +645,9 @@ export class MqttNetworking implements IMqttNetworking {
             }
         );
 
-        // Handling phase: a synchronous throw from a routed handler (the
-        // log and health handlers are sync; the telemetry handler's async
-        // rejections are owned by its own .catch below) is a processing
-        // failure, not a parse failure. The two catches are disjoint — an
-        // error either throws here or rejects in the telemetry .catch,
-        // never both — so no exception is logged twice.
+        // Handling phase: a synchronous throw from any routed handler is a
+        // processing failure, not a parse failure, and is caught exactly
+        // once here — no exception is logged twice.
         try {
             // Route message based on topic (case-insensitive comparison)
             if (this.mqtt_topic_log && topicLower === logTopicLower) {
@@ -678,18 +675,7 @@ export class MqttNetworking implements IMqttNetworking {
                     `Routing to telemetry handler`,
                     { event: "route_telemetry", logType: "sensor", topic }
                 );
-                this.handle_mqtt_message(json_doc).catch((error) => {
-                    this.logger.write_error(
-                        "networking/onMessage",
-                        `Error handling MQTT message: ${error}`,
-                        {
-                            event: "mqtt_message_handling_error",
-                            logType: "sensor",
-                            topic,
-                            error,
-                        }
-                    );
-                });
+                this.handle_mqtt_message(json_doc);
             }
         } catch (error) {
             this.logger.write_error(
@@ -747,7 +733,7 @@ export class MqttNetworking implements IMqttNetworking {
     // ****************************************************************
     // ******** PROCESSING MQTT MESSAGES
 
-    private async handle_mqtt_message(json_doc: JsonObject): Promise<void> {
+    private handle_mqtt_message(json_doc: JsonObject): void {
         // initialize
         // message_type is a scalar protocol field: proven scalar at the
         // boundary (a non-string value such as a nested array is treated as

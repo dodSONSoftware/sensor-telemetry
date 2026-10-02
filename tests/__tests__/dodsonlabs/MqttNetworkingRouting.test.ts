@@ -1818,7 +1818,7 @@ describe("error classification in on_message (regression P2-1)", () => {
     expect(allEvents).not.toContain("mqtt_message_missing_type");
   });
 
-  it("classifies a post-parse processing throw as a handling error only", async () => {
+  it("classifies a post-parse processing throw as a handling error only", () => {
     const { prom, logger, drive } = buildTelemetryDriver();
     // Simulate a processing failure: the (auto-mocked) publisher throws.
     prom.publish_water.mockImplementation(() => {
@@ -1831,9 +1831,9 @@ describe("error classification in on_message (regression P2-1)", () => {
       source: "tbl-err",
       payload: { temperature_c: 20 },
     });
-    // handle_mqtt_message is async, so the rejection (and its .catch log)
-    // land in a microtask after the synchronous drive returns.
-    await new Promise((resolve) => setImmediate(resolve));
+    // handle_mqtt_message is synchronous, so the throw is caught by the
+    // outer catch in on_message and the handling-error log lands before
+    // drive returns — no microtask flush needed.
 
     const handlingErrors = logger.write_error.mock.calls.filter(
       (call) => call[2]?.event === "mqtt_message_handling_error"

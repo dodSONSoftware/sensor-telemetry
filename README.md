@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.6.
+**Release:** Zinc Falcon — firmware 4.1.7.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -151,6 +151,30 @@ forwardSensorLogsLevel: debug
 | `staleSourceRemovalSecs` | Inactivity threshold (integer seconds, 0 = disabled, max 31536000): when set, a sweep timer removes all of a source's per-source series (readings + `sensor_health_*` + `sensor_last_seen_timestamp_seconds{source}`) once it has sent no accepted telemetry/health for longer. Eviction also frees the source's cardinality-cap slot. Runtime-updatable via `/write-config` / `/reload-config` (omitting the key re-disables). Sweep interval is threshold/2 clamped to 10-60s, so removal lags the threshold by up to one interval — set the threshold well above the longest expected reporting interval | disabled (0/absent) |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
+
+### Runtime vs Restart-Required Configuration
+
+`/write-config` and `/reload-config` validate and persist the **full** configuration, but only a subset of the keys takes effect on the running process. The rest are applied at the next restart:
+
+**Runtime-effective (applied immediately):**
+
+- `logLevel`
+- `forwardSensorLogs`
+- `forwardSensorLogsLevel`
+- `staleSourceRemovalSecs`
+
+**Restart-required (persisted now, applied on next restart):**
+
+- `mqttBrokerIpAddress`
+- `mqttTopicTelemetry`
+- `mqttTopicLog`
+- `mqttTopicHealth`
+- `apiPort`
+- `sensorSourceMaxLength`
+- `sensorSourceValidCharsRegex`
+- `sensorSourceCardinalityCap`
+
+When a restart-required key changes, the service logs a `configuration_restart_only_keys` warning naming the changed keys; until the restart, the running service keeps their previous values. `/endpoints` reports the same split in each configuration endpoint's description.
 
 ### Strict Configuration Validation
 
@@ -448,6 +472,8 @@ The service handles SIGTERM and SIGINT signals gracefully. The signal handlers a
 | `/read-config` | GET | Read current configuration |
 | `/write-config` | POST | Update configuration |
 | `/reload-config` | GET | Reload configuration from disk |
+
+Both persist the complete configuration but hot-apply only the runtime-effective keys — `logLevel`, `forwardSensorLogs`, `forwardSensorLogsLevel`, and `staleSourceRemovalSecs`. The remaining keys take effect on the next restart; see [Runtime vs Restart-Required Configuration](#runtime-vs-restart-required-configuration).
 
 ## License
 
