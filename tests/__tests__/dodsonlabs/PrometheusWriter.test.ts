@@ -803,6 +803,31 @@ describe("PrometheusWriter", () => {
       expect(verbs.get("/endpoints")).toBe("GET");
       expect(verbs.get("/write-config")).toBe("POST");
     });
+
+    it("documents staleSourceRemovalSecs in the /write-config contract (regression P3-1)", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/endpoints`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        endpoints: Array<{
+          route: string;
+          verb: string;
+          requestBody: string;
+          description: string;
+        }>;
+      };
+      // The strict schema accepts staleSourceRemovalSecs and it is applied
+      // at runtime by both /write-config and /reload-config, so the
+      // /endpoints contract must list it as an accepted, runtime-effective,
+      // non-negative integer with 0 = disabled.
+      const writeConfig = body.endpoints.find((e) => e.route === "/write-config");
+      expect(writeConfig).toBeDefined();
+      expect(writeConfig?.requestBody).toContain("staleSourceRemovalSecs");
+      expect(writeConfig?.requestBody).toContain("non-negative integer");
+      expect(writeConfig?.requestBody).toContain("0 = disabled");
+      expect(writeConfig?.description).toContain("staleSourceRemovalSecs");
+    });
   });
 
   describe("query-string routing", () => {
