@@ -265,6 +265,11 @@ export class MqttNetworking implements IMqttNetworking {
         return this.promWriter.is_ready();
     }
 
+    /** True once the Prometheus server reported a definitive listen failure. */
+    public prometheus_server_failed(): boolean {
+        return this.promWriter.listen_failed();
+    }
+
     /**
      * Shut down the MQTT client and the Prometheus HTTP server.
      * timeout_ms is a deadline for the ENTIRE close path — the HTTP

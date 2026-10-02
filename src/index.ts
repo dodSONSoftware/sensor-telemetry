@@ -199,18 +199,24 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   });
 
   try {
-    // Wait for the Prometheus server to become ready. The wait is
-    // shutdown-aware (see wait_for_prometheus): the moment a shutdown is in
-    // flight — an operator stop signal OR a fatal error that began the close
-    // during this startup window — it bails out and defers to the shutdown
-    // path, which owns termination. Without this, close() clears the server's
-    // ready flag and the wait would run its full 5 s deadline and report a
-    // spurious prometheus_startup_failed + exit(1), masking a clean operator
-    // stop (exit 0) as a startup crash.
+    // Wait for the Prometheus server to become ready. The wait is both
+    // shutdown-aware AND failure-aware (see wait_for_prometheus):
+    //   - the moment a shutdown is in flight — an operator stop signal OR a
+    //     fatal error that began the close during this startup window — it
+    //     bails out and defers to the shutdown path, which owns termination.
+    //     Without this, close() clears the server's ready flag and the wait
+    //     would run its full 5 s deadline and report a spurious
+    //     prometheus_startup_failed + exit(1), masking a clean operator stop
+    //     (exit 0) as a startup crash.
+    //   - the moment the server reports a definitive listen failure (e.g.
+    //     EADDRINUSE) it bails out and reports "failed", so a known-permanent
+    //     failure does not consume the full deadline or get misdiagnosed as a
+    //     slow start ("timeout").
     const maxWaitMs = 5000;
     const waitInterval = 100;
     const startupResult = await wait_for_prometheus(
       () => networking.prometheus_server_ready(),
+      () => networking.prometheus_server_failed(),
       () => shuttingDown,
       maxWaitMs,
       waitInterval
@@ -225,6 +231,26 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
       return;
     }
 
+    if (startupResult === "failed") {
+      // The server failed to listen definitively (EADDRINUSE/EACCES/...). The
+      // writer has already logged the actual error (prometheus_server_start_failed
+      // with the underlying ErrnoException); report the terminal decision here
+      // and exit. Distinguished from "timeout" — the server failed immediately,
+      // it did not merely take too long.
+      appLogger.write_error(
+        "index.ts/prometheusStartupFailed",
+        "Prometheus server failed to start (listen error); exiting",
+        {
+          event: "prometheus_startup_failed",
+          logType: "service",
+          cause: "listen_error",
+          fatal: true,
+          exitCode: 1,
+        }
+      );
+      process.exit(1);
+    }
+
     if (startupResult === "timeout") {
       appLogger.write_error(
         "index.ts/prometheusStartupFailed",
@@ -232,7 +258,10 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
         {
           event: "prometheus_startup_failed",
           logType: "service",
+          cause: "timeout",
           maxWaitMs,
+          fatal: true,
+          exitCode: 1,
         }
       );
       process.exit(1);

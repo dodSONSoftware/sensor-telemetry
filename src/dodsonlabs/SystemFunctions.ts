@@ -555,14 +555,22 @@ export function formatElapsedTime(ms: number): string {
  * Outcome of the startup wait for the Prometheus server to become ready.
  *
  * - "ready"    — the server reported ready; startup proceeds.
+ * - "failed"   — the server reported a definitive listen failure (e.g.
+ *                EADDRINUSE); the caller reports prometheus_startup_failed
+ *                (cause: listen_error) and exits 1. The underlying error is
+ *                already logged by the writer, so this branch need not repeat
+ *                it. Distinguishing this from "timeout" matters: the server
+ *                failed immediately and definitively, so it must not wait out
+ *                its deadline or be misdiagnosed as a slow start.
  * - "shutdown" — a shutdown is in flight (an operator stop signal or a
  *                fatal error that began the close); termination is owned by
  *                the shutdown path, so the caller must NOT report a startup
  *                failure or call process.exit on its own.
- * - "timeout"  — the deadline elapsed with no readiness and no shutdown;
- *                the caller reports prometheus_startup_failed and exits 1.
+ * - "timeout"  — the deadline elapsed with no readiness, no failure, and no
+ *                shutdown; the caller reports prometheus_startup_failed
+ *                (cause: timeout) and exits 1.
  */
-export type StartupWaitResult = "ready" | "shutdown" | "timeout";
+export type StartupWaitResult = "ready" | "failed" | "shutdown" | "timeout";
 
 /**
  * Poll until the Prometheus server reports ready, a shutdown is initiated,
@@ -576,26 +584,34 @@ export type StartupWaitResult = "ready" | "shutdown" | "timeout";
  * the wait bails out early and reports "shutdown", so the caller defers to
  * the shutdown path instead of racing it with its own process.exit.
  *
- * isReady/isShuttingDown are injected as callbacks (rather than a networking
- * object) so the wait is pure control flow, unit-testable without a live
- * HTTP server or a real signal, and independent of MqttNetworking's shape.
+ * isReady/hasFailed/isShuttingDown are injected as callbacks (rather than a
+ * networking object) so the wait is pure control flow, unit-testable without
+ * a live HTTP server or a real signal, and independent of MqttNetworking's
+ * shape.
  */
 export async function wait_for_prometheus(
   isReady: () => boolean,
+  hasFailed: () => boolean,
   isShuttingDown: () => boolean,
   maxWaitMs: number = 5000,
   waitIntervalMs: number = 100
 ): Promise<StartupWaitResult> {
   let elapsed = 0;
-  while (!isShuttingDown() && !isReady() && elapsed < maxWaitMs) {
+  // hasFailed() bails on a definitive listen failure just as shutdown does:
+  // once the server has failed to start it cannot become ready, so polling on
+  // to the deadline would only delay the (correct) exit and, worse, let the
+  // caller misreport the failure as a "timeout".
+  while (!isShuttingDown() && !hasFailed() && !isReady() && elapsed < maxWaitMs) {
     await new Promise<void>((resolve) => setTimeout(resolve, waitIntervalMs));
     elapsed += waitIntervalMs;
   }
   // Re-check shutdown after the loop (not just in the condition) so a
   // shutdown that begins on the final iteration is still reported as
-  // "shutdown" rather than misread as a readiness "timeout".
+  // "shutdown" rather than misread as a readiness "timeout". Shutdown takes
+  // priority over a failure because the shutdown path owns the exit (and the
+  // exit code); the wait must defer to it rather than race it.
   if (isShuttingDown()) {
     return "shutdown";
   }
-  return isReady() ? "ready" : "timeout";
+  return hasFailed() ? "failed" : isReady() ? "ready" : "timeout";
 }

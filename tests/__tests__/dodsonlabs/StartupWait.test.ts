@@ -32,7 +32,7 @@ describe("wait_for_prometheus", () => {
 
   it("returns 'ready' once the server reports ready", async () => {
     let ready = false;
-    const p = wait_for_prometheus(() => ready, () => false, 1000, 100);
+    const p = wait_for_prometheus(() => ready, () => false, () => false, 1000, 100);
     // The first poll sees the server not ready; it then sleeps. Flipping
     // ready before the next poll resolves the wait on that poll.
     ready = true;
@@ -42,12 +42,52 @@ describe("wait_for_prometheus", () => {
   });
 
   it("returns 'timeout' when the server never becomes ready and no shutdown starts", async () => {
-    const p = wait_for_prometheus(() => false, () => false, 1000, 100);
+    const p = wait_for_prometheus(() => false, () => false, () => false, 1000, 100);
     // Run past the 1 s deadline; with no shutdown and no readiness the wait
     // is the caller's signal to report a startup failure and exit 1.
     await jest.advanceTimersByTimeAsync(1100);
 
     await expect(p).resolves.toBe("timeout");
+  });
+
+  // Regression P3-1 (listen-failure variant): a definitive listen failure
+  // (e.g. EADDRINUSE) satisfies neither "ready" nor "shutdown", so a wait that
+  // only knew those two states would run its full deadline and report a
+  // spurious "timeout". With the hasFailed() predicate the wait must bail out
+  // early and report "failed", so index.ts can exit 1 without consuming the
+  // 5 s deadline and without misdiagnosing a known-permanent failure as a slow
+  // start.
+  it("returns 'failed' and bails early when the listen has already failed (regression P3-1)", async () => {
+    let failed = false;
+    let settled = false;
+    const p = wait_for_prometheus(() => false, () => failed, () => false, 5000, 100);
+    p.then(() => {
+      settled = true;
+    });
+
+    // The first poll runs; the server has not yet reported a failure.
+    await jest.advanceTimersByTimeAsync(100);
+    // The server's listen fails immediately; the writer's error handler flips
+    // the flag before the wait's next poll.
+    failed = true;
+    await jest.advanceTimersByTimeAsync(100);
+    await Promise.resolve();
+
+    // After only ~200ms of fake time — far short of the 5000ms deadline — the
+    // wait has settled. Had it treated the failure as a timeout it would still
+    // be pending here (settled === false), so this is what pins the early-bail.
+    expect(settled).toBe(true);
+    await expect(p).resolves.toBe("failed");
+  });
+
+  // A failure must not be masked as a shutdown: if the listen fails while a
+  // shutdown is simultaneously in flight, the wait defers to the shutdown path
+  // (which owns the exit code) rather than reporting "failed".
+  it("returns 'shutdown' when a failure and a shutdown are both in flight", async () => {
+    const p = wait_for_prometheus(() => false, () => true, () => true, 5000, 100);
+    await jest.advanceTimersByTimeAsync(100);
+
+    await expect(p).resolves.toBe("shutdown");
   });
 
   // Regression P3-1: an operator stop signal (SIGTERM) arrives during the
@@ -59,7 +99,7 @@ describe("wait_for_prometheus", () => {
   it("returns 'shutdown' and bails early when a stop signal arrives before the server is ready (regression P3-1)", async () => {
     let shuttingDown = false;
     let settled = false;
-    const p = wait_for_prometheus(() => false, () => shuttingDown, 5000, 100);
+    const p = wait_for_prometheus(() => false, () => false, () => shuttingDown, 5000, 100);
     p.then(() => {
       settled = true;
     });
@@ -86,7 +126,7 @@ describe("wait_for_prometheus", () => {
   // is in flight.
   it("returns 'shutdown' when a fatal error starts the close during the wait", async () => {
     let shuttingDown = false;
-    const p = wait_for_prometheus(() => false, () => shuttingDown, 5000, 100);
+    const p = wait_for_prometheus(() => false, () => false, () => shuttingDown, 5000, 100);
     // The fatal-error handler flips shuttingDown (and begins the close) before
     // the wait's next poll.
     shuttingDown = true;

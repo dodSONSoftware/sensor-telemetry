@@ -26,6 +26,12 @@ export class PrometheusWriter {
     private readonly prometheus_port: number;
     private server: http.Server | undefined;
     private _ready: boolean = false;
+    // Set once a server-level error fires (a definitive listen failure such as
+    // EADDRINUSE/EACCES). Unlike _ready it is never cleared: startup has
+    // permanently failed, and the startup wait must bail out immediately
+    // instead of running to its full deadline and reporting a spurious
+    // "timeout".
+    private _listenFailed: boolean = false;
     // ----
     private prometheus_Gauge_AirTemp: Gauge | undefined;
     private prometheus_Gauge_AirHumidity: Gauge | undefined;
@@ -493,6 +499,10 @@ export class PrometheusWriter {
 
         // handle listen errors (e.g., port already in use)
         this.server.on("error", (err: NodeJS.ErrnoException) => {
+            // Record the definitive failure so the startup wait can bail out
+            // now rather than waiting out its full deadline and misreporting a
+            // known-permanent failure as a timeout.
+            this._listenFailed = true;
             this.logger.write_error(
                 "prometheus/serverStartFailed",
                 `Prometheus server failed to start: ${err.message}`,
@@ -1592,6 +1602,16 @@ export class PrometheusWriter {
 
     is_ready(): boolean {
         return this._ready;
+    }
+
+    /**
+     * True once the HTTP server reported a definitive listen failure (e.g.
+     * EADDRINUSE). Analogous to is_ready() for the "startup permanently
+     * failed" state: the startup wait polls this to bail out early instead of
+     * treating a known failure as a slow start and reporting "timeout".
+     */
+    listen_failed(): boolean {
+        return this._listenFailed;
     }
 
     close(): Promise<void> {
