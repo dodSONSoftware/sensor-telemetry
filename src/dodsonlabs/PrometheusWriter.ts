@@ -4,7 +4,7 @@
  */
 
 import http from "http";
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import { register, Gauge, Counter } from "prom-client";
 import { createRequire } from "module";
 import { isJsonObject } from "./Interfaces";
@@ -111,6 +111,16 @@ export class PrometheusWriter {
     // cannot grow the Prometheus series set without bound.
     private readonly sourceCardinalityCap: number;
     private readonly admittedSources = new Set<string>();
+    // Label -> raw-source ownership: which raw MQTT source identity owns
+    // each admitted ordinary source label. Kept in lockstep with
+    // admittedSources (claimed when a label is admitted, freed by
+    // evictStaleSource), so it is bounded by sourceCardinalityCap and
+    // never grows with rejected sources. Sanitization is lossy, so
+    // distinct raw sources can collapse onto one sanitized label — this
+    // map is what keeps two distinct sensors from silently sharing a
+    // Prometheus identity (see resolveSourceLabel). Fallback labels
+    // (unknown / unknown_source) are shared identities and never claimed.
+    private readonly sourceLabelOwnership = new Map<string, string>();
     private readonly admittedFirmwareVersions = new Set<string>();
     // Warn-once latches: a rejected value is counted on every occurrence,
     // but the warning fires once per cap so a sustained flood stays a
@@ -1195,6 +1205,11 @@ export class PrometheusWriter {
         }
         this.sourceLastSeenTimes.delete(source);
         this.admittedSources.delete(source);
+        // Free the label's ownership in lockstep with the admission slot:
+        // a returning sensor is re-admitted (and re-claimed) normally, and
+        // the label can be claimed again instead of pinning its old owner
+        // for the process lifetime.
+        this.sourceLabelOwnership.delete(source);
         this.logger.write_warn(
             "prometheus/staleSourceRemoved",
             `Removing per-source series (including sensor_last_seen_timestamp_seconds) for source idle for ${ageSeconds}s (threshold ${this.staleSourceRemovalSecs}s)`,
@@ -1208,6 +1223,28 @@ export class PrometheusWriter {
         );
     }
 
+    // Unicode dash variants normalized to ASCII hyphen-minus so a source's
+    // identity stays consistent across logs and metrics.
+    private static readonly UNICODE_DASH_REGEX = /[‐-―−]/g;
+
+    /**
+     * The pure sanitization pipeline (Unicode dash normalization, invalid-
+     * character strip, truncation to MAX_SOURCE_LENGTH) WITHOUT the
+     * blank-source fallback and without logging: returns "" when nothing
+     * survives. The fallback and the logs live in sanitizeSource.
+     */
+    private sanitizeSourceCore(source: string): string {
+        if (!source) {
+            return "";
+        }
+        const normalized = source.replace(PrometheusWriter.UNICODE_DASH_REGEX, "-");
+        let sanitized = normalized.replace(this.VALID_CHARS, "");
+        if (sanitized.length > this.MAX_SOURCE_LENGTH) {
+            sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
+        }
+        return sanitized;
+    }
+
     /**
      * Sanitize source name for Prometheus gauge labels.
      * - Normalizes Unicode dashes to ASCII hyphens (preserves canonical source identity)
@@ -1218,35 +1255,22 @@ export class PrometheusWriter {
      * - Logs only when sanitization actually modifies the source beyond normalization
      */
     private sanitizeSource(source: string): string {
-        if (!source) {
-            return "unknown";
-        }
-
-        // Normalize common Unicode dash characters to ASCII hyphen-minus
-        // This ensures consistent source identity across logs and metrics
-        let normalized = source
-            .replace(/[‐-―−]/g, "-"); // Unicode dash variants
-
-        // Strip invalid characters, keeping only valid ones
-        let sanitized = normalized.replace(this.VALID_CHARS, "");
-
-        // Truncate if too long
-        if (sanitized.length > this.MAX_SOURCE_LENGTH) {
-            sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
-        }
+        const sanitized = this.sanitizeSourceCore(source);
 
         // A source composed entirely of invalid characters would otherwise
         // collapse to "" and collide with every other all-invalid source on
         // a single empty label. Warn (not debug) because this is a data
-        // collision that must be visible at the default log level.
+        // collision that must be visible at the default log level. For an
+        // all-invalid (or empty) source the dash normalization is a no-op,
+        // so `source` is exactly the normalized form the message shows.
         if (sanitized === "") {
             this.logger.write_warn(
                 "prometheus/sourceSanitized",
-                `Source '${truncateForLog(normalized)}' contains no valid characters — using 'unknown' label`,
+                `Source '${truncateForLog(source)}' contains no valid characters — using 'unknown' label`,
                 {
                     event: "sensor_source_sanitized",
                     logType: "sensor",
-                    originalSource: truncateForLog(normalized),
+                    originalSource: truncateForLog(source),
                     sanitizedSource: "unknown",
                 }
             );
@@ -1255,6 +1279,7 @@ export class PrometheusWriter {
 
         // Log only if sanitization actually modified the source (beyond normalization)
         // This prevents duplicate debug entries for no-op sanitizations
+        const normalized = source.replace(PrometheusWriter.UNICODE_DASH_REGEX, "-");
         if (sanitized !== normalized) {
             this.logger.write_debug(
                 "prometheus/sourceSanitized",
@@ -1272,22 +1297,128 @@ export class PrometheusWriter {
     }
 
     /**
-     * Admit a source as a Prometheus label value.
-     * sanitizeSource() bounds each value's length and charset but not the
-     * number of distinct values, so this additionally caps distinct admitted
-     * values at sourceCardinalityCap. A sanitized source that would exceed
-     * the cap maps to the fixed "unknown_source" fallback label and is
-     * counted in sensor_sources_rejected_total instead of minting a new
-     * series. The warning fires once per cap; each rejection is counted.
+     * Deterministic disambiguated label for a raw source whose sanitized
+     * form collides: the sanitized base, truncated to leave room, plus "-"
+     * and an 8-hex-character sha256 fingerprint of the raw source. Stable
+     * for the process lifetime (a pure function of the raw source — no
+     * mutable state), always within MAX_SOURCE_LENGTH, and distinct per
+     * raw source except for an effectively unreachable 8-hex fingerprint
+     * collision.
      */
-    private admitSource(source: string): string {
+    private disambiguatedSourceLabel(sanitized: string, source: string): string {
+        const suffix = createHash("sha256").update(source, "utf8").digest("hex").slice(0, 8);
+        const room = this.MAX_SOURCE_LENGTH - (suffix.length + 1);
+        return `${sanitized.slice(0, Math.max(0, room))}-${suffix}`;
+    }
+
+    /**
+     * Resolve a raw source to its Prometheus source label, preserving
+     * identity: one raw source always maps to the same label for the
+     * process lifetime, and two distinct raw sources never map to the same
+     * ordinary label.
+     *
+     * Sanitization is lossy (Unicode dash normalization, invalid-character
+     * strip, truncation), so distinct raw sources can collapse onto one
+     * sanitized form (soil@1 / soil#1 -> soil1; two long names that differ
+     * only past MAX_SOURCE_LENGTH), and a real source can even sanitize to
+     * a reserved fallback identity (a sensor literally named "unknown").
+     * The caller (admitSource) records which raw source owns each admitted
+     * label, and this method consults that ownership:
+     *
+     * - a source that sanitizes to nothing shares the "unknown" fallback
+     *   (the existing blank-source contract — deliberately merged, never
+     *   claimed, so blank churn cannot exhaust the ownership map),
+     * - a sanitized label already owned by the same raw source is reused,
+     * - a free, non-reserved sanitized label is returned as-is (the caller
+     *   claims ownership when it admits it),
+     * - otherwise (the label is owned by a DIFFERENT raw source, or it is a
+     *   reserved fallback identity that a real source sanitizes to) the
+     *   label is disambiguated deterministically — never silently merged.
+     */
+    private resolveSourceLabel(source: string): string {
         const sanitized = this.sanitizeSource(source);
-        if (this.admittedSources.has(sanitized)) {
+        if (this.sanitizeSourceCore(source) === "") {
+            // Blank source: every source that sanitizes to nothing shares
+            // the "unknown" fallback. It is never claimed as an identity
+            // (see admitSource), so a second distinct blank source reuses
+            // the same label instead of being misread as a collision.
+            return "unknown";
+        }
+        const owner = this.sourceLabelOwnership.get(sanitized);
+        if (owner === source) {
+            // The same raw source keeps the label it already owns: a label
+            // is stable for a raw source for the process lifetime.
             return sanitized;
         }
-        if (this.admittedSources.size < this.sourceCardinalityCap) {
-            this.admittedSources.add(sanitized);
+        if (owner === undefined && !PrometheusWriter.NON_EVICTABLE_SOURCES.has(sanitized)) {
             return sanitized;
+        }
+        // The sanitized label is already owned by a different raw source
+        // (lossy sanitization collapsed two distinct identities) or is a
+        // reserved fallback identity (unknown / unknown_source) that a real
+        // source would otherwise be indistinguishable from.
+        const disambiguated = this.disambiguatedSourceLabel(sanitized, source);
+        if (this.sourceLabelOwnership.get(disambiguated) === undefined) {
+            // First sighting of this disambiguation: a new distinct
+            // identity is appearing in the label space — make it visible
+            // at the default log level (a steady-state admitted source
+            // resolves through the owner === source branch above and stays
+            // silent).
+            this.logger.write_warn(
+                "prometheus/sourceCollision",
+                `Source '${truncateForLog(source)}' sanitizes to '${sanitized}', which is already in use by another source or is a reserved fallback label — using '${disambiguated}'`,
+                {
+                    event: "sensor_source_collision",
+                    logType: "sensor",
+                    originalSource: truncateForLog(source),
+                    sanitizedSource: sanitized,
+                    finalLabel: disambiguated,
+                }
+            );
+        }
+        return disambiguated;
+    }
+
+    /**
+     * Admit a source as a Prometheus label value.
+     * resolveSourceLabel() bounds each value's length and charset AND
+     * preserves raw-source identity (no silent collisions), and this
+     * additionally caps distinct admitted values at sourceCardinalityCap.
+     * A source whose resolved label would exceed the cap maps to the fixed
+     * "unknown_source" fallback label and is counted in
+     * sensor_sources_rejected_total instead of minting a new series. The
+     * warning fires once per cap; each rejection is counted.
+     *
+     * Invariant: sourceLabelOwnership and admittedSources stay in
+     * lockstep — a label is claimed only when it is admitted here and
+     * unclaimed exactly when evictStaleSource frees it. `owner === source`
+     * therefore implies the label is admitted, and the ownership map can
+     * never grow past the cardinality cap.
+     */
+    private admitSource(source: string): string {
+        const label = this.resolveSourceLabel(source);
+        const owner = this.sourceLabelOwnership.get(label);
+        if (owner === source) {
+            return label;
+        }
+        if (owner !== undefined) {
+            // A different raw source owns the resolved label — only
+            // reachable for an 8-hex fingerprint collision at the
+            // disambiguated level (effectively unreachable). Merging the
+            // two identities would be exactly the defect the ownership map
+            // exists to prevent, so fall back to the reserved label.
+            return "unknown_source";
+        }
+        if (this.admittedSources.size < this.sourceCardinalityCap) {
+            this.admittedSources.add(label);
+            // Reserved fallback labels are shared identities (every blank
+            // source maps to "unknown"): they consume a cap slot like any
+            // other label but are never claimed, so a second blank source
+            // reuses them instead of being misread as a collision.
+            if (!PrometheusWriter.NON_EVICTABLE_SOURCES.has(label)) {
+                this.sourceLabelOwnership.set(label, source);
+            }
+            return label;
         }
         this.prometheus_counter_sources_rejected?.inc();
         if (!this.sourceCapExceededWarned) {
@@ -1298,18 +1429,18 @@ export class PrometheusWriter {
                 {
                     event: "sensor_source_cap_exceeded",
                     logType: "audit",
-                    source: sanitized,
+                    source: label,
                     cap: this.sourceCardinalityCap,
                 }
             );
         }
         this.logger.write_debug(
             "prometheus/sourceRejected",
-            `Source '${sanitized}' rejected by cardinality cap, using 'unknown_source' label`,
+            `Source '${label}' rejected by cardinality cap, using 'unknown_source' label`,
             {
                 event: "sensor_source_rejected",
                 logType: "sensor",
-                source: sanitized,
+                source: label,
             }
         );
         return "unknown_source";

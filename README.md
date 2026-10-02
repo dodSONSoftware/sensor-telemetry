@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.9.
+**Release:** Zinc Falcon — firmware 4.1.10.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -451,6 +451,7 @@ Source names are sanitized before being used as Prometheus labels:
 1. Invalid characters are removed (based on `sensor-source-valid-chars-regex`)
 2. Names longer than `sensor-source-max-length` are truncated
 3. Sources that sanitize to an empty string (e.g. composed entirely of invalid characters) fall back to the `unknown` label, so distinct sources never collide on `source=""`
+4. Sanitization is lossy, so two *distinct* raw sources can collapse to the same sanitized form (e.g. `soil@1` and `soil#1` → `soil1`). To keep those sensors from merging into one series, the first admitted raw source keeps the plain label and a different raw source that sanitizes to the same form is deterministically disambiguated to `<sanitized>-<suffix>` — an 8-hex suffix derived from the original source, stable for the process lifetime and still within `sensorSourceMaxLength`. Each collision is logged once as a `sensor_source_collision` warning. The reserved fallback labels `unknown` / `unknown_source` are never claimed, so a real source named that way also gets a disambiguated label, and a stale-source eviction frees the label so it can be re-claimed
 
 Sanitization bounds each label *value* but not how many distinct values appear, so a distinct-value cap (`sensorSourceCardinalityCap`) bounds cardinality. Once the cap is reached, each new distinct source maps to the fixed `unknown_source` label (counted in `sensor_sources_rejected_total`) and each new distinct firmware version maps to `unknown_firmware` (counted in `sensor_firmware_versions_rejected_total`). This stops an MQTT publisher minting fresh random source or firmware values from growing the Prometheus series set without bound.
 
