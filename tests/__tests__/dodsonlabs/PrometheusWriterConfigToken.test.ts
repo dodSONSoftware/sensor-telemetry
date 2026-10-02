@@ -9,6 +9,7 @@ import os from "os";
 import path from "path";
 import * as yaml from "js-yaml";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
+import { LOG_VALUE_MAX_LENGTH } from "../../../src/dodsonlabs/SystemFunctions";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
@@ -202,6 +203,26 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
         message: "missing or invalid x-config-token",
       });
       expect(tokenRejectedWarns(logger)).toBe(true);
+    });
+
+    it("bounds the over-long request URL in the config_token_rejected audit log", async () => {
+      // The request path is untrusted input: the audit log applies the same
+      // log-size policy as the 404 audit path (and never the token value).
+      // The rejection itself is unaffected — still a 401.
+      logger.write_warn.mockClear();
+
+      const longQuery = "?" + "a".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const { status } = await get(`/reload-config${longQuery}`);
+
+      expect(status).toBe(401);
+      expect(tokenRejectedWarns(logger)).toBe(true);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "config_token_rejected"
+      );
+      expect(call).toBeDefined();
+      const fullUrl = `/reload-config${longQuery}`;
+      expect(call![2].url).toBe(fullUrl.slice(0, LOG_VALUE_MAX_LENGTH) + "…");
+      expect((call![2].url as string).length).toBe(LOG_VALUE_MAX_LENGTH + 1);
     });
 
     it("returns 401 when the token header has the wrong value", async () => {

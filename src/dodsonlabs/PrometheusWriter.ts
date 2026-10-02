@@ -301,6 +301,10 @@ export class PrometheusWriter {
             // Suppress logging for successful /metrics, /health, and /ready
             // requests (all are polled by orchestrators at high frequency)
             if (path !== "/metrics" && path !== "/health" && path !== "/ready") {
+                // The request URL is untrusted input: bound it for the log
+                // channel like every other untrusted value (the 404 audit
+                // path already does — this is the same policy applied to
+                // the debug log).
                 this.logger.write_debug(
                     "prometheus/httpRequest",
                     "HTTP request received",
@@ -308,7 +312,7 @@ export class PrometheusWriter {
                         event: "http_request_received",
                         logType: "service",
                         method: req.method || "UNKNOWN",
-                        url: req.url || "/",
+                        url: truncateForLog(req.url || "/"),
                     }
                 );
             }
@@ -561,7 +565,9 @@ export class PrometheusWriter {
                     event: "config_token_rejected",
                     logType: "audit",
                     method: req.method || "UNKNOWN",
-                    url: req.url || "/",
+                    // Untrusted request path, bounded like the 404 audit
+                    // path — never the token value itself.
+                    url: truncateForLog(req.url || "/"),
                     // The directly observed socket address, for operational
                     // forensics — no reverse DNS, no proxy-header trust.
                     // Never the token value itself.
@@ -725,8 +731,10 @@ export class PrometheusWriter {
                 event: "cors_origin_rejected",
                 logType: "audit",
                 method: req.method || "UNKNOWN",
-                url: req.url || "/",
-                origin: origin ?? "UNKNOWN",
+                // Both fields are untrusted request data, bounded like the
+                // 404 audit path — never the token value itself.
+                url: truncateForLog(req.url || "/"),
+                origin: origin === undefined ? "UNKNOWN" : truncateForLog(origin),
                 // The directly observed socket address, for operational
                 // forensics — no reverse DNS, no proxy-header trust.
                 remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",

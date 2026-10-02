@@ -969,6 +969,28 @@ describe("PrometheusWriter", () => {
       expect(loggedPath.length).toBe(LOG_VALUE_MAX_LENGTH + 1);
     });
 
+    it("bounds the over-long URL in the http_request_received debug log", async () => {
+      // The request URL is untrusted input: the debug log applies the same
+      // log-size policy as the 404 audit path. A well-formed route with a
+      // long query string is used so the request still succeeds — only the
+      // logged value is capped.
+      logger.write_debug.mockClear();
+
+      const longQuery = "?x=" + "a".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const res = await fetch(`http://127.0.0.1:${port}/read-config${longQuery}`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(200);
+      const call = logger.write_debug.mock.calls.find(
+        (c) => c[2]?.event === "http_request_received"
+      );
+      expect(call).toBeDefined();
+      const fullUrl = `/read-config${longQuery}`;
+      expect(call![2].url).toBe(fullUrl.slice(0, LOG_VALUE_MAX_LENGTH) + "…");
+      expect((call![2].url as string).length).toBe(LOG_VALUE_MAX_LENGTH + 1);
+    });
+
     it("normalizes a duplicated x-request-id header to a string, never an array", async () => {
       // Node's HTTP parser delivers a duplicated header as a single
       // comma-joined string, but the declared header type is
@@ -1239,6 +1261,37 @@ describe("PrometheusWriter", () => {
       const body = (await res.json()) as { success: boolean; message: string };
       expect(body.success).toBe(false);
       expect(body.message).toBe("origin not allowed");
+    });
+
+    it("bounds an over-long Origin and URL in the cors_origin_rejected audit log", async () => {
+      // Both are untrusted request data: the audit log applies the same
+      // log-size policy as the 404 audit path. The response is unaffected
+      // (still a 403 with no allow-origin header) — only the logged values
+      // are capped.
+      logger.write_warn.mockClear();
+
+      const longOrigin = "http://" + "a".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const longPath = "/write-config?" + "b".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const res = await fetch(`http://127.0.0.1:${port}${longPath}`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: longOrigin,
+          "Access-Control-Request-Method": "POST",
+          Connection: "close",
+        },
+      });
+
+      expect(res.status).toBe(403);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "cors_origin_rejected"
+      );
+      expect(call).toBeDefined();
+      expect(call![2].origin).toBe(longOrigin.slice(0, LOG_VALUE_MAX_LENGTH) + "…");
+      const fullUrl = longPath;
+      expect(call![2].url).toBe(fullUrl.slice(0, LOG_VALUE_MAX_LENGTH) + "…");
+      expect((call![2].url as string).length).toBe(LOG_VALUE_MAX_LENGTH + 1);
     });
 
     it("leaves non-browser requests (no Origin header) unaffected", async () => {
