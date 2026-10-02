@@ -996,7 +996,12 @@ export class MqttNetworking implements IMqttNetworking {
         // The source prefix and the JSON body are both untrusted, attacker-controlled
         // MQTT payload content — bound each so a hostile publisher cannot emit an
         // unbounded log entry (the body can be the entire forwarded payload object).
-        const logMessage = `[${sysFunc.truncateForLog(source)}] ${sysFunc.truncateForLog(JSON.stringify(message))}`;
+        // The body is structurally bounded (boundForLog) BEFORE serialization: a
+        // bare JSON.stringify of a deeply nested hostile payload exhausts the call
+        // stack (RangeError: Maximum call stack size exceeded) before the length
+        // cap below could ever apply. Bounding is lossy only past the caps — a
+        // small shallow body serializes byte-for-byte as before.
+        const logMessage = `[${sysFunc.truncateForLog(source)}] ${sysFunc.truncateForLog(JSON.stringify(sysFunc.boundForLog(message)))}`;
 
         // Build metadata from log data for Loki compatibility
         // Loki uses labels for indexing: source, module, function, level

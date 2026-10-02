@@ -126,11 +126,16 @@ export class PrometheusWriter {
     // sensor_sources_rejected_total per distinct rejected source per
     // rejection episode — not per admitSource() call, since a single health
     // message calls it once per gauge (17+ times) — so the counter counts
-    // a stable logical event. Reclaimable: admission deletes the entry.
+    // a stable logical event. It is also the warn-once state for the
+    // sensor_source_collision warning on cap-rejected sources: rejected
+    // sources never get ownership entries (sourceLabelOwnership's
+    // bounded-ownership invariant), so without this the collision warning
+    // would re-fire on every resolution of the same rejected source.
+    // Reclaimable: admission deletes the entry.
     // Bounded: cleared once it grows to 4× the cap (a hostile publisher
     // minting fresh identities while the cap is full); a cleared source may
-    // then be counted again on its next message, which is the documented
-    // approximation that keeps memory bounded.
+    // then be counted (and collision-warned) again on its next message,
+    // which is the documented approximation that keeps memory bounded.
     private readonly rejectedSources = new Set<string>();
     private readonly admittedFirmwareVersions = new Set<string>();
     // Warn-once latches: a rejected value is counted on every occurrence,
@@ -1399,12 +1404,26 @@ export class PrometheusWriter {
         // reserved fallback identity (unknown / unknown_source) that a real
         // source would otherwise be indistinguishable from.
         const disambiguated = this.disambiguatedSourceLabel(sanitized, source);
-        if (this.sourceLabelOwnership.get(disambiguated) === undefined) {
+        if (
+            this.sourceLabelOwnership.get(disambiguated) === undefined &&
+            !this.rejectedSources.has(disambiguated)
+        ) {
             // First sighting of this disambiguation: a new distinct
             // identity is appearing in the label space — make it visible
             // at the default log level (a steady-state admitted source
             // resolves through the owner === source branch above and stays
             // silent).
+            // Ownership alone cannot dedupe a CAP-REJECTED disambiguated
+            // label: rejected sources never receive ownership entries
+            // (the map's bounded-ownership invariant — see admitSource), so
+            // on a full cap every resolution of the same rejected source
+            // (a single health message calls admitSource 17+ times) would
+            // re-warn. rejectedSources already carries exactly those
+            // labels for the life of the rejection episode — cleared at
+            // 4× the cap, or ended by admission of the label — so the
+            // warning is episode-scoped like the rejection counter it
+            // dedupes alongside; the set stays bounded by the same
+            // strategy, no raw-source cache is introduced.
             this.logger.write_warn(
                 "prometheus/sourceCollision",
                 `Source '${truncateForLog(source)}' sanitizes to '${sanitized}', which is already in use by another source or is a reserved fallback label — using '${disambiguated}'`,

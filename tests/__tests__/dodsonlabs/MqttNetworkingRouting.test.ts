@@ -6,7 +6,11 @@
 import { MqttNetworking, MAX_MQTT_PAYLOAD_BYTES } from "../../../src/dodsonlabs/MqttNetworking";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
-import { LOG_VALUE_MAX_LENGTH } from "../../../src/dodsonlabs/SystemFunctions";
+import {
+  LOG_BOUND_DEPTH_MARKER,
+  LOG_BOUND_MAX_DEPTH,
+  LOG_VALUE_MAX_LENGTH,
+} from "../../../src/dodsonlabs/SystemFunctions";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
@@ -2023,6 +2027,79 @@ describe("deeply nested degraded_reasons (regression P2-1)", () => {
       expect(reason.length).toBeLessThanOrEqual(LOG_VALUE_MAX_LENGTH + 1);
       expect(reason).not.toContain("[".repeat(100));
     }
+  });
+});
+
+describe("deeply nested forwarded sensor-log body (regression P2-1)", () => {
+  // The forwarded log body was serialized with a bare JSON.stringify before
+  // its length was capped: a deeply nested hostile payload exhausts the call
+  // stack (RangeError: Maximum call stack size exceeded) before the cap can
+  // apply, so the message was dropped as mqtt_message_handling_error. The
+  // body is now structurally bounded (boundForLog) before serialization,
+  // like every other untrusted structured value in the log channel.
+  //
+  // ~5,000 levels of short-key nesting: deep enough for a bare
+  // JSON.stringify to throw, yet JSON.parse (which the service runs first)
+  // still succeeds and the document stays under the 64 KiB payload cap, so
+  // this exercises the serialization defect, not the size guard. The test
+  // cannot assemble this fixture with JSON.stringify either (it is itself
+  // recursive past a few thousand levels), so the JSON text is built
+  // directly by string wrapping.
+  const NEST = 5000;
+
+  function nestedBody(levels: number): string {
+    let text = '{"leaf":"deep"}';
+    for (let i = 0; i < levels; i++) text = `{"child":${text}}`;
+    return text;
+  }
+
+  it("forwards a deeply nested log body with a bounded, marked representation", () => {
+    const body = `{"message_type":"log","source":"test-log-deep","payload":{"level":"info","message":${nestedBody(NEST)}}}`;
+    // Under the 64 KiB payload cap: this exercises the stringification
+    // defect, not the size guard.
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(MAX_MQTT_PAYLOAD_BYTES);
+    const { logger } = driveRawPayload(Buffer.from(body, "utf8"));
+
+    // The RangeError no longer surfaces as a parse or handling error.
+    const errorEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    expect(errorEvents).not.toContain("mqtt_message_parse_error");
+    expect(errorEvents).not.toContain("mqtt_message_handling_error");
+
+    // The log is still forwarded — exactly once — ...
+    const infos = logger.write_info.mock.calls.filter(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(infos).toHaveLength(1);
+    const message = infos[0][1] as string;
+    // ... bounded: the serialized body terminates in the depth marker
+    // instead of carrying ~5,000 nested levels into the log line.
+    expect(message).toContain(LOG_BOUND_DEPTH_MARKER);
+    expect(message.split('"child"').length - 1).toBeLessThanOrEqual(LOG_BOUND_MAX_DEPTH);
+    // The whole line stays bounded (source + body each capped at 256 + ellipsis).
+    expect(message.length).toBeLessThanOrEqual(2 * (LOG_VALUE_MAX_LENGTH + 1) + 4);
+
+    // ... and the message processed to completion (metadata intact).
+    const meta = infos[0][2] as Record<string, unknown>;
+    expect(meta.source).toBe("test-log-deep");
+    expect(meta.level).toBe("info");
+  });
+
+  it("keeps the existing shallow-object log formatting unchanged", () => {
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: { event: "ack", count: 2 } },
+    });
+
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    // boundForLog leaves a small shallow object structurally identical, so
+    // the serialized text is exactly what a bare JSON.stringify produced.
+    expect(info?.[1]).toBe(`[src] ${JSON.stringify({ event: "ack", count: 2 })}`);
   });
 });
 
