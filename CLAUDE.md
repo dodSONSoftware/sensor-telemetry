@@ -79,7 +79,7 @@ npm run test:coverage # Run tests with coverage report
 | Option | Description | Default |
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug, critical — critical filters at winston error level) | info |
-| `apiPort` | Port for Prometheus metrics endpoint | required |
+| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 3301 in three places — the Dockerfile `EXPOSE 3301` and HEALTHCHECK probe (`localhost:3301/health`), and the docker-compose port mapping (`3301:3301`) — so changing `apiPort` in a container deployment requires updating those deployment files to match, or the healthcheck fails and the host port never reaches the service | required |
 | `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, each with an optional `:port` (1-65535); no scheme (`mqtt://`) — the value is appended to `mqtt://` in `MqttNetworking`. Validated at config load because an unparseable value (e.g. out-of-range port) would otherwise throw synchronously from `mqtt.connect` inside the `MqttNetworking` constructor, which runs before index.ts's structured startup try | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages | - |
