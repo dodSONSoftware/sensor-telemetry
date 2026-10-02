@@ -1350,3 +1350,383 @@ describe("health status scalar boundary (regression P2-1)", () => {
     expect(prom.set_health_up).toHaveBeenCalledWith("v3-src", 0);
   });
 });
+
+describe("scalar boundary for untrusted protocol fields (regression P2-1)", () => {
+  // Every scalar protocol field must treat a structured (non-string,
+  // non-finite-number) value exactly like an absent one — through the
+  // existing drop/fallback paths, with no new semantics — and none of
+  // them may recurse into the value (the old String() coercion overflowed
+  // the stack on deeply nested payloads).
+
+  const airPayload = { temperature_c: 25, humidity_percent: 45, pressure_pa: 100000 };
+
+  // ~2,000 levels of nesting: past the point where String() overflowed
+  // (~1,000 levels) but safely below JSON.stringify's own recursion
+  // limit, so driveMessage can still encode the document.
+  let deep: Record<string, unknown> = { leaf: "deep" };
+  for (let i = 0; i < 2000; i++) deep = { child: deep };
+
+  const structuredValues: Array<[string, unknown]> = [
+    ["array", ["telemetry"]],
+    ["nested array", [["telemetry"]]],
+    ["object", { value: "telemetry" }],
+    ["deep object", deep],
+    ["boolean", true],
+    ["null", null],
+  ];
+
+  interface FieldCase {
+    label: string;
+    drive: (value: unknown) => { prom: MockProm; logger: MockLogger & ILogger };
+    expectHandled: (prom: MockProm, logger: MockLogger & ILogger) => void;
+  }
+
+  // Drive one forwarded-log document at the log topic: the field cases
+  // for `level` need a config with mqttTopicLog, which baseConfig lacks.
+  function driveLogMessage(doc: Record<string, unknown>): { logger: MockLogger & ILogger } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(
+      { ...baseConfig, mqttTopicLog: "iot/v3/log" },
+      logger
+    );
+    const onMock = (networking as unknown as { mqtt_client: { on: jest.Mock } }).mqtt_client.on;
+    const messageCall = onMock.mock.calls.filter((call) => call[0] === "message").at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    handler("iot/v3/log", Buffer.from(JSON.stringify(doc)), {});
+    return { logger };
+  }
+
+  const fieldCases: FieldCase[] = [
+    {
+      label: "message_type",
+      drive: (value) =>
+        driveMessage({
+          message_type: value,
+          device: "bme280",
+          source: "tbl-src",
+          firmware_version: "1.0.0",
+          payload: airPayload,
+        }),
+      expectHandled: (prom, logger) => {
+        // A structured type reads as missing: the existing missing-type drop.
+        expect(
+          logger.write_error.mock.calls.some(
+            (call) => call[2]?.event === "mqtt_message_missing_type"
+          )
+        ).toBe(true);
+        expect(prom.publish_air).not.toHaveBeenCalled();
+      },
+    },
+    {
+      label: "device",
+      drive: (value) =>
+        driveMessage({
+          message_type: "telemetry",
+          device: value,
+          source: "tbl-src",
+          payload: airPayload,
+        }),
+      expectHandled: (prom, logger) => {
+        // A structured device reads as missing: the existing missing-device drop.
+        expect(
+          logger.write_warn.mock.calls.some(
+            (call) => call[2]?.event === "mqtt_telemetry_missing_device"
+          )
+        ).toBe(true);
+        expect(prom.publish_air).not.toHaveBeenCalled();
+      },
+    },
+    {
+      label: "source",
+      drive: (value) =>
+        driveMessage({
+          message_type: "telemetry",
+          device: "bme280",
+          source: value,
+          firmware_version: "1.0.0",
+          payload: airPayload,
+        }),
+      expectHandled: (prom) => {
+        // A structured source reads as absent and falls back to "unknown";
+        // the message is still published.
+        expect(prom.publish_air).toHaveBeenCalledTimes(1);
+        expect(prom.publish_air).toHaveBeenCalledWith(
+          { air: airPayload },
+          "unknown",
+          "1.0.0"
+        );
+      },
+    },
+    {
+      label: "firmware_version",
+      drive: (value) =>
+        driveMessage({
+          message_type: "telemetry",
+          device: "bme280",
+          source: "tbl-src",
+          firmware_version: value,
+          payload: airPayload,
+        }),
+      expectHandled: (prom) => {
+        // A structured version reads as absent: the "unknown" label, and
+        // the message is still published.
+        expect(prom.publish_air).toHaveBeenCalledTimes(1);
+        expect(prom.publish_air).toHaveBeenCalledWith(
+          { air: airPayload },
+          "tbl-src",
+          "unknown"
+        );
+      },
+    },
+    {
+      label: "level (forwarded sensor log)",
+      drive: (value) => {
+        const { logger } = driveLogMessage({
+          message: "tbl log message",
+          source: "tbl-src",
+          level: value,
+        });
+        return { prom: {} as MockProm, logger };
+      },
+      expectHandled: (_prom, logger) => {
+        // A structured level reads as absent and defaults to "info"; the
+        // message is still forwarded (at info, above the debug threshold).
+        const forwarded = logger.write_info.mock.calls.find(
+          (call) =>
+            (call[2] as Record<string, unknown>)?.logType === "sensor"
+        );
+        expect(forwarded).toBeDefined();
+        expect(forwarded?.[2]).toMatchObject({
+          level: "info",
+          source: "tbl-src",
+        });
+      },
+    },
+    {
+      label: "status (V3 health)",
+      drive: (value) =>
+        driveMessage({
+          message_type: "health",
+          source: "tbl-src",
+          payload: { status: value },
+        }),
+      expectHandled: (prom) => {
+        // A structured status reads as absent: the health-up gauge is left
+        // untouched, but the message is still accepted (source stamped).
+        expect(prom.set_health_up).not.toHaveBeenCalled();
+        expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+        expect(prom.mark_source_seen).toHaveBeenCalledWith("tbl-src");
+      },
+    },
+  ];
+
+  const rows: Array<
+    [
+      string,
+      unknown,
+      (value: unknown) => { prom: MockProm; logger: MockLogger & ILogger },
+      (prom: MockProm, logger: MockLogger & ILogger) => void
+    ]
+  > = [];
+  for (const fieldCase of fieldCases) {
+    for (const [valueLabel, value] of structuredValues) {
+      rows.push([`${fieldCase.label} = ${valueLabel}`, value, fieldCase.drive, fieldCase.expectHandled]);
+    }
+  }
+
+  it.each(rows)(
+    "treats a %s as absent through the existing path without recursing into the value",
+    (_fullName, value, drive, expectHandled) => {
+      const { prom, logger } = drive(value);
+      expectHandled(prom, logger);
+
+      // The pipeline completed: no parse error, no handling error, no
+      // unhandled rejection surfaced.
+      const errorEvents = logger.write_error.mock.calls.map(
+        (call) => (call[2] as Record<string, unknown>)?.event
+      );
+      expect(errorEvents).not.toContain("mqtt_message_parse_error");
+      expect(errorEvents).not.toContain("mqtt_message_handling_error");
+    }
+  );
+});
+
+describe("numeric compatibility at the scalar boundary (regression P2-1)", () => {
+  // source, device, and firmware_version accept finite numbers (coerced to
+  // their string form) in addition to strings — message_type, log level,
+  // and health status do NOT (string-only). A numeric source is already
+  // covered by the P3-4 describe; here: device and firmware_version.
+
+  it("coerces a numeric device to its string form before the known-device lookup", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: 42,
+      source: "tbl-numeric",
+      payload: { temperature_c: 20 },
+    });
+
+    // "42" is not a known V3 device: the unknown-device warning names the
+    // coerced string, proving the coercion happened at extraction.
+    const warning = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_unknown_v3_device"
+    );
+    expect(warning).toBeDefined();
+    expect(warning?.[2]).toMatchObject({ device: "42" });
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.publish_water).not.toHaveBeenCalled();
+  });
+
+  it("coerces a numeric firmware_version to its string form (0 is not absent)", () => {
+    const airPayload = { temperature_c: 25, humidity_percent: 45, pressure_pa: 100000 };
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "tbl-numeric",
+      firmware_version: 0,
+      payload: airPayload,
+    });
+
+    // 0 is a finite number, not a falsy trap: it becomes the label "0".
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      { air: airPayload },
+      "tbl-numeric",
+      "0"
+    );
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_handling_error"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("deeply nested message_type (regression P2-1)", () => {
+  // 25,000 levels: the old String(message_type) recursion overflowed at
+  // ~1,000 levels (RangeError, which the broad catch mislabeled as a parse
+  // error). The scalar boundary reads the value as absent instead — the
+  // message is dropped through the existing missing-type path.
+  const NEST = 25000;
+
+  it("is rejected as missing type, not a parse error or a crash", () => {
+    const body = `{"message_type":${"[".repeat(NEST)}"leaf"${"]".repeat(NEST)},
+"device":"bme280","source":"tbl-deep","payload":{"temperature_c":20}}`;
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(MAX_MQTT_PAYLOAD_BYTES);
+    const { prom, logger } = driveRawPayload(Buffer.from(body, "utf8"));
+
+    const errorEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    // Dropped via the existing missing-type path ...
+    expect(errorEvents).toContain("mqtt_message_missing_type");
+    // ... with no RangeError surfacing as a parse or handling error.
+    expect(errorEvents).not.toContain("mqtt_message_parse_error");
+    expect(errorEvents).not.toContain("mqtt_message_handling_error");
+    expect(prom.publish_air).not.toHaveBeenCalled();
+  });
+});
+
+describe("error classification in on_message (regression P2-1)", () => {
+  // A malformed body is a parse error; a valid body that throws during
+  // processing is a handling error. The two are distinct events, each with
+  // the topic, and one exception is never logged under both.
+
+  function buildTelemetryDriver(): {
+    prom: MockProm;
+    logger: MockLogger & ILogger;
+    driveRaw: (payload: Buffer) => void;
+    drive: (doc: Record<string, unknown>) => void;
+  } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const messageCall = onMock.mock.calls
+      .filter((call) => call[0] === "message")
+      .at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    return {
+      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+      logger,
+      driveRaw: (payload) => handler(baseConfig.mqttTopicTelemetry, payload, {}),
+      drive: (doc) =>
+        handler(
+          baseConfig.mqttTopicTelemetry,
+          Buffer.from(JSON.stringify(doc)),
+          {}
+        ),
+    };
+  }
+
+  it("classifies malformed JSON as a parse error only", () => {
+    const { logger, driveRaw } = buildTelemetryDriver();
+    // Truncated body: valid as text, invalid as JSON.
+    driveRaw(Buffer.from('{"message_type":"telemetry","devic', "utf8"));
+
+    const parseErrors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_message_parse_error"
+    );
+    expect(parseErrors).toHaveLength(1);
+    // The topic is preserved for triage ...
+    expect(parseErrors[0]?.[2]).toMatchObject({
+      topic: baseConfig.mqttTopicTelemetry,
+    });
+    // ... and the body never reached routing: no missing-type or handling
+    // error, and the parse failure is not also logged as a handling error.
+    const allEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    expect(allEvents).not.toContain("mqtt_message_handling_error");
+    expect(allEvents).not.toContain("mqtt_message_missing_type");
+  });
+
+  it("classifies a post-parse processing throw as a handling error only", async () => {
+    const { prom, logger, drive } = buildTelemetryDriver();
+    // Simulate a processing failure: the (auto-mocked) publisher throws.
+    prom.publish_water.mockImplementation(() => {
+      throw new Error("simulated handler failure");
+    });
+
+    drive({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "tbl-err",
+      payload: { temperature_c: 20 },
+    });
+    // handle_mqtt_message is async, so the rejection (and its .catch log)
+    // land in a microtask after the synchronous drive returns.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const handlingErrors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_message_handling_error"
+    );
+    expect(handlingErrors).toHaveLength(1);
+    expect(handlingErrors[0]?.[2]).toMatchObject({
+      topic: baseConfig.mqttTopicTelemetry,
+    });
+    // The exception's message is preserved in the logged error.
+    const loggedError = (handlingErrors[0]?.[2] as Record<string, unknown>)?.error;
+    expect(String(loggedError)).toContain("simulated handler failure");
+
+    // The body parsed fine: no parse error for the same exception.
+    const allEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    expect(allEvents).not.toContain("mqtt_message_parse_error");
+  });
+});
