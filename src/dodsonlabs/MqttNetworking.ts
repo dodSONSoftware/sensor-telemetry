@@ -43,6 +43,22 @@ const RESTART_ONLY_KEYS = [
 
 type RestartOnlyKey = (typeof RESTART_ONLY_KEYS)[number];
 
+/**
+ * Spec for one required V3 telemetry field. `field` is the canonical name
+ * used in warnings; `aliases` are additional accepted field names (the
+ * first one holding a usable value wins, as in get_numeric_field).
+ * `min`/`max` are inclusive physical bounds checked on the value after
+ * `convert` (unit conversion — the payload carries Celsius, the supported
+ * range is Fahrenheit).
+ */
+interface TelemetryFieldSpec {
+    field: string;
+    aliases?: string[];
+    convert?: (value: number) => number;
+    min?: number;
+    max?: number;
+}
+
 export class MqttNetworking implements IMqttNetworking {
 
     // ********
@@ -1204,51 +1220,86 @@ export class MqttNetworking implements IMqttNetworking {
         // Wrap the device payload in the section envelope the
         // PrometheusWriter publishers take (e.g. { air: {...} }).
         // `accepted` tracks whether the message was admitted (known device
-        // type AND its required fields valid): only then does the source
+        // type AND every required reading structurally valid and within the
+        // physical range the publisher enforces): only then does the source
         // count as "seen" for the freshness gauge — a dropped reading is
         // not sensor activity, and (see the note above) only then is the
-        // firmware_version admitted.
+        // firmware_version admitted. The physical-range checks mirror the
+        // publisher's, so the normal path never publishes (or stamps
+        // freshness for) a message the publisher would reject — a source
+        // reporting an out-of-range required reading is handled exactly
+        // like one that dropped the field.
         let accepted = false;
+        // Payloads carry temperatures in Celsius; the supported ranges below
+        // are the Fahrenheit ranges the publishers enforce, so the convert
+        // mirrors the publisher's c * 9/5 + 32 before the range check.
+        const celsiusToFahrenheit = (c: number): number => (c * 9) / 5 + 32;
         switch (category) {
-        case "air":
+        case "air": {
             // BME280 reports barometric pressure; the SHT35 has no pressure
             // sensor, so pressure is only required for devices that carry it.
             const pressureRequired = device === "bme280";
-            if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
-                (!pressureRequired || sysFunc.get_numeric_field(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
+            const specs: TelemetryFieldSpec[] = [
+                { field: "temperature_c", convert: celsiusToFahrenheit, min: -100, max: 200 },
+                { field: "humidity_percent", min: 0, max: 100 },
+            ];
+            if (pressureRequired) {
+                // Pressure must exist under one of the supported aliases, be
+                // finite, and be physically non-negative. There is
+                // deliberately no upper bound — a general atmospheric
+                // "max" is not a defensible range without a deployment
+                // contract.
+                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0 });
+            }
+            if (this.is_telemetry_valid(devicePayload, source, specs)) {
                 // Valid message: admit the firmware version, then publish.
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
             break;
+        }
 
-        case "water":
-            if (this.is_telemetry_valid(devicePayload, ["temperature_c"], source)) {
+        case "water": {
+            if (this.is_telemetry_valid(devicePayload, source, [
+                { field: "temperature_c", convert: celsiusToFahrenheit, min: -50, max: 212 },
+            ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_water({ water: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
             break;
+        }
 
-        case "light":
-            if (this.is_telemetry_valid(devicePayload, ["lux", "uv_index"], source)) {
+        case "light": {
+            // lux and uv_index cannot be negative; no upper bound is
+            // defined for these sensors, so only the physical floor.
+            if (this.is_telemetry_valid(devicePayload, source, [
+                { field: "lux", min: 0 },
+                { field: "uv_index", min: 0 },
+            ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
             break;
+        }
 
-        case "soil":
+        case "soil": {
             // yl69_fc28 / plantmate_soil: relative_moisture_percent is the
-            // calibrated reading; raw (16-bit ADC) is optional and
-            // digital_state is ignored (nullable, not a useful gauge).
-            if (this.is_telemetry_valid(devicePayload, ["relative_moisture_percent"], source)) {
+            // calibrated reading (0-100 physical range); raw (16-bit ADC)
+            // remains optional — an out-of-range raw is skipped by the
+            // publisher without rejecting the message — and digital_state
+            // is ignored (nullable, not a useful gauge).
+            if (this.is_telemetry_valid(devicePayload, source, [
+                { field: "relative_moisture_percent", min: 0, max: 100 },
+            ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_soil({ soil: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
             break;
+        }
         }
 
         if (accepted) {
@@ -1461,20 +1512,62 @@ export class MqttNetworking implements IMqttNetworking {
 
     // ******** private telemetry publish helpers
 
-    /** Validate numeric fields in a telemetry section before forwarding.
-     *  Returns true only if ALL fields are valid. */
-    private is_telemetry_valid(section: JsonObject, fields: string[], source: string): boolean {
-        for (const field of fields) {
-            const value = sysFunc.get_numeric_field(section, field);
+    /**
+     * Validate the required fields of a telemetry payload before
+     * forwarding. A field is valid only if it is present and finite
+     * (get_numeric_field's contract) AND, when a range is specified,
+     * within the inclusive physical bounds after any unit conversion.
+     * Returns true only if ALL fields are valid.
+     *
+     * The physical-range checks mirror the PrometheusWriter's publisher
+     * checks for the same fields, so the routing layer — not the
+     * publisher — owns acceptance: a message whose required reading is
+     * out of range is rejected here (structured warning, no publish, no
+     * freshness stamp, no firmware admission) instead of being counted
+     * as accepted and then leaving stale gauges with a fresh
+     * last-seen timestamp.
+     */
+    private is_telemetry_valid(
+        section: JsonObject,
+        source: string,
+        specs: TelemetryFieldSpec[]
+    ): boolean {
+        for (const spec of specs) {
+            const value = sysFunc.get_numeric_field(
+                section,
+                spec.field,
+                ...(spec.aliases ?? [])
+            );
             if (value === undefined) {
                 this.logger.write_warn(
                     "networking/isTelemetryValid",
-                    `Source: ${sysFunc.truncateForLog(source)}, missing or invalid field '${field}', skipping`,
+                    `Source: ${sysFunc.truncateForLog(source)}, missing or invalid field '${spec.field}', skipping`,
                     {
                         event: "telemetry_field_missing",
                         logType: "sensor",
                         source: sysFunc.truncateForLog(source),
-                        field,
+                        field: spec.field,
+                    }
+                );
+                return false;
+            }
+            const checked = spec.convert ? spec.convert(value) : value;
+            if (
+                (spec.min !== undefined && checked < spec.min) ||
+                (spec.max !== undefined && checked > spec.max)
+            ) {
+                this.logger.write_warn(
+                    "networking/isTelemetryValid",
+                    `Source: ${sysFunc.truncateForLog(source)}, field '${spec.field}' out of physical range (${value}), skipping`,
+                    {
+                        event: "telemetry_out_of_range",
+                        logType: "sensor",
+                        source: sysFunc.truncateForLog(source),
+                        field: spec.field,
+                        value,
+                        ...(spec.convert ? { convertedValue: checked } : {}),
+                        ...(spec.min !== undefined ? { minRange: spec.min } : {}),
+                        ...(spec.max !== undefined ? { maxRange: spec.max } : {}),
                     }
                 );
                 return false;

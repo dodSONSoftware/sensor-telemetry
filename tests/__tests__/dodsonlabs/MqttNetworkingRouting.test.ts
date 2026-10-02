@@ -306,9 +306,10 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
   });
 
   it("does not publish bme280 (air) when pressure_pa is missing", () => {
-    // The pressure guard (bme280 only) drops the message silently, so the
-    // observable behavior is the absence of the publish call.
-    const { prom } = driveMessage({
+    // Pressure is a required bme280 field, so the missing-field guard
+    // drops the message with the normal structured telemetry warning
+    // (no silent drop) and the absence of the publish call.
+    const { prom, logger } = driveMessage({
       message_type: "telemetry",
       device: "bme280",
       source: "v3-src",
@@ -317,6 +318,11 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
     });
 
     expect(prom.publish_air).not.toHaveBeenCalled();
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "telemetry_field_missing"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ field: "pressure_pa", source: "v3-src" });
   });
 
   it("routes ds18b20 (water) to publish_water and nothing else", () => {
@@ -395,6 +401,303 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
     expect(prom.publish_air).not.toHaveBeenCalled();
     expect(prom.publish_water).not.toHaveBeenCalled();
     expect(prom.publish_light).not.toHaveBeenCalled();
+    expect(prom.publish_soil).not.toHaveBeenCalled();
+  });
+});
+
+describe("telemetry acceptance includes physical-range validation (regression P2-1)", () => {
+  // Acceptance is the routing layer's decision: a message is accepted only
+  // when EVERY required reading for the device type is present, finite,
+  // and within the physical range the publisher enforces. A required
+  // reading the publisher would reject (out of range) must not publish,
+  // must not advance source freshness, and must not admit the firmware
+  // version — otherwise Prometheus would expose a stale gauge next to a
+  // fresh sensor_last_seen_timestamp_seconds.
+  const fw = "1.2.3";
+  const validAirPayload = {
+    temperature_c: 25,
+    humidity_percent: 45,
+    pressure_pa: 100000,
+  };
+
+  function outOfRangeWarn(logger: MockLogger & ILogger, field: string) {
+    return logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "telemetry_out_of_range" && call[2]?.field === field
+    );
+  }
+
+  it("rejects soil telemetry with relative_moisture_percent > 100", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "yl69_fc28",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { relative_moisture_percent: 150 },
+    });
+
+    expect(prom.publish_soil).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "relative_moisture_percent");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({
+      value: 150,
+      minRange: 0,
+      maxRange: 100,
+      source: "v3-src",
+    });
+  });
+
+  it("rejects soil telemetry with negative relative_moisture_percent", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "plantmate_soil",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { relative_moisture_percent: -1 },
+    });
+
+    expect(prom.publish_soil).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    expect(outOfRangeWarn(logger, "relative_moisture_percent")).toBeDefined();
+  });
+
+  it("still accepts soil telemetry with a valid percent but an out-of-range optional raw", () => {
+    // raw is optional (16-bit ADC, range-checked by the publisher); the
+    // calibrated percent is the required field, so the message is accepted
+    // and the publisher skips only the raw gauge.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "yl69_fc28",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { relative_moisture_percent: 50, raw: 70000 },
+    });
+
+    expect(prom.publish_soil).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts soil telemetry at the inclusive range boundaries (0 and 100)", () => {
+    for (const percent of [0, 100]) {
+      const { prom } = driveMessage({
+        message_type: "telemetry",
+        device: "yl69_fc28",
+        source: "v3-src",
+        firmware_version: fw,
+        payload: { relative_moisture_percent: percent },
+      });
+
+      expect(prom.publish_soil).toHaveBeenCalledTimes(1);
+      expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("rejects air telemetry with temperature_c out of the supported Fahrenheit range", () => {
+    // 150C = 302F, above the 200F the publisher enforces.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { ...validAirPayload, temperature_c: 150 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "temperature_c");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({
+      value: 150,
+      convertedValue: 302,
+      minRange: -100,
+      maxRange: 200,
+    });
+  });
+
+  it("rejects sht35 air telemetry with temperature_c out of range", () => {
+    // The sht35 shares the air range even though it needs no pressure.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "sht35",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: -80, humidity_percent: 45 }, // -94F < -100F
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    expect(outOfRangeWarn(logger, "temperature_c")).toBeDefined();
+  });
+
+  it("rejects air telemetry with humidity_percent out of range", () => {
+    for (const humidity of [101, -1]) {
+      const { prom, logger } = driveMessage({
+        message_type: "telemetry",
+        device: "bme280",
+        source: "v3-src",
+        firmware_version: fw,
+        payload: { ...validAirPayload, humidity_percent: humidity },
+      });
+
+      expect(prom.publish_air).not.toHaveBeenCalled();
+      expect(prom.mark_source_seen).not.toHaveBeenCalled();
+      expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+      const warn = outOfRangeWarn(logger, "humidity_percent");
+      expect(warn).toBeDefined();
+      expect(warn?.[2]).toMatchObject({ value: humidity, minRange: 0, maxRange: 100 });
+    }
+  });
+
+  it("rejects water telemetry with temperature_c out of the supported Fahrenheit range", () => {
+    // 200C = 392F, above the 212F the water publisher enforces.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 200 },
+    });
+
+    expect(prom.publish_water).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "temperature_c");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({
+      value: 200,
+      convertedValue: 392,
+      minRange: -50,
+      maxRange: 212,
+    });
+  });
+
+  it("rejects bme280 telemetry missing pressure under both aliases with a structured warning", () => {
+    // Valid temperature and humidity, but neither pressure_pa nor
+    // pressure_pascal: the message is rejected with the same
+    // telemetry_field_missing class used for other required-field
+    // failures, naming the canonical field.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25, humidity_percent: 45 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "telemetry_field_missing"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ field: "pressure_pa", source: "v3-src" });
+  });
+
+  it("rejects bme280 telemetry with a finite but negative pressure", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25, humidity_percent: 45, pressure_pa: -100 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "pressure_pa");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: -100, minRange: 0 });
+    expect(warn?.[2]).not.toHaveProperty("maxRange");
+  });
+
+  it("accepts bme280 telemetry carrying the legacy pressure_pascal alias", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: {
+        temperature_c: 25,
+        humidity_percent: 45,
+        pressure_pascal: 100000,
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects light telemetry with negative lux", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "ltr390",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { lux: -1, uv_index: 3 },
+    });
+
+    expect(prom.publish_light).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "lux");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: -1, minRange: 0 });
+    expect(warn?.[2]).not.toHaveProperty("maxRange");
+  });
+
+  it("rejects light telemetry with negative uv_index", () => {
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "ltr390",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { lux: 500, uv_index: -0.5 },
+    });
+
+    expect(prom.publish_light).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "uv_index");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: -0.5, minRange: 0 });
+  });
+
+  it("accepts light telemetry at the zero lower bound (0 lux, 0 uv_index)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "ltr390",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { lux: 0, uv_index: 0 },
+    });
+
+    expect(prom.publish_light).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits a single validation warning per rejected message (routing owns the warning)", () => {
+    // The publisher's range checks stay as defense in depth, but the
+    // normal rejected path never reaches the publisher, so one rejected
+    // message produces exactly one structured warning.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "yl69_fc28",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { relative_moisture_percent: 150 },
+    });
+
+    expect(
+      logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "telemetry_out_of_range"
+      )
+    ).toHaveLength(1);
     expect(prom.publish_soil).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.8.
+**Release:** Zinc Falcon — firmware 4.1.9.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
