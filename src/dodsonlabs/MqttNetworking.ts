@@ -1131,6 +1131,16 @@ export class MqttNetworking implements IMqttNetworking {
         }
         const payload: JsonObject = rawPayload;
 
+        // Normalize and validate status immediately after the payload shape
+        // is validated, BEFORE any health gauge is mutated: status is a
+        // scalar protocol field, so a malformed structured value (nested
+        // array, object) follows the missing-field policy — the health-up
+        // gauge is left untouched — instead of being String()-converted
+        // after some gauges were already written. That old ordering could
+        // throw RangeError mid-message, leaving partially committed health
+        // state with a stale freshness stamp (contradictory observability).
+        const status = sysFunc.getStringField(payload, "status");
+
         // Overlapping system-info gauges (V3 field names)
         const cpuTempC = sysFunc.get_numeric_field(payload, "cpu_temperature_c", "cpu_temp_c");
         if (cpuTempC !== undefined) {
@@ -1197,10 +1207,11 @@ export class MqttNetworking implements IMqttNetworking {
             this.promWriter.set_utc_valid(source, utcValid ? 1 : 0);
         }
 
-        // V3-only gauges
-        const status = payload["status"];
+        // V3-only gauges: status was normalized above, before any gauge
+        // mutation — only an actual "healthy" string counts as up; a
+        // malformed/absent status leaves the gauge untouched.
         if (status !== undefined) {
-            this.promWriter.set_health_up(source, String(status) === "healthy" ? 1 : 0);
+            this.promWriter.set_health_up(source, status === "healthy" ? 1 : 0);
         }
 
         // V4: degraded_reasons is a string array (e.g. "low_free_heap",
@@ -1219,7 +1230,9 @@ export class MqttNetworking implements IMqttNetworking {
                     event: "v3_health_degraded",
                     logType: "sensor",
                     source: sysFunc.truncateForLog(source),
-                    status,
+                    // Bounded like every other untrusted log value: status is
+                    // a validated string here, capped at the log limit.
+                    status: status === undefined ? undefined : sysFunc.truncateForLog(status),
                     degraded_reasons: boundedDegradedReasons,
                 }
             );
@@ -1245,7 +1258,9 @@ export class MqttNetworking implements IMqttNetworking {
                 event: "v3_health_processed",
                 logType: "sensor",
                 source: sysFunc.truncateForLog(source),
-                status,
+                // Bounded like every other untrusted log value: status is
+                // a validated string here, capped at the log limit.
+                status: status === undefined ? undefined : sysFunc.truncateForLog(status),
                 degraded_reasons: degradedReasons === undefined ? undefined : sysFunc.truncateForLogList(degradedReasons),
             }
         );

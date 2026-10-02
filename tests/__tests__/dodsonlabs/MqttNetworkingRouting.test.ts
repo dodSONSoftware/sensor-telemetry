@@ -6,6 +6,7 @@
 import { MqttNetworking, MAX_MQTT_PAYLOAD_BYTES } from "../../../src/dodsonlabs/MqttNetworking";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
+import { LOG_VALUE_MAX_LENGTH } from "../../../src/dodsonlabs/SystemFunctions";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
@@ -118,6 +119,38 @@ function driveMessage(
     Buffer.from(JSON.stringify(doc)),
     {}
   );
+  return {
+    prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+    logger,
+  };
+}
+
+/**
+ * Construct a MqttNetworking on the fake client and deliver a RAW payload
+ * buffer to the "message" handler. Unlike driveMessage (which JSON-encodes
+ * its input — impossible for deeply nested values, since JSON.stringify is
+ * itself recursive past a few thousand levels), this accepts pre-assembled
+ * JSON text and non-JSON bodies.
+ */
+function driveRawPayload(
+  payload: Buffer
+): { prom: MockProm; logger: MockLogger & ILogger } {
+  const logger = createMockLogger();
+  const networking = new MqttNetworking(baseConfig, logger);
+  const onMock = (
+    networking as unknown as { mqtt_client: { on: jest.Mock } }
+  ).mqtt_client.on;
+  const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
+  const messageCall = messageCalls.at(-1);
+  if (!messageCall) {
+    throw new Error("MqttNetworking did not register a 'message' handler");
+  }
+  const handler = messageCall[1] as (
+    topic: string,
+    payload: Buffer,
+    packet: unknown
+  ) => void;
+  handler(baseConfig.mqttTopicTelemetry, payload, {});
   return {
     prom: (networking as unknown as { promWriter: MockProm }).promWriter,
     logger,
@@ -1167,36 +1200,6 @@ describe("bounded structured metadata in forwarded sensor logs (regression P2-2)
 });
 
 describe("MQTT payload size guard (regression)", () => {
-  /**
-   * Construct a MqttNetworking on the fake client and deliver a RAW payload
-   * buffer to the "message" handler (driveMessage JSON-encodes its input,
-   * which cannot express an oversized or non-JSON body).
-   */
-  function driveRawPayload(
-    payload: Buffer
-  ): { prom: MockProm; logger: MockLogger & ILogger } {
-    const logger = createMockLogger();
-    const networking = new MqttNetworking(baseConfig, logger);
-    const onMock = (
-      networking as unknown as { mqtt_client: { on: jest.Mock } }
-    ).mqtt_client.on;
-    const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
-    const messageCall = messageCalls.at(-1);
-    if (!messageCall) {
-      throw new Error("MqttNetworking did not register a 'message' handler");
-    }
-    const handler = messageCall[1] as (
-      topic: string,
-      payload: Buffer,
-      packet: unknown
-    ) => void;
-    handler(baseConfig.mqttTopicTelemetry, payload, {});
-    return {
-      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
-      logger,
-    };
-  }
-
   const wasSizeGuarded = (logger: MockLogger): boolean =>
     logger.write_warn.mock.calls.some(
       (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_payload_too_large"
@@ -1269,5 +1272,81 @@ describe("MQTT payload size guard (regression)", () => {
     expect(logger.write_error.mock.calls.some(
       (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_message_parse_error"
     )).toBe(true);
+  });
+});
+
+describe("health status scalar boundary (regression P2-1)", () => {
+  // status must be normalized BEFORE any health gauge is mutated: a
+  // malformed structured status follows the missing-field policy (the
+  // health-up gauge stays untouched) without leaving contradictory
+  // partial state, and in the log channel it is bounded like every other
+  // untrusted value.
+  const ELL = "…";
+
+  // 25,000 levels of nesting: the old String(status) recursion overflowed
+  // at ~1,000 levels (RangeError), and this document serializes to ~50 KiB
+  // — under the 64 KiB payload cap. JSON.stringify cannot build such a
+  // structure (it is itself recursive past a few thousand levels), so the
+  // JSON text is assembled directly.
+  const NEST = 25000;
+  const nestedStatusText = `${"[".repeat(NEST)}"leaf"${"]".repeat(NEST)}`;
+
+  it("survives a deeply nested health status without partial state or error events", () => {
+    const body = `{"message_type":"health","source":"test-health-1","payload":{"cpu_temperature_c":42,"status":${nestedStatusText}}}`;
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(MAX_MQTT_PAYLOAD_BYTES);
+    const { prom, logger } = driveRawPayload(Buffer.from(body, "utf8"));
+
+    // No RangeError surfaced as a parse or handling error.
+    const errorEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    expect(errorEvents).not.toContain("mqtt_message_parse_error");
+    expect(errorEvents).not.toContain("mqtt_message_handling_error");
+
+    // The malformed status follows the missing-field policy: the
+    // health-up gauge is left untouched ...
+    expect(prom.set_health_up).not.toHaveBeenCalled();
+    // ... and the rest of the message processed to completion (no partial
+    // state): the cpu gauge was set and the source stamped fresh.
+    expect(prom.set_cpu_temp).toHaveBeenCalledWith("test-health-1", 42);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("test-health-1");
+  });
+
+  it("treats structured (non-string) health statuses as absent, still accepting the message", () => {
+    for (const status of [[], ["healthy"], { value: "healthy" }, true, null]) {
+      const { prom } = driveMessage({
+        message_type: "health",
+        source: "v3-src",
+        payload: { status },
+      });
+
+      expect(prom.set_health_up).not.toHaveBeenCalled();
+      // A malformed status does not drop the message: the payload is a
+      // structurally valid health object, so the source counts as seen.
+      expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+      expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
+    }
+  });
+
+  it("bounds a long health status string in the processed log metadata", () => {
+    const longStatus = "h".repeat(300);
+    const { prom, logger } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+      payload: { status: longStatus },
+    });
+
+    const processed = logger.write_debug.mock.calls.find(
+      (call) => (call[2] as Record<string, unknown>)?.event === "v3_health_processed"
+    );
+    expect(processed).toBeDefined();
+    // Bounded by the project's log limit, not the raw 300-char value.
+    expect(processed?.[2]).toMatchObject({
+      status: `${"h".repeat(LOG_VALUE_MAX_LENGTH)}${ELL}`,
+    });
+    // The status still drives the gauge: a non-"healthy" string is down.
+    expect(prom.set_health_up).toHaveBeenCalledTimes(1);
+    expect(prom.set_health_up).toHaveBeenCalledWith("v3-src", 0);
   });
 });
