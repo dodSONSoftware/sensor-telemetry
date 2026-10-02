@@ -11,7 +11,12 @@ import * as yaml from "js-yaml";
 import { register } from "prom-client";
 import { PrometheusWriter } from "../../../src/dodsonlabs/PrometheusWriter";
 import { validateConfig } from "../../../src/schemas/config";
-import { write_file_yaml } from "../../../src/dodsonlabs/SystemFunctions";
+import {
+  LOG_BOUND_DEPTH_MARKER,
+  LOG_BOUND_MAX_DEPTH,
+  LOG_VALUE_MAX_LENGTH,
+  write_file_yaml,
+} from "../../../src/dodsonlabs/SystemFunctions";
 import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
@@ -1413,6 +1418,88 @@ describe("PrometheusWriter", () => {
       expect(completionCall?.[2]).not.toHaveProperty("metricsCount");
       expect(completionCall?.[1]).not.toMatch(/Published all air metrics/);
       expect(completionCall?.[1]).toContain("Processed air telemetry for source");
+    });
+  });
+
+  describe("invalid-value metadata bounding (regression P2-1)", () => {
+    // The publish_* warning metadata used to carry the raw untrusted value
+    // straight into the logger. The redaction pass now bounds depth, but the
+    // metadata is also bounded at the call site: an arbitrarily deep or long
+    // value must arrive at the log line already shallow and short.
+
+    /** Walk into nested arrays until the bound marker, counting levels. */
+    function walkToArrayMarker(value: unknown): { levels: number; tail: unknown } {
+      let current: unknown = value;
+      let levels = 0;
+      while (Array.isArray(current)) {
+        current = current[0];
+        levels++;
+        expect(levels).toBeLessThanOrEqual(LOG_BOUND_MAX_DEPTH);
+      }
+      return { levels, tail: current };
+    }
+
+    it("bounds a deeply nested raw value in publish_air metadata without throwing", async () => {
+      const source = "gate-air-deep";
+      let deep: unknown = "leaf";
+      for (let i = 0; i < 500; i++) deep = [deep];
+
+      expect(() =>
+        writer.publish_air({ air: { temperature_c: deep } }, source, "1.0.0")
+      ).not.toThrow();
+
+      const call = logger.write_warn.mock.calls.find(
+        (c) =>
+          c[2]?.event === "telemetry_invalid_value" &&
+          c[2]?.field === "temperature_c" &&
+          c[2]?.source === source
+      );
+      expect(call).toBeDefined();
+
+      const { levels, tail } = walkToArrayMarker(call?.[2]?.value);
+      expect(levels).toBeGreaterThan(0);
+      expect(tail).toBe(LOG_BOUND_DEPTH_MARKER);
+
+      // No gauge was set for the rejected field.
+      const metrics = await getMetrics();
+      expect(metrics).not.toContain(`air_temperature{source="${source}"}`);
+    });
+
+    it("truncates an overlong raw string value and passes a finite number through in publish_soil metadata", async () => {
+      const source = "gate-soil-long";
+      const longValue = "x".repeat(LOG_VALUE_MAX_LENGTH + 44);
+
+      writer.publish_soil(
+        { soil: { relative_moisture_percent: longValue, raw: 65536 } },
+        source,
+        "1.0.0"
+      );
+
+      const call = logger.write_warn.mock.calls.find(
+        (c) =>
+          c[2]?.event === "telemetry_invalid_value" &&
+          c[2]?.field === "relative_moisture_percent" &&
+          c[2]?.source === source
+      );
+      expect(call).toBeDefined();
+      const loggedValue = call?.[2]?.value;
+      expect(typeof loggedValue).toBe("string");
+      expect(loggedValue).toBe(`${"x".repeat(LOG_VALUE_MAX_LENGTH)}…`);
+
+      // The out-of-range numeric sibling keeps its exact numeric value in
+      // the metadata (boundForLog passes finite numbers through untouched).
+      const rawCall = logger.write_warn.mock.calls.find(
+        (c) =>
+          c[2]?.event === "telemetry_out_of_range" &&
+          c[2]?.field === "raw" &&
+          c[2]?.source === source
+      );
+      expect(rawCall).toBeDefined();
+      expect(rawCall?.[2]?.value).toBe(65536);
+
+      const metrics = await getMetrics();
+      expect(metrics).not.toContain(`soil_moisture_percent{source="${source}"}`);
+      expect(metrics).not.toContain(`soil_moisture_raw{source="${source}"}`);
     });
   });
 

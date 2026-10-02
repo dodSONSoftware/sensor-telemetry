@@ -12,7 +12,7 @@ import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
+import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
 
 // Load version from package.json at module load time
 const pkgRequire = createRequire(__filename);
@@ -1268,7 +1268,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "temperature_c",
-                    value: air["temperature_c"],
+                    value: boundForLog(air["temperature_c"]),
                 }
             );
             return;
@@ -1281,7 +1281,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "temperature_c",
-                    value: air["temperature_c"],
+                    value: boundForLog(air["temperature_c"]),
                     convertedValue: temp_f,
                     minRange: -100,
                     maxRange: 200,
@@ -1417,7 +1417,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "uv_index",
-                    value: light["uv_index"],
+                    value: boundForLog(light["uv_index"]),
                 }
             );
         } else {
@@ -1434,7 +1434,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "lux",
-                    value: light["lux"],
+                    value: boundForLog(light["lux"]),
                 }
             );
         } else {
@@ -1485,7 +1485,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "temperature_c",
-                    value: water["temperature_c"],
+                    value: boundForLog(water["temperature_c"]),
                 }
             );
         } else if (temp_f < -50 || temp_f > 212) {
@@ -1497,7 +1497,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "temperature_c",
-                    value: water["temperature_c"],
+                    value: boundForLog(water["temperature_c"]),
                     convertedValue: temp_f,
                     minRange: -50,
                     maxRange: 212,
@@ -1551,7 +1551,7 @@ export class PrometheusWriter {
                     logType: "sensor",
                     source: sanitized,
                     field: "relative_moisture_percent",
-                    value: soil["relative_moisture_percent"],
+                    value: boundForLog(soil["relative_moisture_percent"]),
                 }
             );
         } else if (percent < 0 || percent > 100) {
@@ -1595,7 +1595,7 @@ export class PrometheusWriter {
                         logType: "sensor",
                         source: sanitized,
                         field: "raw",
-                        value: raw,
+                        value: boundForLog(raw),
                         minRange: 0,
                         maxRange: 65535,
                     }
