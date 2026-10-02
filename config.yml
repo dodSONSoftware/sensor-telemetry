@@ -19,6 +19,12 @@ sensorSourceValidCharsRegex: a-zA-Z0-9._-
 # Prometheus labels (values beyond the cap map to a fallback label)
 sensorSourceCardinalityCap: 1024
 
+# Optional: inactivity threshold in seconds after which a source's per-source
+# data gauges are removed (sensor_last_seen_timestamp_seconds is retained as
+# the staleness signal). 0 disables removal entirely. Keep well above the
+# longest expected sensor reporting interval to avoid flapping.
+staleSourceRemovalSecs: 60
+
 # Forward sensor logs to application logger
 forwardSensorLogs: true
 forwardSensorLogsLevel: info

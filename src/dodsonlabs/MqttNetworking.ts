@@ -324,10 +324,12 @@ export class MqttNetworking implements IMqttNetworking {
 
     /**
      * Update configuration at runtime.
-     * Only logLevel and the forward_sensor_logs settings take effect at
-     * runtime; the MQTT connection (broker, topics), the HTTP port, and the
-     * PrometheusWriter's source-label sanitization constants (captured in
-     * its constructor) require a restart.
+     * logLevel, the forward_sensor_logs settings, and staleSourceRemovalSecs
+     * take effect at runtime (the latter is applied by the PrometheusWriter's
+     * own config commit paths before this callback runs); the MQTT connection
+     * (broker, topics), the HTTP port, and the PrometheusWriter's
+     * source-label sanitization constants (captured in its constructor)
+     * require a restart.
      * @param newConfig - New configuration object
      */
     public updateConfig(newConfig: z.infer<typeof configSchema>): void {

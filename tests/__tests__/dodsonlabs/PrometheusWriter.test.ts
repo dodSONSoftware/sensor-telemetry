@@ -1657,6 +1657,55 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("staleSourceRemovalSecs (runtime config commit paths)", () => {
+    // The sweep interval floor is 10s and this describe's armed window is
+    // under a second, so the real timer cannot fire mid-file: the sweep's
+    // behavior itself is covered under fake timers in
+    // PrometheusWriterStaleRemoval.test.ts.
+    it("arms the sweep via /write-config and re-disables it when the key is omitted", async () => {
+      const headers = { "Content-Type": "application/json", Connection: "close" };
+      const postConfig = (patch: Record<string, unknown>) =>
+        fetch(`http://127.0.0.1:${port}/write-config`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ ...baseConfig, apiPort: port, ...patch }),
+        });
+      const removalAudits = () =>
+        logger.write_info.mock.calls
+          .map((call) => call[2] as Record<string, unknown> | undefined)
+          .filter((meta) => meta?.event === "stale_source_removal");
+
+      try {
+        const enable = await postConfig({ staleSourceRemovalSecs: 3600 });
+        expect(enable.status).toBe(200);
+        // The writer armed the sweep from the committed config (3600/2 =
+        // 30 min, clamped to the 60s ceiling).
+        expect(removalAudits().at(-1)).toMatchObject({
+          enabled: true,
+          thresholdSeconds: 3600,
+          intervalMs: 60_000,
+        });
+        // ...and the runtime callback carries the key.
+        const runtime = configChangeCallback.mock.calls.at(-1)![0] as z.infer<typeof configSchema>;
+        expect(runtime.staleSourceRemovalSecs).toBe(3600);
+
+        // /reload-config (GET-only) reads the key back from disk
+        // (write-config persisted it); an unchanged value must not re-audit.
+        const reload = await fetch(`http://127.0.0.1:${port}/reload-config`, {
+          headers,
+        });
+        expect(reload.status).toBe(200);
+        expect(removalAudits()).toHaveLength(1);
+      } finally {
+        // Whole-config commit: omitting the key re-disables the sweep, so
+        // an assertion failure above cannot leave it armed for later tests.
+        const disable = await postConfig({});
+        expect(disable.status).toBe(200);
+        expect(removalAudits().at(-1)).toMatchObject({ enabled: false, thresholdSeconds: 0 });
+      }
+    });
+  });
+
   // Declared last because it consumes the shared writer: close() stops the
   // metrics server, so this must run after every describe that still needs
   // it. afterAll's own close() is then a no-op by design.

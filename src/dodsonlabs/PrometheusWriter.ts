@@ -117,6 +117,29 @@ export class PrometheusWriter {
     // single warn line (the counters carry the ongoing signal).
     private sourceCapExceededWarned = false;
     private firmwareCapExceededWarned = false;
+
+    // ---- stale-source removal (config: staleSourceRemovalSecs; 0 = disabled)
+    // Last accepted-telemetry/health time (epoch ms) per admitted, non-fallback
+    // source, keyed by sanitized label. Mirrors
+    // sensor_last_seen_timestamp_seconds, which is deliberately retained after
+    // eviction as the staleness signal. Bounded by sourceCardinalityCap:
+    // entries are added in mark_source_seen and deleted in evictStaleSource.
+    // Known limitation: admittedFirmwareVersions slots are NOT freed on
+    // eviction — no source→firmware map is tracked, so a permanently-gone
+    // source's firmware label keeps its cap slot for the process lifetime.
+    private sourceLastSeenTimes = new Map<string, number>();
+    private staleSourceRemovalSecs = 0;
+    // The stale sweep interval; undefined while disabled. Cleared in close().
+    private staleSweepTimer: NodeJS.Timeout | undefined;
+    // Fallback labels shared by overflow/blank sources: evicting one would
+    // wipe another source's data, so they are excluded from the map in
+    // mark_source_seen and can never reach evictStaleSource.
+    private static readonly NON_EVICTABLE_SOURCES: ReadonlySet<string> = new Set(["unknown", "unknown_source"]);
+    // The 26 per-source data gauges (9 readings + 17 sensor_health_*).
+    // Eviction calls .remove({source}) on exactly these — never on
+    // sensor_last_seen_timestamp_seconds, the topic-labeled
+    // mqtt_subscription_active gauge, or any counter.
+    private prometheus_SourceDataGauges: Gauge[] = [];
     // Cap for /write-config request bodies. A valid config is < 2 KiB, so
     // anything larger is a misbehaving or hostile client, not a config.
     private static readonly MAX_CONFIG_BODY_BYTES = 64 * 1024;
@@ -194,6 +217,10 @@ export class PrometheusWriter {
 
         // create prometheus gauges
         this.create_prometheus_gauges();
+
+        // Arm the stale-source sweep if configured (no-op when 0/absent;
+        // also applies at every config commit — see applyStaleSourceRemoval).
+        this.applyStaleSourceRemoval();
 
         // create telemetry messages counter
         // Note: firmware_version added to reduce cardinality compared to runtime_id
@@ -949,6 +976,9 @@ export class PrometheusWriter {
             // Apply log level change if it differs
             this.applyLogLevelChange(oldLogLevel, newLogLevel);
 
+            // Apply stale-source-removal change if it differs
+            this.applyStaleSourceRemoval();
+
             // Notify callback of config change
             if (this.configChangeCallback) {
                 this.configChangeCallback(validatedConfig);
@@ -978,6 +1008,9 @@ export class PrometheusWriter {
                 // Apply log level change if the on-disk level differs from
                 // the running one, matching /write-config's behavior.
                 this.applyLogLevelChange(oldLogLevel, validatedConfig.logLevel);
+
+                // Apply stale-source-removal change, matching /write-config.
+                this.applyStaleSourceRemoval();
 
                 // Notify callback of config change
                 if (this.configChangeCallback) {
@@ -1032,6 +1065,125 @@ export class PrometheusWriter {
                 event: "log_level_changed",
                 logType: "audit",
                 newLevel: this.logger.global_log_level_string(),
+            }
+        );
+    }
+
+    /**
+     * Arm or disengage the stale-source sweep from the committed
+     * staleSourceRemovalSecs value (0 = disabled). Called from the
+     * constructor and from both config commit paths (/write-config,
+     * /reload-config) after this.config is committed, so the key is
+     * runtime-effective like logLevel. No-op when the value is unchanged,
+     * which covers the constructor's 0 → 0 and commits that omit the key.
+     * The sweep interval is threshold/2 clamped to [10s, 60s]: eviction can
+     * therefore lag the threshold by up to one interval.
+     */
+    private applyStaleSourceRemoval(): void {
+        const newThreshold = this.config.staleSourceRemovalSecs ?? 0;
+        if (newThreshold === this.staleSourceRemovalSecs) {
+            return;
+        }
+        this.staleSourceRemovalSecs = newThreshold;
+        this.clearStaleSweepTimer();
+        if (newThreshold <= 0) {
+            this.logger.write_info(
+                "prometheus/staleSourceRemoval",
+                "Stale source removal disabled — per-source series live until process restart",
+                {
+                    event: "stale_source_removal",
+                    logType: "audit",
+                    enabled: false,
+                    thresholdSeconds: newThreshold,
+                }
+            );
+            return;
+        }
+        const intervalMs = Math.min(60_000, Math.max(10_000, (newThreshold / 2) * 1000));
+        this.staleSweepTimer = setInterval(() => this.sweepStaleSources(), intervalMs);
+        this.logger.write_info(
+            "prometheus/staleSourceRemoval",
+            `Stale source removal enabled — sources idle for more than ${newThreshold}s have their data gauges removed`,
+            {
+                event: "stale_source_removal",
+                logType: "audit",
+                enabled: true,
+                thresholdSeconds: newThreshold,
+                intervalMs,
+            }
+        );
+        if (newThreshold < 300) {
+            this.logger.write_warn(
+                "prometheus/staleSourceRemoval",
+                "staleSourceRemovalSecs is below 300s — sources reporting less often than the threshold will flap (series removed, then recreated on each message)",
+                {
+                    event: "stale_source_removal_threshold_low",
+                    logType: "audit",
+                    thresholdSeconds: newThreshold,
+                }
+            );
+        }
+    }
+
+    /**
+     * Clear the stale sweep interval. Idempotent: no-op while undefined,
+     * which is what makes repeated close() calls safe.
+     */
+    private clearStaleSweepTimer(): void {
+        if (this.staleSweepTimer === undefined) {
+            return;
+        }
+        clearInterval(this.staleSweepTimer);
+        this.staleSweepTimer = undefined;
+    }
+
+    /**
+     * One sweep pass: evict every source whose last accepted message is
+     * strictly older than the threshold. Iterates a snapshot because
+     * evictStaleSource mutates the map (and admittedSources) in place.
+     * Fallback labels are absent from the map by construction (see
+     * mark_source_seen), so no per-source exemption check is needed here.
+     */
+    private sweepStaleSources(): void {
+        if (this.staleSourceRemovalSecs <= 0) {
+            return;
+        }
+        const now = Date.now();
+        const thresholdMs = this.staleSourceRemovalSecs * 1000;
+        for (const [source, lastSeenMs] of Array.from(this.sourceLastSeenTimes)) {
+            const ageMs = now - lastSeenMs;
+            if (ageMs <= thresholdMs) {
+                continue;
+            }
+            this.evictStaleSource(source, Math.floor(ageMs / 1000));
+        }
+    }
+
+    /**
+     * Remove a stale source's per-source data gauge series and free its
+     * admitted-source slot so a returning sensor is re-admitted normally.
+     * sensor_last_seen_timestamp_seconds{source} is deliberately retained
+     * as the staleness signal; the fallback-labeled gauges, the
+     * topic-labeled subscription gauge, and all counters are untouched.
+     * gauge.remove() is a no-op for a label set the source never set (e.g.
+     * a soil-only source has no air gauges), so the fixed list is safe for
+     * partial reporters.
+     */
+    private evictStaleSource(source: string, ageSeconds: number): void {
+        for (const gauge of this.prometheus_SourceDataGauges) {
+            gauge.remove({ source });
+        }
+        this.sourceLastSeenTimes.delete(source);
+        this.admittedSources.delete(source);
+        this.logger.write_warn(
+            "prometheus/staleSourceRemoved",
+            `Removing data gauges for source idle for ${ageSeconds}s (threshold ${this.staleSourceRemovalSecs}s); sensor_last_seen_timestamp_seconds is retained`,
+            {
+                event: "stale_source_removed",
+                logType: "audit",
+                source: truncateForLog(source),
+                ageSeconds,
+                thresholdSeconds: this.staleSourceRemovalSecs,
             }
         );
     }
@@ -1205,6 +1357,9 @@ export class PrometheusWriter {
 
     close(): Promise<void> {
         this._ready = false;
+        // Before the !this.server early return so a second close (and a
+        // close of a writer whose listen failed) still stops the sweep.
+        this.clearStaleSweepTimer();
         if (!this.server) {
             // close() must be idempotent: a second shutdown signal while the
             // first is still in flight would otherwise call server.close()
@@ -2080,6 +2235,13 @@ export class PrometheusWriter {
      */
     public mark_source_seen(source: string): void {
         const sanitized = this.admitSource(source);
+        // Track freshness for the stale sweep, mirroring the gauge stamp in
+        // the same call so the two cannot diverge. Fallback labels are
+        // shared by overflow/blank sources and are never tracked —
+        // evicting them would wipe another source's data.
+        if (!PrometheusWriter.NON_EVICTABLE_SOURCES.has(sanitized)) {
+            this.sourceLastSeenTimes.set(sanitized, Date.now());
+        }
         this.prometheus_Gauge_SensorLastSeenTimestamp!.setToCurrentTime({ source: sanitized });
         this.logger.write_debug(
             "prometheus/markSourceSeen",
@@ -2270,9 +2432,13 @@ export class PrometheusWriter {
         // Unix timestamp of the most recent ACCEPTED telemetry or health
         // message per source, updated by mark_source_seen() once per
         // accepted message (never per gauge). Consumers compute sensor age
-        // as time() - sensor_last_seen_timestamp_seconds; the exporter
-        // deliberately reports the fact without expiring or deleting stale
-        // series — staleness thresholds belong in Prometheus/Grafana.
+        // as time() - sensor_last_seen_timestamp_seconds. By default the
+        // series live forever — staleness thresholds belong in
+        // Prometheus/Grafana. When staleSourceRemovalSecs > 0, the stale
+        // sweep (see evictStaleSource) removes the 26 per-source data
+        // gauges for sources idle past the threshold while retaining this
+        // series as the staleness signal; fallback labels (unknown,
+        // unknown_source) are never evicted.
         this.prometheus_Gauge_SensorLastSeenTimestamp = new Gauge({
             name: "sensor_last_seen_timestamp_seconds",
             help: "Unix timestamp in seconds of the most recent accepted telemetry or health message from the sensor source.",
@@ -2300,6 +2466,39 @@ export class PrometheusWriter {
                 }
             },
         });
+
+        // The eviction target list: exactly the 26 per-source data gauges
+        // (9 readings + 17 sensor_health_*). Deliberately excludes
+        // SensorLastSeenTimestamp (retained as the staleness signal) and
+        // MqttSubscriptionActive (topic-labeled service diagnostic).
+        this.prometheus_SourceDataGauges = [
+            this.prometheus_Gauge_AirTemp,
+            this.prometheus_Gauge_AirHumidity,
+            this.prometheus_Gauge_AirPressure,
+            this.prometheus_Gauge_AirAltitude,
+            this.prometheus_Gauge_LightUvIndex,
+            this.prometheus_Gauge_LightLux,
+            this.prometheus_Gauge_WaterTemp,
+            this.prometheus_Gauge_SoilMoisturePercent,
+            this.prometheus_Gauge_SoilMoistureRaw,
+            this.prometheus_Gauge_CpuTemp,
+            this.prometheus_Gauge_HeapFreeBytes,
+            this.prometheus_Gauge_WifiRssiDbm,
+            this.prometheus_Gauge_SensorHealthUp,
+            this.prometheus_Gauge_SensorUptime,
+            this.prometheus_Gauge_MinHeapFreeBytes,
+            this.prometheus_Gauge_DevicesActive,
+            this.prometheus_Gauge_DevicesConfigured,
+            this.prometheus_Gauge_NetworkStackReady,
+            this.prometheus_Gauge_WifiConnected,
+            this.prometheus_Gauge_MqttConnected,
+            this.prometheus_Gauge_Core1Active,
+            this.prometheus_Gauge_OutboundQueueDepth,
+            this.prometheus_Gauge_OutboundEvicted,
+            this.prometheus_Gauge_OutboundRejected,
+            this.prometheus_Gauge_UtcValid,
+            this.prometheus_Gauge_UtcSyncAgeSec,
+        ];
     }
 
     private pascalToInHg(pa: number): number {

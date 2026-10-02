@@ -83,6 +83,12 @@ export const configSchema = z.object({
     }).int("sensorSourceCardinalityCap must be an integer")
         .positive("sensorSourceCardinalityCap must be greater than 0")
         .optional(),
+    staleSourceRemovalSecs: z.number({
+        error: "staleSourceRemovalSecs must be a number",
+    }).int("staleSourceRemovalSecs must be an integer")
+        .nonnegative("staleSourceRemovalSecs must be 0 or greater")
+        .max(31536000, "staleSourceRemovalSecs must be at most 31536000 (one year)")
+        .optional(),
     forwardSensorLogs: z.boolean().optional(),
     forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
         error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",

@@ -24,10 +24,33 @@ describe("validateConfig", () => {
       mqttTopicHealth: "iot/v3/health",
       sensorSourceMaxLength: 30,
       sensorSourceValidCharsRegex: "a-zA-Z0-9._-",
+      sensorSourceCardinalityCap: 1024,
+      staleSourceRemovalSecs: 3600,
       forwardSensorLogs: true,
       forwardSensorLogsLevel: "debug",
     };
     expect(validateConfig(full)).toEqual(full);
+  });
+
+  describe("staleSourceRemovalSecs", () => {
+    it("accepts 0 (disabled) and the one-year maximum", () => {
+      expect(() => validateConfig({ ...validConfig, staleSourceRemovalSecs: 0 })).not.toThrow();
+      expect(() =>
+        validateConfig({ ...validConfig, staleSourceRemovalSecs: 31_536_000 })
+      ).not.toThrow();
+    });
+
+    it("rejects negative, fractional, and over-maximum values", () => {
+      expect(() =>
+        validateConfig({ ...validConfig, staleSourceRemovalSecs: -1 })
+      ).toThrow(/staleSourceRemovalSecs/);
+      expect(() =>
+        validateConfig({ ...validConfig, staleSourceRemovalSecs: 1.5 })
+      ).toThrow(/staleSourceRemovalSecs/);
+      expect(() =>
+        validateConfig({ ...validConfig, staleSourceRemovalSecs: 31_536_001 })
+      ).toThrow(/staleSourceRemovalSecs/);
+    });
   });
 
   it("rejects a missing required key", () => {
