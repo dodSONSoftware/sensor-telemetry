@@ -427,6 +427,62 @@ describe("PrometheusWriter", () => {
       expect(retry.status).toBe(200);
     });
 
+    it("tears the connection down after the 413, so the oversized body is not received to completion", async () => {
+      // A raw socket (a client like undici would swallow connection-level
+      // resets, hiding the teardown): declare a body past the 64 KiB cap,
+      // send it all at once, and watch the connection. The server answers
+      // 413 and then destroys the request stream — with the rest of the
+      // body still unread in the kernel buffer the teardown surfaces as
+      // ECONNRESET, or as a clean end if the kernel drained first. Either
+      // way the connection must not survive the oversized body.
+      const body = Buffer.alloc(128 * 1024, 0x78);
+      const { received, socketError } = await new Promise<{
+        received: string;
+        socketError: string | null;
+      }>((resolve, reject) => {
+        let buf = "";
+        let socketError: string | null = null;
+        let settled = false;
+        const timer = setTimeout(
+          () => reject(new Error("timed out waiting for the 413 and connection teardown")),
+          5000
+        );
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          socket.destroy();
+          resolve({ received: buf, socketError });
+        };
+        const socket = net.connect(port, "127.0.0.1", () => {
+          socket.write(
+            "POST /write-config HTTP/1.1\r\n" +
+              `Host: 127.0.0.1:${port}\r\n` +
+              "Content-Type: application/json\r\n" +
+              `Content-Length: ${body.length}\r\n` +
+              "\r\n"
+          );
+          socket.write(body);
+        });
+        socket.on("data", (chunk) => {
+          buf += chunk.toString("latin1");
+        });
+        socket.on("error", (err) => {
+          socketError = (err as NodeJS.ErrnoException).code ?? err.message;
+        });
+        socket.on("end", finish);
+        socket.on("close", finish);
+      });
+
+      // The 413 still arrives complete (status line + full JSON body) ...
+      expect(received).toContain("HTTP/1.1 413");
+      expect(received).toContain("request body too large");
+      // ... and the connection was torn down by the server (the reset
+      // surfaces on the client socket; a clean end is accepted when the
+      // kernel drained the buffer first).
+      expect(socketError === "ECONNRESET" || socketError === null).toBe(true);
+    });
+
     it("does not commit configuration when the client disconnects mid-body", async () => {
       (write_file_yaml as unknown as jest.Mock).mockClear();
       const diskBefore = fs.readFileSync(configSource, "utf8");

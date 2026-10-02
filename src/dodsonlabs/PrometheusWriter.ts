@@ -887,7 +887,13 @@ export class PrometheusWriter {
                     message: `request body too large (max ${PrometheusWriter.MAX_CONFIG_BODY_BYTES} bytes)`,
                 });
                 // Stop accumulating; remaining chunks are dropped (see the
-                // `rejected` guard above) so memory stays bounded.
+                // `rejected` guard above) so memory stays bounded. Then
+                // destroy the request stream so the oversized body is not
+                // even RECEIVED to completion — a hostile client cannot
+                // keep the socket open pumping data past the cap (the 413
+                // above is already written to the socket buffer and reaches
+                // the client before the destroy takes effect).
+                req.destroy();
                 return;
             }
             chunks.push(chunk);
