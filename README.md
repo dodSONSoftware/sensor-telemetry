@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.16.
+**Release:** Zinc Falcon — firmware 4.1.17.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -148,7 +148,7 @@ forwardSensorLogsLevel: debug
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
 | `mqttTopicHealth` | MQTT topic for V3 health messages | - |
-| `sensorSourceMaxLength` | Max length for source labels | 30 |
+| `sensorSourceMaxLength` | Max length for source labels — integer, minimum 9: collision disambiguation appends `-` plus 8 hex characters, so below 9 the configured maximum could not hold; rejected at config load (startup, `/write-config`, `/reload-config`) | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names — the value is escaped into a negated character class, so it must form a valid one: `z-a` (an out-of-order range) is rejected at config load so `/write-config` cannot persist a value that crash-loops the next restart | a-zA-Z0-9._- |
 | `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; values beyond the cap map to a fallback label | 1024 |
 | `staleSourceRemovalSecs` | Inactivity threshold (integer seconds, 0 = disabled, max 31536000): when set, a sweep timer removes all of a source's per-source series (readings + `sensor_health_*` + `sensor_last_seen_timestamp_seconds{source}`) once it has sent no accepted telemetry/health for longer. Eviction also frees the source's cardinality-cap slot. Runtime-updatable via `/write-config` / `/reload-config` (omitting the key re-disables). Sweep interval is threshold/2 clamped to 10-60s, so removal lags the threshold by up to one interval — set the threshold well above the longest expected reporting interval | disabled (0/absent) |

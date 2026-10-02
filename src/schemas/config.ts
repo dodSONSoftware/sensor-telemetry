@@ -54,7 +54,16 @@ export const configSchema = z.object({
     sensorSourceMaxLength: z.number({
         error: "sensorSourceMaxLength must be a number",
     }).int("sensorSourceMaxLength must be an integer")
-        .positive("sensorSourceMaxLength must be greater than 0")
+        // Collision disambiguation appends "-" + 8 hex characters, which
+        // needs 9 characters: below that the writer would still emit a
+        // 9-char label and the configured maximum would not hold. The
+        // schema (not runtime writer code) is the boundary for the
+        // invariant, so startup, /write-config, and /reload-config all
+        // reject it.
+        .min(
+            9,
+            "sensorSourceMaxLength must be at least 9 (collision-safe source disambiguation needs '-' plus 8 hex characters)"
+        )
         .optional(),
     sensorSourceValidCharsRegex: z.string({
         error: "sensorSourceValidCharsRegex must be a string",

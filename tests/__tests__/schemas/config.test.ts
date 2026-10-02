@@ -53,6 +53,33 @@ describe("validateConfig", () => {
     });
   });
 
+  describe("sensorSourceMaxLength", () => {
+    it("rejects values below the collision-label minimum (9)", () => {
+      // Collision disambiguation appends "-" + 8 hex characters (9 chars);
+      // below 9 the configured maximum would not actually hold.
+      for (const value of [0, 1, 5, 8]) {
+        expect(() =>
+          validateConfig({ ...validConfig, sensorSourceMaxLength: value })
+        ).toThrow(/sensorSourceMaxLength/);
+      }
+    });
+
+    it("rejects a non-integer sensorSourceMaxLength", () => {
+      expect(() =>
+        validateConfig({ ...validConfig, sensorSourceMaxLength: 9.5 })
+      ).toThrow(/sensorSourceMaxLength/);
+    });
+
+    it("accepts 9 and larger values", () => {
+      expect(() =>
+        validateConfig({ ...validConfig, sensorSourceMaxLength: 9 })
+      ).not.toThrow();
+      expect(() =>
+        validateConfig({ ...validConfig, sensorSourceMaxLength: 30 })
+      ).not.toThrow();
+    });
+  });
+
   it("rejects a missing required key", () => {
     expect(() =>
       validateConfig({ logLevel: "info", apiPort: 3301 })
