@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.7.
+**Release:** Zinc Falcon — firmware 4.1.8.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -33,13 +33,16 @@ Example output:
 
 ### Log Levels
 
-Supported configurable Winston log levels:
-- `error` - Only critical errors
+Supported configurable log levels:
+- `error` - All errors, both standard and critical
 - `warn` - Warnings and errors
 - `info` - Informational messages (default)
 - `debug` - Debug and all above
+- `critical` - Filters at the same Winston `error` threshold as `error`
 
 Log level can be configured via `config.logLevel` and changed at runtime using `setLogLevel()`.
+
+`error` and `critical` filter at the same Winston `error` threshold, so both display every error-level entry. What separates a critical entry from a standard one is its `severity` field (`"critical"` vs `"standard"`), not the configured log level — see [Error Severity](#error-severity).
 
 ### Log Types
 

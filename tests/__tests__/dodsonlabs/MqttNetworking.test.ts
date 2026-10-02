@@ -196,6 +196,44 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
     expect(infoCall).toBeDefined();
     expect(infoCall?.[2]).toMatchObject({ logLevel: "debug" });
   });
+
+  it("warns again when an already-changed restart-only value is written a second time", () => {
+    // updateConfig diffs the new config against the STARTUP baseline, not the
+    // last desired config (which this.configuration becomes after the first
+    // commit). The running process still holds the original startup value, so
+    // a second write of the same unapplied restart-only value must warn again
+    // — diffing against desired config would incorrectly report no change.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+
+    networking.updateConfig({ ...baseConfig, apiPort: 3399 });
+    networking.updateConfig({ ...baseConfig, apiPort: 3399 });
+
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "configuration_restart_only_keys",
+    );
+    expect(warns).toHaveLength(2);
+    for (const warn of warns) {
+      expect(warn[2]).toMatchObject({ keys: ["apiPort"] });
+    }
+  });
+
+  it("does not warn for a restart-only value that still matches the startup baseline", () => {
+    // Writing back a restart-only value that equals the startup value is a
+    // no-op against the baseline the running process actually uses, so no
+    // warning — even if the desired config had drifted in between.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+
+    networking.updateConfig({ ...baseConfig, apiPort: 3399 });
+    networking.updateConfig({ ...baseConfig }); // apiPort back to startup value
+
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "configuration_restart_only_keys",
+    );
+    expect(warns).toHaveLength(1);
+    expect(warns[0][2]).toMatchObject({ keys: ["apiPort"] });
+  });
 });
 
 describe("MqttNetworking.close() shutdown ordering", () => {
@@ -441,6 +479,78 @@ describe("MqttNetworking.close() shutdown branches (deterministic)", () => {
     expect(mqttTimeout?.[2]?.timeoutMs).toBe(70);
     // The stuck graceful close was rescued by the forced disconnect.
     expect(mockClient.end).toHaveBeenCalledWith(true, expect.any(Function));
+  });
+});
+
+describe("MQTT disconnect logging (intentional vs unexpected, regression P3-3)", () => {
+  // A clean stop (SIGTERM/SIGINT, a deploy restart) must not read as a
+  // connection loss. perform_close sets closing=true before the 'close'
+  // event can fire, so on_disconnect logs an intentional disconnect at INFO
+  // rather than WARN; an unexpected transport close stays a WARN. Both paths
+  // still run the subscription-state reset in on_disconnect.
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  /** Construct on a fake client, returning the instance and its event handlers. */
+  function build(): {
+    logger: MockLogger & ILogger;
+    handlers: Record<string, (...args: unknown[]) => unknown>;
+    networking: MqttNetworking;
+  } {
+    const logger = createMockLogger();
+    mockConnect.mockReset();
+    mockConnect.mockReturnValue(createMockMqttClient());
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const handlers: Record<string, (...args: unknown[]) => unknown> = {};
+    for (const call of onMock.mock.calls) {
+      handlers[call[0] as string] = call[1] as (...args: unknown[]) => unknown;
+    }
+    return { logger, handlers, networking };
+  }
+
+  it("logs an unexpected transport close as a WARN", () => {
+    const { logger, handlers } = build();
+
+    // No shutdown in flight: this is a genuine connection loss.
+    handlers.close();
+
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_disconnected"
+    );
+    expect(warns).toHaveLength(1);
+    expect(
+      logger.write_info.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_disconnected"
+      )
+    ).toBe(false);
+  });
+
+  it("logs an intentional shutdown disconnect as INFO, not WARN", async () => {
+    const { logger, handlers, networking } = build();
+
+    // Starting the close path sets closing=true synchronously, before the
+    // 'close' event fires, so the disconnect is an intentional stop.
+    const closePromise = networking.close(2000);
+    handlers.close();
+    await closePromise;
+
+    const infos = logger.write_info.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_disconnected"
+    );
+    expect(infos).toHaveLength(1);
+    expect(infos[0][2]).toMatchObject({ event: "mqtt_disconnected" });
+    expect(
+      logger.write_warn.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_disconnected"
+      )
+    ).toBe(false);
   });
 });
 

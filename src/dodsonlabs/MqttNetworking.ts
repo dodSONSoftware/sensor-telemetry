@@ -24,6 +24,25 @@ import type { z } from "zod";
  */
 export const MAX_MQTT_PAYLOAD_BYTES = 64 * 1024;
 
+// Configuration keys captured at construction that cannot be hot-reloaded:
+// the MQTT connection (broker, topics), the HTTP port, and the
+// PrometheusWriter's source-label sanitization / cardinality constants.
+// updateConfig diffs a new configuration's values for these keys against the
+// startup baseline (startupRestartOnlyConfig) to report which take effect on
+// the next restart.
+const RESTART_ONLY_KEYS = [
+    "mqttBrokerIpAddress",
+    "mqttTopicTelemetry",
+    "mqttTopicLog",
+    "mqttTopicHealth",
+    "apiPort",
+    "sensorSourceMaxLength",
+    "sensorSourceValidCharsRegex",
+    "sensorSourceCardinalityCap",
+] as const;
+
+type RestartOnlyKey = (typeof RESTART_ONLY_KEYS)[number];
+
 export class MqttNetworking implements IMqttNetworking {
 
     // ********
@@ -37,6 +56,21 @@ export class MqttNetworking implements IMqttNetworking {
     ) {
         // save parameters
         this.configuration = config;
+        // Snapshot the restart-only values once at startup. These are the
+        // values the RUNNING process actually uses (captured before any
+        // /write-config or /reload-config can persist a different value),
+        // and they stay fixed for the process lifetime — see
+        // startupRestartOnlyConfig.
+        this.startupRestartOnlyConfig = {
+            mqttBrokerIpAddress: config.mqttBrokerIpAddress,
+            mqttTopicTelemetry: config.mqttTopicTelemetry,
+            mqttTopicLog: config.mqttTopicLog,
+            mqttTopicHealth: config.mqttTopicHealth,
+            apiPort: config.apiPort,
+            sensorSourceMaxLength: config.sensorSourceMaxLength,
+            sensorSourceValidCharsRegex: config.sensorSourceValidCharsRegex,
+            sensorSourceCardinalityCap: config.sensorSourceCardinalityCap,
+        };
         this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
         this.mqtt_topic_telemetry = config.mqttTopicTelemetry;
         this.mqtt_topic_log = config.mqttTopicLog || "";
@@ -105,6 +139,27 @@ export class MqttNetworking implements IMqttNetworking {
     // during an in-flight close reuses the first close instead of re-entering
     // the client's end() path.
     private closePromise: Promise<void> | undefined;
+    // ----
+    // Baseline values for the restart-only keys, captured once at
+    // construction and immutable for the process lifetime. updateConfig
+    // diffs a new configuration's restart-only values against these — NOT
+    // against this.configuration, which tracks the latest DESIRED config
+    // after each commit — so a restart-required warning describes the
+    // difference from the value actually running in this process: repeating
+    // an unapplied value keeps the warning, and reverting a value back to
+    // the running one clears it. this.configuration keeps its current role
+    // as the latest desired/persisted config; these two states must not be
+    // conflated.
+    private readonly startupRestartOnlyConfig: Pick<
+        z.infer<typeof configSchema>,
+        RestartOnlyKey
+    >;
+    // ----
+    // Set true when a graceful shutdown is in flight (perform_close). The
+    // mqtt 'close' event fires asynchronously after end(), so on_disconnect
+    // reads this to log an intentional disconnect at INFO instead of a WARN
+    // that would read as an outage in the logs.
+    private closing = false;
     // ----
     // Consecutive connection failures since the last successful connect.
     // mqtt.js retries every reconnectPeriod (5 s), so an outage would
@@ -218,6 +273,13 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     private async perform_close(timeout_ms: number): Promise<void> {
+        // Mark the shutdown in flight BEFORE any client work so the 'close'
+        // event (fired asynchronously by end() later in this path) sees
+        // closing=true and on_disconnect() logs an intentional disconnect
+        // rather than a WARN that would read as an outage. Set at the very
+        // top so it cannot race ahead of the client's close event.
+        this.closing = true;
+
         this.logger.write_info(
             "networking/close",
             `Shutting down service (total close deadline: ${timeout_ms}ms)...`,
@@ -344,19 +406,14 @@ export class MqttNetworking implements IMqttNetworking {
      * @param newConfig - New configuration object
      */
     public updateConfig(newConfig: z.infer<typeof configSchema>): void {
-        // Keys that are captured at construction and cannot be hot-reloaded.
-        const restartOnlyKeys: Array<keyof z.infer<typeof configSchema>> = [
-            "mqttBrokerIpAddress",
-            "mqttTopicTelemetry",
-            "mqttTopicLog",
-            "mqttTopicHealth",
-            "apiPort",
-            "sensorSourceMaxLength",
-            "sensorSourceValidCharsRegex",
-            "sensorSourceCardinalityCap",
-        ];
-        const restartOnlyChanged = restartOnlyKeys.filter(
-            (key) => !Object.is(this.configuration[key], newConfig[key])
+        // Diff the new configuration's restart-only values against the STARTUP
+        // baseline, not this.configuration: the next line replaces
+        // this.configuration with the latest DESIRED config, so diffing
+        // against it would report no change when an unapplied restart-only
+        // value is written twice (the running process still holds the original
+        // startup value, which is what the operator needs to be told).
+        const restartOnlyChanged = RESTART_ONLY_KEYS.filter(
+            (key) => !Object.is(this.startupRestartOnlyConfig[key], newConfig[key])
         );
 
         this.configuration = { ...newConfig };
@@ -534,14 +591,30 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     private on_disconnect(): void {
-        this.logger.write_warn(
-            "networking/onDisconnect",
-            "Disconnected from MQTT broker",
-            {
-                event: "mqtt_disconnected",
-                logType: "service",
-            }
-        );
+        if (this.closing) {
+            // An intentional shutdown (SIGTERM/SIGINT, a deployment restart, a
+            // container stop) is not an outage: log it at INFO rather than
+            // WARN so a clean stop does not read as a connection loss. The
+            // state reset below still runs — subscription state is invalidated
+            // exactly as for an unexpected close.
+            this.logger.write_info(
+                "networking/onDisconnect",
+                "Disconnected from MQTT broker (intentional shutdown)",
+                {
+                    event: "mqtt_disconnected",
+                    logType: "service",
+                }
+            );
+        } else {
+            this.logger.write_warn(
+                "networking/onDisconnect",
+                "Disconnected from MQTT broker",
+                {
+                    event: "mqtt_disconnected",
+                    logType: "service",
+                }
+            );
+        }
         // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
         // When it does, the 'connect' event fires on_connect() which resubscribes.
         // The broker-side subscriptions are gone with the session, so mark
@@ -556,6 +629,13 @@ export class MqttNetworking implements IMqttNetworking {
         payload: Buffer,
         _packet: mqtt.IPublishPacket
     ): void {
+        // The incoming topic is untrusted MQTT metadata, like every other
+        // value in the payload: bound it once for the log channel (message
+        // text AND structured metadata) so a protocol-legal oversized topic
+        // cannot bloat log lines. The raw `topic` stays intact for routing —
+        // the case-folded comparisons below use it unchanged.
+        const topicForLog = sysFunc.truncateForLog(topic);
+
         // Payload size guard, before toString() and JSON.parse(): an
         // oversized body would otherwise flow through string conversion
         // and the JSON parser into a large object graph and downstream
@@ -568,7 +648,7 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "mqtt_payload_too_large",
                     logType: "sensor",
-                    topic,
+                    topic: topicForLog,
                     byteLength: payload.length,
                     maxBytes: MAX_MQTT_PAYLOAD_BYTES,
                 }
@@ -592,7 +672,7 @@ export class MqttNetworking implements IMqttNetworking {
                     {
                         event: "mqtt_message_not_object",
                         logType: "sensor",
-                        topic,
+                        topic: topicForLog,
                     }
                 );
                 return;
@@ -605,7 +685,7 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "mqtt_message_parse_error",
                     logType: "sensor",
-                    topic,
+                    topic: topicForLog,
                     error,
                 }
             );
@@ -625,12 +705,12 @@ export class MqttNetworking implements IMqttNetworking {
 
         this.logger.write_debug(
             "networking/onMessage",
-            `Received message on topic: ${topic} (normalized: ${topicLower})`,
+            `Received message on topic: ${topicForLog} (normalized: ${topicForLog.toLowerCase()})`,
             {
                 event: "mqtt_message_received",
                 logType: "sensor",
-                topic,
-                normalizedTopic: topicLower,
+                topic: topicForLog,
+                normalizedTopic: topicForLog.toLowerCase(),
                 expectedTelemetryTopic: this.mqtt_topic_telemetry,
                 expectedTelemetryTopicNormalized: telemetryTopicLower,
                 expectedLogTopic: this.mqtt_topic_log,
@@ -655,7 +735,7 @@ export class MqttNetworking implements IMqttNetworking {
                 this.logger.write_debug(
                     "networking/onMessage",
                     `Routing to log handler (topic matches log topic)`,
-                    { event: "route_log", logType: "sensor", topic }
+                    { event: "route_log", logType: "sensor", topic: topicForLog }
                 );
                 if (this.forward_sensor_logs) {
                     this.handle_mqtt_message_log(json_doc);
@@ -665,7 +745,7 @@ export class MqttNetworking implements IMqttNetworking {
                 this.logger.write_debug(
                     "networking/onMessage",
                     `Routing to health handler (topic matches health topic)`,
-                    { event: "route_health", logType: "sensor", topic }
+                    { event: "route_health", logType: "sensor", topic: topicForLog }
                 );
                 this.handle_mqtt_message_health(json_doc);
             } else {
@@ -673,7 +753,7 @@ export class MqttNetworking implements IMqttNetworking {
                 this.logger.write_debug(
                     "networking/onMessage",
                     `Routing to telemetry handler`,
-                    { event: "route_telemetry", logType: "sensor", topic }
+                    { event: "route_telemetry", logType: "sensor", topic: topicForLog }
                 );
                 this.handle_mqtt_message(json_doc);
             }
@@ -684,7 +764,7 @@ export class MqttNetworking implements IMqttNetworking {
                 {
                     event: "mqtt_message_handling_error",
                     logType: "sensor",
-                    topic,
+                    topic: topicForLog,
                     error,
                 }
             );
@@ -1103,8 +1183,12 @@ export class MqttNetworking implements IMqttNetworking {
             return;
         }
 
-        const firmwareVersion = this.getFirmwareVersion(json_doc);
-
+        // NOTE: firmware_version is admitted only inside a successful
+        // validation branch below, after the required-field check passes —
+        // never before it. Firmware admission is independent of source
+        // freshness and is not freed by stale-source eviction, so a
+        // pre-validation admission would let a rejected (invalid) telemetry
+        // message permanently consume a firmware-version cardinality slot.
         this.logger.write_debug(
             "networking/handleV3Telemetry",
             `Processing V3 telemetry: device ${sysFunc.truncateForLog(device)} -> ${category} for source: ${sysFunc.truncateForLog(source)}`,
@@ -1114,7 +1198,6 @@ export class MqttNetworking implements IMqttNetworking {
                 source: sysFunc.truncateForLog(source),
                 device: sysFunc.truncateForLog(device),
                 category,
-                firmwareVersion,
             }
         );
 
@@ -1123,7 +1206,8 @@ export class MqttNetworking implements IMqttNetworking {
         // `accepted` tracks whether the message was admitted (known device
         // type AND its required fields valid): only then does the source
         // count as "seen" for the freshness gauge — a dropped reading is
-        // not sensor activity.
+        // not sensor activity, and (see the note above) only then is the
+        // firmware_version admitted.
         let accepted = false;
         switch (category) {
         case "air":
@@ -1132,6 +1216,8 @@ export class MqttNetworking implements IMqttNetworking {
             const pressureRequired = device === "bme280";
             if (this.is_telemetry_valid(devicePayload, ["temperature_c", "humidity_percent"], source) &&
                 (!pressureRequired || sysFunc.get_numeric_field(devicePayload, "pressure_pa", "pressure_pascal") !== undefined)) {
+                // Valid message: admit the firmware version, then publish.
+                const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_air({ air: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
@@ -1139,6 +1225,7 @@ export class MqttNetworking implements IMqttNetworking {
 
         case "water":
             if (this.is_telemetry_valid(devicePayload, ["temperature_c"], source)) {
+                const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_water({ water: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
@@ -1146,6 +1233,7 @@ export class MqttNetworking implements IMqttNetworking {
 
         case "light":
             if (this.is_telemetry_valid(devicePayload, ["lux", "uv_index"], source)) {
+                const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }
@@ -1156,6 +1244,7 @@ export class MqttNetworking implements IMqttNetworking {
             // calibrated reading; raw (16-bit ADC) is optional and
             // digital_state is ignored (nullable, not a useful gauge).
             if (this.is_telemetry_valid(devicePayload, ["relative_moisture_percent"], source)) {
+                const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_soil({ soil: devicePayload }, source, firmwareVersion);
                 accepted = true;
             }

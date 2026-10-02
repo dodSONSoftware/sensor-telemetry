@@ -891,6 +891,28 @@ describe("PrometheusWriter", () => {
       expect(call![2].requestId).toBe("req-42");
     });
 
+    it("bounds an over-long unmatched URL in the route_not_found audit log", async () => {
+      // An unauthenticated 404 probe can carry an arbitrarily long path;
+      // bound it for the log channel so a hostile client cannot bloat the
+      // audit line. The response is unaffected (still a 404) — only the
+      // logged value is capped.
+      logger.write_warn.mockClear();
+
+      const longPath = "/" + "a".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const res = await fetch(`http://127.0.0.1:${port}${longPath}`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(404);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "route_not_found"
+      );
+      expect(call).toBeDefined();
+      const loggedPath = call![2].path as string;
+      expect(loggedPath).toBe(`${longPath.slice(0, LOG_VALUE_MAX_LENGTH)}…`);
+      expect(loggedPath.length).toBe(LOG_VALUE_MAX_LENGTH + 1);
+    });
+
     it("normalizes a duplicated x-request-id header to a string, never an array", async () => {
       // Node's HTTP parser delivers a duplicated header as a single
       // comma-joined string, but the declared header type is

@@ -157,6 +157,73 @@ function driveRawPayload(
   };
 }
 
+/**
+ * Construct ONE MqttNetworking on the fake client and deliver several
+ * messages through the same "message" handler. Unlike driveMessage (a fresh
+ * instance — and thus a fresh auto-mocked promWriter — per message), this
+ * shares a single promWriter, so cross-message state (e.g. the
+ * firmware-version cardinality set) is observable in one place. Handlers run
+ * synchronously, so the calls are observable immediately after delivery.
+ */
+function driveMessages(
+  docs: Record<string, unknown>[]
+): { prom: MockProm; logger: MockLogger & ILogger } {
+  const logger = createMockLogger();
+  const networking = new MqttNetworking(baseConfig, logger);
+  const onMock = (
+    networking as unknown as { mqtt_client: { on: jest.Mock } }
+  ).mqtt_client.on;
+  const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
+  const messageCall = messageCalls.at(-1);
+  if (!messageCall) {
+    throw new Error("MqttNetworking did not register a 'message' handler");
+  }
+  const handler = messageCall[1] as (
+    topic: string,
+    payload: Buffer,
+    packet: unknown
+  ) => void;
+  for (const doc of docs) {
+    handler(baseConfig.mqttTopicTelemetry, Buffer.from(JSON.stringify(doc)), {});
+  }
+  return {
+    prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+    logger,
+  };
+}
+
+/**
+ * Drive a raw payload to the "message" handler on an EXPLICIT topic.
+ * driveMessage/driveRawPayload pin the topic to baseConfig.mqttTopicTelemetry,
+ * so they cannot reach the topic itself — which is what the topic-bounding
+ * regression tests need to exercise.
+ */
+function driveRawOnTopic(
+  topic: string,
+  payload: Buffer
+): { prom: MockProm; logger: MockLogger & ILogger } {
+  const logger = createMockLogger();
+  const networking = new MqttNetworking(baseConfig, logger);
+  const onMock = (
+    networking as unknown as { mqtt_client: { on: jest.Mock } }
+  ).mqtt_client.on;
+  const messageCalls = onMock.mock.calls.filter((call) => call[0] === "message");
+  const messageCall = messageCalls.at(-1);
+  if (!messageCall) {
+    throw new Error("MqttNetworking did not register a 'message' handler");
+  }
+  const handler = messageCall[1] as (
+    topic: string,
+    payload: Buffer,
+    packet: unknown
+  ) => void;
+  handler(topic, payload, {});
+  return {
+    prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+    logger,
+  };
+}
+
 beforeEach(() => {
   mockConnect.mockReset();
   mockConnect.mockReturnValue(createMockMqttClient());
@@ -604,6 +671,147 @@ describe("firmware version extraction", () => {
         (call) => call[2]?.event === "mqtt_message_handling_error"
       )
     ).toBe(false);
+  });
+});
+
+describe("firmware-version cardinality (regression P2-1)", () => {
+  // Firmware admission (admitFirmwareVersion -> distinct-value cardinality
+  // cap) must happen ONLY after the required-field validation passes. A
+  // pre-validation admission would let a rejected (invalid) telemetry
+  // message permanently consume a firmware-version slot — and, unlike
+  // source slots, firmware slots are never freed by stale-source eviction.
+  const fw = "1.2.3";
+  const validAirPayload = {
+    temperature_c: 25,
+    humidity_percent: 45,
+    pressure_pa: 100000,
+  };
+
+  it("does not admit firmware when V3 telemetry fails validation", () => {
+    // humidity_percent is required for air; the message is dropped before
+    // any firmware extraction, so admission, publishing, and freshness
+    // stamping must all be absent.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25 },
+    });
+
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("does not admit firmware for an unknown V3 device", () => {
+    // The unknown-device gate drops the message before firmware extraction.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "mystery9000",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25 },
+    });
+
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+  });
+
+  it("admits firmware for accepted telemetry and passes the admitted value to the publisher", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: validAirPayload,
+    });
+
+    expect(prom.admitFirmwareVersion).toHaveBeenCalledTimes(1);
+    expect(prom.admitFirmwareVersion).toHaveBeenCalledWith(fw);
+    expect(prom.publish_air).toHaveBeenCalledWith(
+      { air: validAirPayload },
+      "v3-src",
+      fw
+    );
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("v3-src");
+  });
+
+  it("does not let rejected telemetry consume firmware-version cardinality under a small cap", () => {
+    // The real writer's cap is a distinct-value set bounded by
+    // sensorSourceCardinalityCap (the writer's own cap logic is covered in
+    // PrometheusWriterCardinality.test.ts). Here we stand in with the same
+    // set+cap contract so the consequence is observable: one shared writer
+    // receives cap-many REJECTED messages and then one ACCEPTED message. The
+    // fix admits firmware only for accepted telemetry, so the rejected
+    // messages never reach admission and cannot exhaust the cap — under the
+    // pre-fix behavior their firmware versions would have filled it and the
+    // accepted message's firmware would have been rejected to the fallback.
+    const cap = 2;
+    const admitted = new Set<string>();
+    const rejected: string[] = [];
+    const proto = jest.mocked(PrometheusWriter.prototype.admitFirmwareVersion);
+    const originalImpl = proto.getMockImplementation();
+    proto.mockImplementation((version: string) => {
+      if (admitted.has(version)) return version;
+      if (admitted.size < cap) {
+        admitted.add(version);
+        return version;
+      }
+      rejected.push(version);
+      return "unknown_firmware";
+    });
+    try {
+      const { prom, logger } = driveMessages([
+        // cap-many rejected bme280 messages, distinct firmware each.
+        {
+          message_type: "telemetry",
+          device: "bme280",
+          source: "v3-src",
+          firmware_version: "bad-fw-0",
+          payload: { temperature_c: 25 },
+        },
+        {
+          message_type: "telemetry",
+          device: "bme280",
+          source: "v3-src",
+          firmware_version: "bad-fw-1",
+          payload: { temperature_c: 25 },
+        },
+        // One accepted message with a fresh firmware version.
+        {
+          message_type: "telemetry",
+          device: "bme280",
+          source: "v3-src",
+          firmware_version: "good-fw",
+          payload: validAirPayload,
+        },
+      ]);
+
+      // Only the accepted message reached admission; the rejected ones never
+      // touched the cap, so the accepted firmware is admitted rather than
+      // mapped to the fallback label.
+      expect(admitted).toEqual(new Set(["good-fw"]));
+      expect(rejected).toEqual([]);
+      expect(prom.admitFirmwareVersion).toHaveBeenCalledTimes(1);
+      expect(prom.admitFirmwareVersion).toHaveBeenCalledWith("good-fw");
+      expect(prom.publish_air).toHaveBeenCalledTimes(1);
+      expect(prom.publish_air).toHaveBeenCalledWith(
+        expect.anything(),
+        "v3-src",
+        "good-fw"
+      );
+      expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+      // No handling error escaped to the logger for the dropped messages.
+      expect(
+        logger.write_error.mock.calls.some(
+          (call) => call[2]?.event === "mqtt_message_handling_error"
+        )
+      ).toBe(false);
+    } finally {
+      proto.mockImplementation(originalImpl);
+    }
   });
 });
 
@@ -1122,6 +1330,47 @@ describe("bounding untrusted MQTT values before logging", () => {
     expect(warn?.[1]).toBe(`Unknown V3 device type 'mystery9000', dropping message`);
     expect(warn?.[2]).toMatchObject({ device: "mystery9000", source: "v3-src" });
     expect(warn?.[1]).not.toContain(ELL);
+  });
+
+  // The MQTT topic is untrusted protocol metadata, like the payload fields
+  // above: bound it for the log channel (structured metadata) while the
+  // case-folded routing comparison still uses the raw, untruncated value.
+  it("bounds a very long MQTT topic in the not-object warning (metadata)", () => {
+    const longTopic = "t".repeat(1000);
+    // A valid-JSON array body triggers the not-object drop, which logs the
+    // topic; routing is irrelevant here because that check precedes it.
+    const { logger } = driveRawOnTopic(longTopic, Buffer.from("[1, 2, 3]"));
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_message_not_object"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]?.topic).toBe(longTopic.slice(0, CAP) + ELL);
+    expect((warn?.[2]?.topic as string).length).toBe(CAP + 1);
+  });
+
+  it("bounds a very long MQTT topic in the oversized-payload warning (metadata)", () => {
+    const longTopic = "t".repeat(1000);
+    const oversize = Buffer.alloc(MAX_MQTT_PAYLOAD_BYTES + 1, 65);
+    const { logger } = driveRawOnTopic(longTopic, oversize);
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_payload_too_large"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]?.topic).toBe(longTopic.slice(0, CAP) + ELL);
+    expect((warn?.[2]?.topic as string).length).toBe(CAP + 1);
+  });
+
+  it("leaves a short MQTT topic unchanged in the not-object warning", () => {
+    const { logger } = driveRawOnTopic("iot/v3/telemetry", Buffer.from("[1]"));
+
+    const warn = logger.write_warn.mock.calls.find(
+      (call) => call[2]?.event === "mqtt_message_not_object"
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.[2]?.topic).toBe("iot/v3/telemetry");
+    expect(warn?.[2]?.topic).not.toContain(ELL);
   });
 });
 

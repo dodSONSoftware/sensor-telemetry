@@ -409,6 +409,11 @@ export class PrometheusWriter {
                 const requestId = Array.isArray(requestIdHeader)
                     ? requestIdHeader[0]
                     : requestIdHeader;
+                // Bound the request URL before it reaches the log: an
+                // unauthenticated 404 probe can carry an arbitrarily long
+                // path/query string, and the log-size policy caps untrusted
+                // input before it is written.
+                const requestUrlForLog = truncateForLog(req.url || "/");
                 this.logger.write_warn(
                     "prometheus/routeNotFound",
                     "HTTP route not found",
@@ -417,7 +422,7 @@ export class PrometheusWriter {
                         logType: "service",
                         requestId,
                         method: req.method,
-                        path: req.url || "/",
+                        path: requestUrlForLog,
                         statusCode: 404,
                     }
                 );

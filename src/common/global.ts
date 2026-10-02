@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-import os from "os";
 import path from "path";
 import type { IAbout } from "../dodsonlabs/Interfaces";
 import { Logger } from "../dodsonlabs/Logger";
@@ -34,15 +33,6 @@ let _aboutDudeInfo: IAbout | null = null;
 
 export function aboutDude(): IAbout {
     if (_aboutDudeInfo === null) {
-        const sys_info: { key: string; value: string }[] = [
-            { key: "platform", value: os.platform() },
-            { key: "arch", value: os.arch() },
-            { key: "hostname", value: os.hostname() },
-            { key: "uptime_seconds", value: String(Math.floor(os.uptime())) },
-            { key: "total_memory", value: `${Math.round(os.totalmem() / 1024 / 1024 / 1024)} GB` },
-            { key: "free_memory", value: `${Math.round(os.freemem() / 1024 / 1024 / 1024)} GB` },
-        ];
-
         _aboutDudeInfo = {
             about: {
                 name: "Sensor Telemetry Services",
@@ -52,7 +42,6 @@ export function aboutDude(): IAbout {
                 copyright: "Copyright © 2025-2026 dodson Software ( dodson labs )",
                 license: "Licensed under the MIT License with Patent Grant and NOTICE preservation."
             },
-            system_info: sys_info
         };
     }
 

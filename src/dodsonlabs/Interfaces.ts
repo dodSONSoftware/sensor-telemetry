@@ -23,11 +23,6 @@ export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export interface SystemInfo {
-  key: string;
-  value: string;
-}
-
 export interface IAbout {
   about: {
     name: string;
@@ -37,7 +32,6 @@ export interface IAbout {
     license: string;
     description: string;
   }
-  system_info: SystemInfo[];
 }
 
 // **** Logger
