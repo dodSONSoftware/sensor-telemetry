@@ -37,6 +37,16 @@ RUN mkdir -p /app/configs && chown -R appuser:appgroup /app/configs
 
 USER appuser
 
+# Internal API port: 3301 must stay in sync with config.yml's `apiPort`, the
+# application's source of truth. config.yml is a mounted file the baked image
+# cannot read at build time, so there is no single source of truth across the
+# file and the image — three places hardcode it (an intentional, documented
+# constraint, not a bug; see CLAUDE.md, "Configuration Options"):
+#   EXPOSE (below)         informational only
+#   HEALTHCHECK (below)    probes localhost:3301/health
+#   compose "3301:3301"    host -> container mapping (docker-compose.yml)
+# Changing apiPort means editing all three to match, or the healthcheck fails
+# and the host port never reaches the service.
 EXPOSE 3301
 
 WORKDIR /app/dist

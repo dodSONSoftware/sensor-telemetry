@@ -491,6 +491,15 @@ export class MqttNetworking implements IMqttNetworking {
      * filter) to a no-op, so the service could stay "connected" while
      * ingesting nothing — log the error and record the state that /ready
      * and the mqtt_subscription_active gauge report.
+     *
+     * A denied subscription is not signaled through `granted`. The broker
+     * rejects it with a SUBACK grant carrying a 0x80-bit code (128
+     * "unspecified error", 135 "not authorized", ...), and mqtt@5.15.2
+     * converts that into a truthy `err` before invoking the subscribe
+     * callback — the `granted` QoS is only written on the success path and
+     * never carries the 128. The `if (error)` branch below is therefore the
+     * guard that fails the subscription closed; inspecting `granted` alone
+     * would not catch a denial.
      */
     private on_subscribe_result(
         topic: string,

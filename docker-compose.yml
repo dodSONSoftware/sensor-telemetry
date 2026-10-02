@@ -4,6 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: sensor-telemetry
+    # Internal API port — must match config.yml's `apiPort` (the app's source
+    # of truth) and the Dockerfile EXPOSE/HEALTHCHECK. Change all three
+    # together, or the host port stops reaching the service and the
+    # healthcheck fails. Intentional, documented constraint (see CLAUDE.md,
+    # "Configuration Options"), not a bug.
     ports:
       - "3301:3301"
     volumes:
