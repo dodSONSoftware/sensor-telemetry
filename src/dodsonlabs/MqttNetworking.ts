@@ -531,6 +531,12 @@ export class MqttNetworking implements IMqttNetworking {
             );
             return;
         }
+        // Parse phase: JSON.parse is the only thing in this block that can
+        // throw, so a catch here is unambiguously a parse failure. It is
+        // kept separate from the handling phase below so a malformed body
+        // is never classified as a processing error (and vice versa), and
+        // one exception is never logged twice.
+        let json_doc: JsonObject;
         try {
             const parsed: unknown = JSON.parse(payload.toString());
             // A valid-JSON body can still be an array or a primitive, which
@@ -547,41 +553,61 @@ export class MqttNetworking implements IMqttNetworking {
                 );
                 return;
             }
-            const json_doc: JsonObject = parsed;
-
-            // Debug: log incoming message details with case-normalized comparison
-            const topicLower = topic.toLowerCase();
-            const telemetryTopicLower = this.mqtt_topic_telemetry.toLowerCase();
-            const logTopicLower = this.mqtt_topic_log ? this.mqtt_topic_log.toLowerCase() : "";
-            const healthTopicLower = this.mqtt_topic_health ? this.mqtt_topic_health.toLowerCase() : "";
-            // Scalar protocol fields, proven scalar at the boundary (never
-            // String()-converted — that recurses on nested structures);
-            // bounded for the log channel like every other untrusted value.
-            const debugMessageType = sysFunc.getStringField(json_doc, "message_type", "message-type");
-            const debugSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
-
-            this.logger.write_debug(
-                "networking/onMessage",
-                `Received message on topic: ${topic} (normalized: ${topicLower})`,
+            json_doc = parsed;
+        } catch (error) {
+            this.logger.write_error(
+                "networking/onMessageParse",
+                `Failed to parse MQTT message: ${error}`,
                 {
-                    event: "mqtt_message_received",
+                    event: "mqtt_message_parse_error",
                     logType: "sensor",
                     topic,
-                    normalizedTopic: topicLower,
-                    expectedTelemetryTopic: this.mqtt_topic_telemetry,
-                    expectedTelemetryTopicNormalized: telemetryTopicLower,
-                    expectedLogTopic: this.mqtt_topic_log,
-                    expectedLogTopicNormalized: logTopicLower,
-                    expectedHealthTopic: this.mqtt_topic_health,
-                    expectedHealthTopicNormalized: healthTopicLower,
-                    isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
-                    isHealthTopic: !!this.mqtt_topic_health && topicLower === healthTopicLower,
-                    isTelemetryTopic: topicLower === telemetryTopicLower,
-                    messageType: debugMessageType === undefined ? undefined : sysFunc.truncateForLog(debugMessageType),
-                    source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
+                    error,
                 }
             );
+            return;
+        }
 
+        // Debug: log incoming message details with case-normalized comparison
+        const topicLower = topic.toLowerCase();
+        const telemetryTopicLower = this.mqtt_topic_telemetry.toLowerCase();
+        const logTopicLower = this.mqtt_topic_log ? this.mqtt_topic_log.toLowerCase() : "";
+        const healthTopicLower = this.mqtt_topic_health ? this.mqtt_topic_health.toLowerCase() : "";
+        // Scalar protocol fields, proven scalar at the boundary (never
+        // String()-converted — that recurses on nested structures);
+        // bounded for the log channel like every other untrusted value.
+        const debugMessageType = sysFunc.getStringField(json_doc, "message_type", "message-type");
+        const debugSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
+
+        this.logger.write_debug(
+            "networking/onMessage",
+            `Received message on topic: ${topic} (normalized: ${topicLower})`,
+            {
+                event: "mqtt_message_received",
+                logType: "sensor",
+                topic,
+                normalizedTopic: topicLower,
+                expectedTelemetryTopic: this.mqtt_topic_telemetry,
+                expectedTelemetryTopicNormalized: telemetryTopicLower,
+                expectedLogTopic: this.mqtt_topic_log,
+                expectedLogTopicNormalized: logTopicLower,
+                expectedHealthTopic: this.mqtt_topic_health,
+                expectedHealthTopicNormalized: healthTopicLower,
+                isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
+                isHealthTopic: !!this.mqtt_topic_health && topicLower === healthTopicLower,
+                isTelemetryTopic: topicLower === telemetryTopicLower,
+                messageType: debugMessageType === undefined ? undefined : sysFunc.truncateForLog(debugMessageType),
+                source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
+            }
+        );
+
+        // Handling phase: a synchronous throw from a routed handler (the
+        // log and health handlers are sync; the telemetry handler's async
+        // rejections are owned by its own .catch below) is a processing
+        // failure, not a parse failure. The two catches are disjoint — an
+        // error either throws here or rejects in the telemetry .catch,
+        // never both — so no exception is logged twice.
+        try {
             // Route message based on topic (case-insensitive comparison)
             if (this.mqtt_topic_log && topicLower === logTopicLower) {
                 // Message from log topic - treat as log message
@@ -615,19 +641,20 @@ export class MqttNetworking implements IMqttNetworking {
                         {
                             event: "mqtt_message_handling_error",
                             logType: "sensor",
+                            topic,
                             error,
                         }
                     );
                 });
             }
-
         } catch (error) {
             this.logger.write_error(
-                "networking/onMessageParse",
-                `Failed to parse MQTT message: ${error}`,
+                "networking/onMessage",
+                `Error handling MQTT message: ${error}`,
                 {
-                    event: "mqtt_message_parse_error",
+                    event: "mqtt_message_handling_error",
                     logType: "sensor",
+                    topic,
                     error,
                 }
             );
