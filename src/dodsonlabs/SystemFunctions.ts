@@ -294,6 +294,14 @@ export function buildSourceValidCharsRegex(validChars: string): RegExp {
 // **** log output bounding
 
 /**
+ * Default cap for untrusted scalar values reaching a log message or
+ * structured log metadata (truncateForLog / truncateForLogList). Exported so
+ * call sites and tests reference the single project limit instead of
+ * hard-coding 256 in a second place.
+ */
+export const LOG_VALUE_MAX_LENGTH = 256;
+
+/**
  * Bound an untrusted value for inclusion in a log message or structured log
  * metadata. Prometheus label values are already charset/length/cardinality
  * bounded, but the logging path was not: MQTT payload values such as source,
@@ -307,7 +315,7 @@ export function buildSourceValidCharsRegex(validChars: string): RegExp {
  * `maxLength` are returned unchanged. A new string is always produced; the
  * input is never mutated.
  */
-export function truncateForLog(value: unknown, maxLength: number = 256): string {
+export function truncateForLog(value: unknown, maxLength: number = LOG_VALUE_MAX_LENGTH): string {
   const text = String(value);
   if (text.length <= maxLength) {
     return text;
@@ -326,7 +334,7 @@ export function truncateForLog(value: unknown, maxLength: number = 256): string 
 export function truncateForLogList(
   values: readonly unknown[],
   maxItems: number = 10,
-  maxLength: number = 256,
+  maxLength: number = LOG_VALUE_MAX_LENGTH,
 ): string[] {
   return values.slice(0, maxItems).map((value) => truncateForLog(value, maxLength));
 }
@@ -429,6 +437,68 @@ export function get_numeric_field(
       return Math.trunc(numValue);
     }
     return numValue;
+  }
+  return undefined;
+}
+
+/**
+ * Extract a string scalar from an untrusted JSON object, trying each field
+ * name in order (pass snake_case/camelCase aliases in either order).
+ *
+ * MQTT protocol fields that are conceptually scalar (message_type, device,
+ * source, firmware_version, log level, health status) must be proven scalar
+ * at the MQTT boundary before entering internal processing. A blanket
+ * String(value) on arbitrary JSON is not validation: JavaScript's
+ * array-to-string conversion recursively joins nested arrays and throws
+ * RangeError (Maximum call stack size exceeded) on deeply nested hostile
+ * payloads, and the coercion silently turns booleans and objects into
+ * plausible-looking garbage strings.
+ *
+ * Only actual strings are accepted, including the empty string; anything
+ * else (number, boolean, null, object, array — nested or not) is treated as
+ * absent and the next alias is tried. Identifier fields where legacy
+ * firmware may emit a number (source, device, firmware_version) use
+ * getStringOrFiniteNumberField instead.
+ *
+ * Returns undefined if no field holds a string.
+ */
+export function getStringField(
+  obj: JsonObject | null | undefined,
+  ...fieldNames: string[]
+): string | undefined {
+  if (obj === null || obj === undefined) return undefined;
+  for (const fieldName of fieldNames) {
+    const value = obj[fieldName];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+/**
+ * Extract a string scalar with legacy numeric-scalar compatibility: a
+ * finite number is converted to its string form (123 -> "123", 0 -> "0"),
+ * because legacy firmware emits identifier fields such as source, device,
+ * and firmware_version as numbers.
+ *
+ * Everything else follows getStringField's contract exactly: non-finite
+ * numbers (NaN, +/-Infinity), booleans, null, objects, and arrays are
+ * rejected as absent and the next alias is tried — never String()-converted,
+ * so a deeply nested value cannot recurse through array-to-string
+ * conversion (RangeError) or masquerade as a usable label.
+ *
+ * Returns undefined if no field holds a string or finite number.
+ */
+export function getStringOrFiniteNumberField(
+  obj: JsonObject | null | undefined,
+  ...fieldNames: string[]
+): string | undefined {
+  if (obj === null || obj === undefined) return undefined;
+  for (const fieldName of fieldNames) {
+    const value = obj[fieldName];
+    if (typeof value === "string") return value;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value.toString();
+    }
   }
   return undefined;
 }

@@ -13,7 +13,7 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 - **MqttNetworking** (`src/dodsonlabs/MqttNetworking.ts`) — MQTT client and Prometheus writer integration
 - **PrometheusWriter** (`src/dodsonlabs/PrometheusWriter.ts`) — Prometheus metric registration and HTTP server
 - **Logger** (`src/dodsonlabs/Logger.ts`) — Winston-based logging abstraction
-- **SystemFunctions** (`src/dodsonlabs/SystemFunctions.ts`) — File I/O, error handling, formatting utilities, and log-value bounding (`truncateForLog` / `truncateForLogList` cap untrusted MQTT values before they reach the log)
+- **SystemFunctions** (`src/dodsonlabs/SystemFunctions.ts`) — File I/O, error handling, formatting utilities, scalar field validation (`getStringField` / `getStringOrFiniteNumberField` prove MQTT protocol scalars are scalar at the boundary), and log-value bounding (`truncateForLog` / `truncateForLogList` cap untrusted MQTT values before they reach the log)
 - **Interfaces** (`src/dodsonlabs/Interfaces.ts`) — Type definitions for the service, including `JsonObject` (the untrusted-MQTT-JSON contract: `Record<string, unknown>`) and the `isJsonObject` type guard
 
 ### Entry Point
@@ -25,6 +25,8 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 Payloads above the 64 KiB application cap (`MAX_MQTT_PAYLOAD_BYTES`, checked at the top of `MqttNetworking.on_message` before `toString()` and `JSON.parse`) are dropped with an `mqtt_payload_too_large` warning that logs only the topic and lengths, never the contents. The guard bounds string conversion and parsing, not the MQTT client's receipt of the packet itself — the broker should enforce its own packet-size limit as well.
 
 Every incoming body is narrowed once at the parse site: valid JSON that is not an object is dropped with a `mqtt_message_not_object` warning before routing, and all handlers receive a `JsonObject` whose fields are read through the `SystemFunctions`/`MqttNetworking` field helpers (no handler indexes an untrusted value directly; present-but-non-object payloads/sections read as empty).
+
+Scalar protocol fields are proven scalar at the MQTT boundary before entering internal processing — never through blanket `String()` coercion, whose array-to-string conversion recurses on nested structures (a deeply nested hostile value throws `RangeError: Maximum call stack size exceeded`) and silently coerces booleans/objects into garbage strings: `getStringField` accepts only actual strings (`message_type`/`message-type`, log `level`, health `status`, forwarded-log label fields — non-string values are treated as missing), and `getStringOrFiniteNumberField` additionally accepts finite numbers as their string form for the identifier fields legacy firmware may emit numerically (`source`, `device`, `firmware_version`; `NaN`/`±Infinity` are rejected).
 
 V3 telemetry messages are per-device rather than per-section: each carries a top-level `device` field and a `payload` with only that device's readings. `MqttNetworking` maps known device types to the metric category they feed:
 

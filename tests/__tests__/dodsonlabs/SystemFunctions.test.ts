@@ -11,6 +11,8 @@ import {
   boundForLog,
   buildSourceValidCharsRegex,
   CONFIG_FILE_CANDIDATES,
+  getStringField,
+  getStringOrFiniteNumberField,
   get_numeric_field,
   get_timestamp_iso,
   read_file_yaml_first,
@@ -404,6 +406,96 @@ describe("get_numeric_field", () => {
   it("truncates fields named time/Time/millis/Millis to integers", () => {
     expect(get_numeric_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234);
     expect(get_numeric_field({ durationMillis: 87.4 }, "durationMillis")).toBe(87);
+  });
+});
+
+describe("getStringField (scalar string boundary)", () => {
+  // Protocol fields defined as scalar must be proven scalar at the MQTT
+  // boundary: only actual strings are accepted, everything else (including
+  // deeply nested structures that would throw RangeError under a blanket
+  // String()) is treated as absent.
+  const nestedArray = (function build() {
+    let node: unknown = ["abc"];
+    for (let i = 0; i < 100; i++) node = [node];
+    return node;
+  })();
+  const deepObject = (function build() {
+    let node: Record<string, unknown> = { leaf: "bottom" };
+    for (let i = 0; i < 100; i++) node = { child: node };
+    return node;
+  })();
+
+  it("accepts actual strings, including the empty string", () => {
+    expect(getStringField({ a: "abc" }, "a")).toBe("abc");
+    expect(getStringField({ a: "" }, "a")).toBe("");
+  });
+
+  it("returns undefined for non-string values", () => {
+    expect(getStringField({ a: 123 }, "a")).toBeUndefined();
+    expect(getStringField({ a: true }, "a")).toBeUndefined();
+    expect(getStringField({ a: false }, "a")).toBeUndefined();
+    expect(getStringField({ a: null }, "a")).toBeUndefined();
+    expect(getStringField({ a: {} }, "a")).toBeUndefined();
+    expect(getStringField({ a: [] }, "a")).toBeUndefined();
+    expect(getStringField({ a: [["abc"]] }, "a")).toBeUndefined();
+  });
+
+  it("returns undefined for deeply nested values without throwing", () => {
+    expect(() => getStringField({ a: nestedArray }, "a")).not.toThrow();
+    expect(getStringField({ a: nestedArray }, "a")).toBeUndefined();
+    expect(() => getStringField({ a: deepObject }, "a")).not.toThrow();
+    expect(getStringField({ a: deepObject }, "a")).toBeUndefined();
+  });
+
+  it("tries each alias in order and returns the first string", () => {
+    expect(getStringField({ b: "second" }, "a", "b")).toBe("second");
+    expect(getStringField({ a: 7, b: "second" }, "a", "b")).toBe("second");
+    expect(getStringField({ a: null, "message-type": "legacy" }, "message_type", "message-type")).toBe("legacy");
+  });
+
+  it("returns undefined for a missing/null object", () => {
+    expect(getStringField(undefined, "a")).toBeUndefined();
+    expect(getStringField(null, "a")).toBeUndefined();
+    expect(getStringField({}, "a")).toBeUndefined();
+  });
+});
+
+describe("getStringOrFiniteNumberField (scalar string-or-number boundary)", () => {
+  // Identifier fields (source, device, firmware_version) where legacy
+  // firmware may emit a number: finite numbers convert to their string
+  // form, everything else is rejected exactly like getStringField.
+  it("accepts strings and converts finite numbers to their string form", () => {
+    expect(getStringOrFiniteNumberField({ a: "abc" }, "a")).toBe("abc");
+    expect(getStringOrFiniteNumberField({ a: 123 }, "a")).toBe("123");
+    expect(getStringOrFiniteNumberField({ a: 0 }, "a")).toBe("0");
+    expect(getStringOrFiniteNumberField({ a: -4.5 }, "a")).toBe("-4.5");
+  });
+
+  it("rejects non-finite numbers", () => {
+    expect(getStringOrFiniteNumberField({ a: NaN, b: "x" }, "a", "b")).toBe("x");
+    expect(getStringOrFiniteNumberField({ a: Infinity }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: -Infinity }, "a")).toBeUndefined();
+  });
+
+  it("rejects booleans, null, objects, and arrays (no String() coercion)", () => {
+    expect(getStringOrFiniteNumberField({ a: true }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: false }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: null }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: {} }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: [] }, "a")).toBeUndefined();
+    expect(getStringOrFiniteNumberField({ a: [["abc"]] }, "a")).toBeUndefined();
+  });
+
+  it("does not throw on deeply nested values", () => {
+    let node: unknown = ["leaf"];
+    for (let i = 0; i < 1000; i++) node = [node];
+    expect(() => getStringOrFiniteNumberField({ a: node }, "a")).not.toThrow();
+    expect(getStringOrFiniteNumberField({ a: node }, "a")).toBeUndefined();
+  });
+
+  it("skips a rejected value and falls through to a later alias", () => {
+    expect(getStringOrFiniteNumberField({ a: [], b: 42 }, "a", "b")).toBe("42");
+    expect(getStringOrFiniteNumberField({ a: null, b: "x" }, "a", "b")).toBe("x");
   });
 });
 

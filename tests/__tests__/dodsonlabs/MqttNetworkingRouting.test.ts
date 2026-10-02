@@ -707,9 +707,9 @@ describe("sensor freshness (mark_source_seen)", () => {
 describe("untrusted JSON body handling (type-safety regression)", () => {
   // on_message narrows the JSON.parse result to JsonObject before routing:
   // valid JSON that is not an object is dropped with a warning instead of
-  // flowing into the handlers, and a null message_type is stringified to
-  // "null" and routed to the unknown-type branch instead of throwing in
-  // msg_type_raw.toString().
+  // flowing into the handlers, and a message_type that is not an actual
+  // string (null, object, array) is proven scalar at the boundary and
+  // takes the missing-type drop path instead of being String()-converted.
 
   function driveRawBody(
     body: string
@@ -777,12 +777,10 @@ describe("untrusted JSON body handling (type-safety regression)", () => {
     expect(prom.publish_air).not.toHaveBeenCalled();
   });
 
-  it("stringifies a null message_type surviving the ?? (both keys null) to the unknown-type branch instead of throwing", () => {
-    // With both keys null, msg_type_raw is null (not undefined), so the
-    // missing-type check passes. String(null) = "null" routes to the
-    // unknown-type warning; the previous msg_type_raw.toString() threw a
-    // TypeError here, which surfaced as a handling error and dropped the
-    // message without the structured warning.
+  it("treats a null message_type (both keys null) as missing instead of stringifying it", () => {
+    // Null is not a string: the scalar boundary reads it as absent, so the
+    // message takes the missing-type drop path rather than routing the old
+    // String(null) = "null" to the unknown-type branch.
     const { prom, logger } = driveMessage({
       message_type: null,
       "message-type": null,
@@ -792,11 +790,16 @@ describe("untrusted JSON body handling (type-safety regression)", () => {
       },
     });
 
-    const unknownTypeWarns = logger.write_warn.mock.calls.filter(
-      (call) => call[2]?.event === "mqtt_unknown_message_type"
-    );
-    expect(unknownTypeWarns).toHaveLength(1);
-    expect(unknownTypeWarns[0][2]).toMatchObject({ messageType: "null" });
+    expect(
+      logger.write_error.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_message_missing_type"
+      )
+    ).toBe(true);
+    expect(
+      logger.write_warn.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_unknown_message_type"
+      )
+    ).toBe(false);
     expect(prom.publish_air).not.toHaveBeenCalled();
     expect(
       logger.write_error.mock.calls.some(

@@ -554,6 +554,11 @@ export class MqttNetworking implements IMqttNetworking {
             const telemetryTopicLower = this.mqtt_topic_telemetry.toLowerCase();
             const logTopicLower = this.mqtt_topic_log ? this.mqtt_topic_log.toLowerCase() : "";
             const healthTopicLower = this.mqtt_topic_health ? this.mqtt_topic_health.toLowerCase() : "";
+            // Scalar protocol fields, proven scalar at the boundary (never
+            // String()-converted — that recurses on nested structures);
+            // bounded for the log channel like every other untrusted value.
+            const debugMessageType = sysFunc.getStringField(json_doc, "message_type", "message-type");
+            const debugSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
 
             this.logger.write_debug(
                 "networking/onMessage",
@@ -572,8 +577,8 @@ export class MqttNetworking implements IMqttNetworking {
                     isLogTopic: !!this.mqtt_topic_log && topicLower === logTopicLower,
                     isHealthTopic: !!this.mqtt_topic_health && topicLower === healthTopicLower,
                     isTelemetryTopic: topicLower === telemetryTopicLower,
-                    messageType: json_doc.message_type === undefined || json_doc.message_type === null ? undefined : sysFunc.truncateForLog(json_doc.message_type),
-                    source: json_doc.source === undefined || json_doc.source === null ? undefined : sysFunc.truncateForLog(json_doc.source),
+                    messageType: debugMessageType === undefined ? undefined : sysFunc.truncateForLog(debugMessageType),
+                    source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
                 }
             );
 
@@ -652,8 +657,16 @@ export class MqttNetworking implements IMqttNetworking {
 
     private async handle_mqtt_message(json_doc: JsonObject): Promise<void> {
         // initialize
-        const msg_type_raw = json_doc.message_type ?? json_doc["message-type"];
-        if (msg_type_raw === undefined) {
+        // message_type is a scalar protocol field: proven scalar at the
+        // boundary (a non-string value such as a nested array is treated as
+        // missing, never String()-converted — that recursion throws
+        // RangeError on deeply nested payloads).
+        const msg_type: string | undefined = sysFunc.getStringField(
+            json_doc,
+            "message_type",
+            "message-type"
+        );
+        if (msg_type === undefined) {
             this.logger.write_error(
                 "networking/handleMessage",
                 "Missing 'message_type' key, dropping message",
@@ -664,7 +677,6 @@ export class MqttNetworking implements IMqttNetworking {
             );
             return;
         }
-        const msg_type: string = String(msg_type_raw);
 
         // process message by 'message_type'
         switch (msg_type) {
@@ -756,10 +768,12 @@ export class MqttNetworking implements IMqttNetworking {
         let logData: JsonObject = isJsonObject(json_doc["payload"]) ? json_doc["payload"] : json_doc;
 
         // Extract top-level fields for metadata; V3 renamed schema_version
-        // to message_schema_version, so both keys are accepted.
-        const schemaVersion = this.getField(json_doc, "message_schema_version", "schema_version");
-        const runtimeId = this.getField(json_doc, "runtime_id");
-        const firmwareVersion = this.getField(json_doc, "firmware_version");
+        // to message_schema_version, so both keys are accepted. All are
+        // scalar protocol fields, proven scalar at the boundary (structured
+        // values are treated as absent, never String()-converted).
+        const schemaVersion = sysFunc.getStringField(json_doc, "message_schema_version", "schema_version");
+        const runtimeId = sysFunc.getStringField(json_doc, "runtime_id");
+        const firmwareVersion = sysFunc.getStringOrFiniteNumberField(json_doc, "firmware_version");
         const uptimeMs = sysFunc.get_numeric_field(json_doc, "uptime_ms");
         const sequence = sysFunc.get_numeric_field(json_doc, "sequence");
 
@@ -775,13 +789,19 @@ export class MqttNetworking implements IMqttNetworking {
         // Snake_case field names, with legacy fallbacks where older
         // firmware used different keys.
         // Source can be in the log data (legacy log messages) or at the
-        // top level (V3).
-        const source = this.getLogField(logData, "source") ?? json_doc["source"] ?? "unknown";
-        const level = this.getLogField(logData, "level", "log_level") ?? "info";
+        // top level (V3). Source and level are scalar protocol fields:
+        // proven scalar at the boundary, so a structured value is treated
+        // as absent (source falls back to "unknown", level to "info")
+        // instead of being String()-converted.
+        const source =
+            sysFunc.getStringOrFiniteNumberField(logData, "source") ??
+            sysFunc.getStringOrFiniteNumberField(json_doc, "source") ??
+            "unknown";
+        const level = sysFunc.getStringField(logData, "level", "log_level") ?? "info";
         const message = this.getLogField(logData, "message", "msg") ?? logData;
 
         // Gate: only forward if the sensor's log level meets the configured threshold
-        const sensor_level = this.sensor_log_level_to_enum(String(level).toLowerCase());
+        const sensor_level = this.sensor_log_level_to_enum(level.toLowerCase());
         if (sensor_level < this.forward_sensor_logs_level) {
             return;
         }
@@ -797,13 +817,16 @@ export class MqttNetworking implements IMqttNetworking {
         // Every label value comes from the untrusted payload, so each is
         // bounded for the log channel the same way the message text is.
         const metadata: Record<string, unknown> = {
-            event: sysFunc.truncateForLog(this.getLogField(logData, "event", "message_type") ?? "sensor_log_generic"),
+            // Scalar label fields, proven scalar at the boundary: an absent
+            // field stringifies to "undefined" exactly as it always has, and
+            // a structured value is treated as absent rather than recursed.
+            event: sysFunc.truncateForLog(sysFunc.getStringField(logData, "event", "message_type") ?? "sensor_log_generic"),
             logType: "sensor",
             source: sysFunc.truncateForLog(source),
             // Add Loki-compatible labels
-            module: sysFunc.truncateForLog(this.getLogField(logData, "module")),
-            function: sysFunc.truncateForLog(this.getLogField(logData, "function")),
-            level: sysFunc.truncateForLog(String(level).toLowerCase()),
+            module: sysFunc.truncateForLog(sysFunc.getStringField(logData, "module")),
+            function: sysFunc.truncateForLog(sysFunc.getStringField(logData, "function")),
+            level: sysFunc.truncateForLog(level.toLowerCase()),
         };
 
         // Add remaining top-level fields to metadata if available
@@ -822,22 +845,23 @@ export class MqttNetworking implements IMqttNetworking {
         const data = this.getLogField(logData, "data");
         if (data !== undefined) metadata.data = sysFunc.boundForLog(data);
 
-        // Add optional fields if present (snake_case preferred, with camelCase fallbacks)
-        const commandId = this.getLogField(logData, "command_id", "commandId");
+        // Add optional fields if present (snake_case preferred, with camelCase fallbacks).
+        // Each is a scalar protocol field, proven scalar at the boundary.
+        const commandId = sysFunc.getStringField(logData, "command_id", "commandId");
         if (commandId !== undefined) metadata.commandId = sysFunc.truncateForLog(commandId);
-        const target = this.getLogField(logData, "target", "Target");
+        const target = sysFunc.getStringField(logData, "target", "Target");
         if (target !== undefined) metadata.target = sysFunc.truncateForLog(target);
-        const targeted = this.getLogField(logData, "targeted", "Targeted");
+        const targeted = sysFunc.getStringField(logData, "targeted", "Targeted");
         if (targeted !== undefined) metadata.targeted = sysFunc.truncateForLog(targeted);
-        const responseTopic = this.getLogField(logData, "response_topic", "responseTopic");
+        const responseTopic = sysFunc.getStringField(logData, "response_topic", "responseTopic");
         if (responseTopic !== undefined) metadata.responseTopic = sysFunc.truncateForLog(responseTopic);
         const payloadSize = sysFunc.get_numeric_field(logData, "payload_size", "payloadSize");
         if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
         const durationMs = sysFunc.get_numeric_field(logData, "duration_ms", "durationMs");
         if (durationMs !== undefined) metadata.durationMs = durationMs;
-        const deviceIp = this.getLogField(logData, "device_ip", "deviceIp");
+        const deviceIp = sysFunc.getStringField(logData, "device_ip", "deviceIp");
         if (deviceIp !== undefined) metadata.deviceIp = sysFunc.truncateForLog(deviceIp);
-        const deviceSource = this.getLogField(logData, "device_source", "deviceSource");
+        const deviceSource = sysFunc.getStringField(logData, "device_source", "deviceSource");
         if (deviceSource !== undefined) metadata.deviceSource = sysFunc.truncateForLog(deviceSource);
 
         switch (sensor_level) {
@@ -934,9 +958,12 @@ export class MqttNetworking implements IMqttNetworking {
      * cardinality cap apply here rather than at each label site.
      */
     private getFirmwareVersion(json_doc: JsonObject): string {
-        const fwTopLevel = this.getField(json_doc, "firmware_version");
+        // firmware_version is a scalar protocol field: proven scalar at the
+        // boundary (a structured value reads as absent rather than being
+        // String()-converted into garbage — or a RangeError on nesting).
+        const fwTopLevel = sysFunc.getStringOrFiniteNumberField(json_doc, "firmware_version");
         if (fwTopLevel !== undefined) {
-            return this.promWriter.admitFirmwareVersion(String(fwTopLevel));
+            return this.promWriter.admitFirmwareVersion(fwTopLevel);
         }
         return "unknown";
     }
@@ -961,10 +988,11 @@ export class MqttNetworking implements IMqttNetworking {
      * Routes the device payload to the matching PrometheusWriter publisher.
      */
     private handle_v3_device_telemetry(json_doc: JsonObject, device: string): void {
-        // Coerce the untrusted payload value: firmware may emit source as a
-        // number, which would throw in sanitizeSource's .replace and drop the
-        // message. String(123) = "123" — a usable, distinct label.
-        const source = String(json_doc?.["source"] ?? "unknown");
+        // Firmware may emit source as a number, which would throw in
+        // sanitizeSource's .replace and drop the message: a finite number
+        // is coerced to its string form (123 -> "123"), a usable, distinct
+        // label. Anything else is "unknown" — never String()-converted.
+        const source = sysFunc.getStringOrFiniteNumberField(json_doc, "source") ?? "unknown";
         const rawDevicePayload = json_doc?.["payload"];
         if (rawDevicePayload === undefined || rawDevicePayload === null) {
             this.logger.write_error(
@@ -1067,10 +1095,11 @@ export class MqttNetworking implements IMqttNetworking {
      * sensor_health_up / sensor_uptime_seconds gauges.
      */
     private handle_mqtt_message_health(json_doc: JsonObject): void {
-        // Coerce the untrusted payload value: firmware may emit source as a
-        // number, which would throw in sanitizeSource's .replace and drop the
-        // message. String(123) = "123" — a usable, distinct label.
-        const source = String(json_doc?.["source"] ?? "unknown");
+        // Firmware may emit source as a number, which would throw in
+        // sanitizeSource's .replace and drop the message: a finite number
+        // is coerced to its string form (123 -> "123"), a usable, distinct
+        // label. Anything else is "unknown" — never String()-converted.
+        const source = sysFunc.getStringOrFiniteNumberField(json_doc, "source") ?? "unknown";
         const rawPayload = json_doc?.["payload"];
         if (rawPayload === undefined || rawPayload === null) {
             this.logger.write_error(
@@ -1227,24 +1256,25 @@ export class MqttNetworking implements IMqttNetworking {
         // field. The legacy V2 section-based path was removed, so a telemetry
         // message without a usable device is rejected rather than falling
         // through to an alternate schema.
-        const device = this.getField(json_doc, "device");
-        if (
-            device === undefined ||
-            device === null ||
-            String(device).trim().length === 0
-        ) {
+        // device is a scalar protocol field: proven scalar at the boundary
+        // (a structured value reads as absent, never String()-converted —
+        // that recursion throws RangeError on deeply nested payloads).
+        const device = sysFunc.getStringOrFiniteNumberField(json_doc, "device");
+        if (device === undefined || device.trim().length === 0) {
             this.logger.write_warn(
                 "networking/handleTelemetry",
                 "Missing 'device', dropping telemetry message",
                 {
                     event: "mqtt_telemetry_missing_device",
                     logType: "sensor",
-                    source: sysFunc.truncateForLog(String(json_doc["source"] ?? "unknown")),
+                    source: sysFunc.truncateForLog(
+                        sysFunc.getStringOrFiniteNumberField(json_doc, "source") ?? "unknown"
+                    ),
                 }
             );
             return;
         }
-        this.handle_v3_device_telemetry(json_doc, String(device));
+        this.handle_v3_device_telemetry(json_doc, device);
     }
 
     // ******** private telemetry publish helpers
