@@ -140,6 +140,8 @@ Shutdown is idempotent: a repeated signal during an in-flight close is ignored (
 
 The MQTT disconnect is classified by intent: `perform_close` sets a `closing` flag before initiating shutdown (so it cannot race the async `close` event), and `on_disconnect` logs an **intentional** stop (SIGTERM/SIGINT, a deploy restart, a container stop) at INFO as `mqtt_disconnected` rather than a WARN that would read as an outage in the logs; only an **unexpected** transport close logs the WARN. Both paths run the same subscription-state reset.
 
+MQTT client `error` events are classified by the actual connection state: an error while the client is **connected** (a failed publish, a mid-stream protocol error) is logged as an `mqtt_client_error` ERROR and is NOT counted as a connection failure — it cannot consume the first-failure ERROR slot of the next real outage (which would otherwise re-enter as a mere "attempt 2" WARN). Errors while **not connected** tier as connection failures: the first failure of an outage is a full `mqtt_connection_error` ERROR carrying the error object, each subsequent mqtt.js retry is a `mqtt_reconnect_failed` WARN with the attempt count, and a successful connect logs an `mqtt_reconnected` INFO and resets the counter.
+
 ## Building & Deployment
 
 ### Local Build

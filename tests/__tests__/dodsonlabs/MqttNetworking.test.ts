@@ -567,12 +567,16 @@ describe("MQTT reconnect error logging (noise reduction)", () => {
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
 
-  /** Construct on a fake client and return its registered event handlers. */
-  function build(): { logger: MockLogger & ILogger; handlers: Record<string, (...args: unknown[]) => unknown> } {
+  /** Construct on a fake client and return the client and its handlers. */
+  function build(): {
+    logger: MockLogger & ILogger;
+    handlers: Record<string, (...args: unknown[]) => unknown>;
+    client: { connected: boolean; subscribe: jest.Mock };
+  } {
     const logger = createMockLogger();
     // The shared fake lacks subscribe(); on_connect calls it per topic, so
     // this client carries a recording stand-in for the connect path.
-    const client = createMockMqttClient() as unknown as { subscribe: jest.Mock };
+    const client = createMockMqttClient() as unknown as { subscribe: jest.Mock; connected: boolean };
     client.subscribe = jest.fn();
     mockConnect.mockReset();
     mockConnect.mockReturnValue(client);
@@ -585,7 +589,7 @@ describe("MQTT reconnect error logging (noise reduction)", () => {
     for (const call of onMock.mock.calls) {
       handlers[call[0] as string] = call[1] as (...args: unknown[]) => unknown;
     }
-    return { logger, handlers };
+    return { logger, handlers, client };
   }
 
   it("logs the first connection failure as ERROR and repeats as WARN", () => {
@@ -631,6 +635,64 @@ describe("MQTT reconnect error logging (noise reduction)", () => {
       (call) => call[2]?.event === "mqtt_connection_error"
     );
     expect(errors).toHaveLength(2);
+  });
+
+  it("logs a client error while connected without touching the connection-failure tiering", () => {
+    const { logger, handlers, client } = build();
+    // A live connection: a failed publish / mid-stream protocol error is a
+    // client error, not a connection failure.
+    client.connected = true;
+    const clientError = new Error("write EPIPE");
+    handlers.error(clientError);
+
+    const clientErrors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_client_error"
+    );
+    expect(clientErrors).toHaveLength(1);
+    // Carrying the error object (message and stack) for diagnosis.
+    expect((clientErrors[0]?.[2] as Record<string, unknown>).error).toBe(clientError);
+    // The connection-failure tiering is untouched by it.
+    expect(
+      logger.write_error.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_connection_error"
+      )
+    ).toHaveLength(0);
+    expect(
+      logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_reconnect_failed"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("keeps the first-failure ERROR slot for the next real outage after a connected client error", () => {
+    const { logger, handlers, client } = build();
+    client.connected = true;
+    handlers.error(new Error("write EPIPE"));
+    // The connection drops: the outage's first failure must still get the
+    // full ERROR — the connected client error must not have consumed the
+    // slot (or the outage would re-enter as an "attempt 2" WARN).
+    client.connected = false;
+    const failure = new Error("connect ECONNREFUSED 10.0.0.1:1883");
+    handlers.error(failure);
+    handlers.error(failure);
+
+    const errors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_connection_error"
+    );
+    expect(errors).toHaveLength(1);
+    expect((errors[0]?.[2] as Record<string, unknown>).error).toBe(failure);
+    // The retry tiers normally from the outage's own first failure.
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_reconnect_failed"
+    );
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.[2]).toMatchObject({ attempt: 2, error: failure.message });
+    // The client error stands on its own.
+    expect(
+      logger.write_error.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_client_error"
+      )
+    ).toHaveLength(1);
   });
 
   it("does not announce a reconnect for the initial connection", async () => {

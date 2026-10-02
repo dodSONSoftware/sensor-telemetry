@@ -181,7 +181,10 @@ export class MqttNetworking implements IMqttNetworking {
     // mqtt.js retries every reconnectPeriod (5 s), so an outage would
     // otherwise log a full ERROR per retry; the counter lets on_error()
     // tier the noise (first failure = ERROR, repeats = WARN) and
-    // on_connect() mark the recovery (INFO).
+    // on_connect() mark the recovery (INFO). Client errors on a live
+    // connection are excluded (logged as mqtt_client_error, not counted):
+    // they are not connection failures and must not consume the
+    // first-failure ERROR slot of the next real outage.
     private consecutive_connection_failures = 0;
 
     // ********
@@ -788,8 +791,27 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     private on_error(error: unknown): void {
-        this.consecutive_connection_failures++;
         const err = sysFunc.ensureError(error);
+        if (this.is_connected()) {
+            // A client error on a LIVE connection (a failed publish, a
+            // protocol error mid-stream): not a connection failure, so it
+            // must not touch the reconnect-failure tiering — the next real
+            // outage would otherwise lose its first-failure ERROR to this
+            // unrelated event and re-enter as a mere "attempt 2" WARN.
+            // Log it as its own ERROR and leave the failure accounting
+            // intact; the mqtt library still owns recovery either way.
+            this.logger.write_error(
+                "networking/onError",
+                `MQTT client error while connected: ${err.message}`,
+                {
+                    event: "mqtt_client_error",
+                    logType: "service",
+                    error: err,
+                }
+            );
+            return;
+        }
+        this.consecutive_connection_failures++;
         if (this.consecutive_connection_failures === 1) {
             // First failure of the current outage: the full ERROR, with the
             // error object (message and stack) for diagnosis.
