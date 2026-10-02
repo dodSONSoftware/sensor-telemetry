@@ -1807,6 +1807,37 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("set_uptime_seconds (invalid input)", () => {
+    // The parameter (and the logged value) is in seconds, even though the
+    // V3 payload field is uptime_ms — the warning metadata must name the
+    // unit actually rejected, and an invalid value must not touch the gauge.
+    it("reports the invalid value in seconds terminology and leaves the gauge untouched", async () => {
+      const source = "uptime-invalid";
+      logger.write_warn.mockClear();
+
+      writer.set_uptime_seconds(source, -5);
+
+      const call = logger.write_warn.mock.calls.find(
+        (c) =>
+          c[2]?.event === "telemetry_invalid_value" &&
+          c[2]?.source === source
+      );
+      expect(call).toBeDefined();
+      expect(call![2].field).toBe("uptime_seconds");
+      expect(call![2].field).not.toBe("uptime_ms");
+      expect(call![2].value).toBe(-5);
+      // No series exists for the source's uptime gauge.
+      expect(await getMetrics()).not.toContain(
+        `sensor_health_uptime_seconds{source="${source}"}`
+      );
+      // A valid value afterwards still works.
+      writer.set_uptime_seconds(source, 3_600);
+      expect(await getMetrics()).toContain(
+        `sensor_health_uptime_seconds{source="${source}"} 3600`
+      );
+    });
+  });
+
   describe("sensor_last_seen_timestamp_seconds (sensor freshness)", () => {
     // Read directly from prom-client's global registry (the same one the
     // shared writer writes to) rather than scraping /metrics: the

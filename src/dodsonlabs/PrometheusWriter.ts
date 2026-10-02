@@ -2124,7 +2124,10 @@ export class PrometheusWriter {
                     event: "telemetry_invalid_value",
                     logType: "sensor",
                     source: sanitized,
-                    field: "uptime_ms",
+                    // This method's parameter (and the logged value) is in
+                    // SECONDS, even though the V3 payload field is
+                    // uptime_ms — name the unit actually rejected.
+                    field: "uptime_seconds",
                     value: seconds,
                 }
             );
