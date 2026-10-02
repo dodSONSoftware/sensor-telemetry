@@ -435,9 +435,8 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
   });
 
   it("never evicts the fallback labels (unknown, unknown_source)", async () => {
-    // Runs last of the eviction tests: the "unknown" label it admits below
-    // holds a cap slot for the rest of the file, and the close() test does
-    // not care about slots.
+    // Runs last of the eviction tests: the close() test that follows does
+    // not care about admission slots.
     // freshly (from the re-arm test) holds one slot; fill the second, then
     // overflow to unknown_source.
     writer.mark_source_seen("overflow-x");
@@ -453,8 +452,8 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     expect(await seriesValue("sensor_health_cpu_temperature_c", "freshly")).toBeUndefined();
     expect(await seriesValue("sensor_health_cpu_temperature_c", "overflow-x")).toBeUndefined();
 
-    // With both slots freed by that eviction, a blank source admits the
-    // "unknown" label; it must survive the same way.
+    // A blank source maps to the shared "unknown" fallback (which holds no
+    // cap slot); it must survive the sweep the same way.
     writer.mark_source_seen("");
     expect(await seriesValue("sensor_last_seen_timestamp_seconds", "unknown")).toBeDefined();
 

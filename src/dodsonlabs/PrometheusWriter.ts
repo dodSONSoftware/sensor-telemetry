@@ -1400,23 +1400,42 @@ export class PrometheusWriter {
      * Admit a source as a Prometheus label value.
      * resolveSourceLabel() bounds each value's length and charset AND
      * preserves raw-source identity (no silent collisions), and this
-     * additionally caps distinct admitted values at sourceCardinalityCap.
-     * A source whose resolved label would exceed the cap maps to the fixed
-     * "unknown_source" fallback label and is counted in
-     * sensor_sources_rejected_total instead of minting a new series. The
-     * warning fires once per cap; the counter increments once per DISTINCT
-     * rejected source per rejection episode (tracked in rejectedSources —
-     * a single health message resolves the label 17+ times and must not
-     * count 17 times).
+     * additionally caps distinct admitted CONCRETE sources at
+     * sourceCardinalityCap. A source whose resolved label would exceed the
+     * cap maps to the fixed "unknown_source" fallback label and is counted
+     * in sensor_sources_rejected_total instead of minting a new series.
+     * The warning fires once per cap; the counter increments once per
+     * DISTINCT rejected source per rejection episode (tracked in
+     * rejectedSources — a single health message resolves the label 17+
+     * times and must not count 17 times).
      *
-     * Invariant: sourceLabelOwnership and admittedSources stay in
-     * lockstep — a label is claimed only when it is admitted here and
-     * unclaimed exactly when evictStaleSource frees it. `owner === source`
-     * therefore implies the label is admitted, and the ownership map can
-     * never grow past the cardinality cap.
+     * Shared fallback labels (unknown / unknown_source) are shared
+     * identities, not concrete source identities: they are returned before
+     * any admission accounting, so they never occupy a cap slot and never
+     * receive ownership entries. That is what keeps a blank source on
+     * "unknown" for the process lifetime — once the concrete cap saturates
+     * the rejection branch below must not remap it to "unknown_source" and
+     * split its telemetry and freshness series across two identities.
+     *
+     * Invariant: for concrete labels, sourceLabelOwnership and
+     * admittedSources stay in lockstep — a label is claimed only when it
+     * is admitted here and unclaimed exactly when evictStaleSource frees
+     * it. `owner === source` therefore implies the label is admitted, and
+     * the ownership map can never grow past the cardinality cap. Fallback
+     * labels belong to neither structure (see NON_EVICTABLE_SOURCES).
      */
     private admitSource(source: string): string {
         const label = this.resolveSourceLabel(source);
+        // Shared fallback labels are never concrete source identities:
+        // they do not enter admittedSources (the cap counts only concrete
+        // sources) and never receive ownership entries (blank churn cannot
+        // exhaust the map, and a real source sanitizing to one is
+        // disambiguated in resolveSourceLabel instead). Returned before
+        // the concrete accounting so a blank source stays "unknown" even
+        // after the concrete-source cap is full.
+        if (PrometheusWriter.NON_EVICTABLE_SOURCES.has(label)) {
+            return label;
+        }
         const owner = this.sourceLabelOwnership.get(label);
         if (owner === source) {
             return label;
@@ -1431,13 +1450,7 @@ export class PrometheusWriter {
         }
         if (this.admittedSources.size < this.sourceCardinalityCap) {
             this.admittedSources.add(label);
-            // Reserved fallback labels are shared identities (every blank
-            // source maps to "unknown"): they consume a cap slot like any
-            // other label but are never claimed, so a second blank source
-            // reuses them instead of being misread as a collision.
-            if (!PrometheusWriter.NON_EVICTABLE_SOURCES.has(label)) {
-                this.sourceLabelOwnership.set(label, source);
-            }
+            this.sourceLabelOwnership.set(label, source);
             // Admission ends any rejection episode for this label: a
             // later re-rejection (after cap churn) counts again.
             this.rejectedSources.delete(label);
