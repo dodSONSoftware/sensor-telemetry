@@ -1351,6 +1351,51 @@ describe("health status scalar boundary (regression P2-1)", () => {
   });
 });
 
+describe("deeply nested degraded_reasons (regression P2-1)", () => {
+  // degraded_reasons is validated as an array, but its individual elements
+  // are not guaranteed to be scalar. The old String(value) coercion in
+  // truncateForLog overflowed the stack at a few thousand levels (RangeError)
+  // — AFTER some health gauges were already written — leaving partial state
+  // with a stale freshness stamp. Reasons are now structurally bounded
+  // before stringification, so the message processes to completion.
+  const NEST = 25000;
+
+  it("completes health processing with bounded log metadata and no error events", () => {
+    const body = `{"message_type":"health","source":"test-health-deep","payload":{"cpu_temperature_c":42,"degraded_reasons":[${"[".repeat(NEST)}"leaf"${"]".repeat(NEST)}]}}`;
+    // Under the 64 KiB payload cap: this exercises the stringification
+    // defect, not the size guard.
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(MAX_MQTT_PAYLOAD_BYTES);
+    const { prom, logger } = driveRawPayload(Buffer.from(body, "utf8"));
+
+    // No RangeError surfaced as a parse or handling error.
+    const errorEvents = logger.write_error.mock.calls.map(
+      (call) => (call[2] as Record<string, unknown>)?.event
+    );
+    expect(errorEvents).not.toContain("mqtt_message_parse_error");
+    expect(errorEvents).not.toContain("mqtt_message_handling_error");
+
+    // The message processed to completion (no partial state): the cpu gauge
+    // was set and the source stamped fresh.
+    expect(prom.set_cpu_temp).toHaveBeenCalledWith("test-health-deep", 42);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledWith("test-health-deep");
+
+    // The degraded reason is still surfaced as a warn ...
+    const degraded = logger.write_warn.mock.calls.find(
+      (call) => (call[2] as Record<string, unknown>)?.event === "v3_health_degraded"
+    );
+    expect(degraded).toBeDefined();
+    // ... with its metadata bounded: each reason is capped at the project
+    // log limit, and no unbounded bracket expansion leaks into the log.
+    const reasons = degraded?.[2]?.degraded_reasons as unknown;
+    expect(Array.isArray(reasons)).toBe(true);
+    for (const reason of reasons as string[]) {
+      expect(reason.length).toBeLessThanOrEqual(LOG_VALUE_MAX_LENGTH + 1);
+      expect(reason).not.toContain("[".repeat(100));
+    }
+  });
+});
+
 describe("scalar boundary for untrusted protocol fields (regression P2-1)", () => {
   // Every scalar protocol field must treat a structured (non-string,
   // non-finite-number) value exactly like an absent one — through the

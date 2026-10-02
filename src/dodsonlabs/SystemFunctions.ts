@@ -309,14 +309,32 @@ export const LOG_VALUE_MAX_LENGTH = 256;
  * controlled and can be arbitrarily long, so logging them raw lets a hostile
  * publisher create disproportionately large log entries.
  *
- * The value is coerced to a string; if it exceeds `maxLength` the first
- * `maxLength` characters are kept followed by a Unicode ellipsis, so the value
- * stays recognizable rather than being silently dropped. Values at or under
- * `maxLength` are returned unchanged. A new string is always produced; the
- * input is never mutated.
+ * Strings pass through as-is; other scalars (numbers, booleans, null,
+ * undefined) stringify exactly as String(value) always has. Arrays are the
+ * one value class String() cannot safely handle: array-to-string conversion
+ * joins element by element and recurses on nested arrays, so a deeply nested
+ * hostile payload (e.g. a degraded_reasons element) throws RangeError
+ * (Maximum call stack size exceeded). Arrays are therefore structurally
+ * bounded first — depth, item count, and per-string length, all capped by
+ * boundForLog — and serialized with JSON.stringify, which cannot recurse or
+ * throw on the finite bounded graph.
+ *
+ * If the result exceeds `maxLength` the first `maxLength` characters are kept
+ * followed by a Unicode ellipsis, so the value stays recognizable rather than
+ * being silently dropped. Values at or under `maxLength` are returned
+ * unchanged. A new string is always produced; the input is never mutated.
  */
 export function truncateForLog(value: unknown, maxLength: number = LOG_VALUE_MAX_LENGTH): string {
-  const text = String(value);
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else if (Array.isArray(value)) {
+    // boundForLog first: a bare JSON.stringify of the raw value would still
+    // recurse deeply enough to throw before the length cap could apply.
+    text = JSON.stringify(boundForLog(value)) ?? String(value);
+  } else {
+    text = String(value);
+  }
   if (text.length <= maxLength) {
     return text;
   }

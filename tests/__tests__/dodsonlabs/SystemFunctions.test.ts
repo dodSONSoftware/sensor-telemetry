@@ -15,6 +15,7 @@ import {
   getStringOrFiniteNumberField,
   get_numeric_field,
   get_timestamp_iso,
+  LOG_VALUE_MAX_LENGTH,
   read_file_yaml_first,
   truncateForLog,
   truncateForLogList,
@@ -559,6 +560,31 @@ describe("truncateForLog", () => {
     expect(truncateForLog("abcdefghij", 4)).toBe("abcd…");
     expect(truncateForLog("abcd", 4)).toBe("abcd");
   });
+
+  it("serializes shallow arrays as JSON", () => {
+    // Arrays take the structurally bounded path (see the deep-nesting
+    // regression below), so their log form is a JSON serialization.
+    expect(truncateForLog([1, "ok"])).toBe('[1,"ok"]');
+  });
+
+  it("survives a deeply nested array without RangeError, bounded by maxLength (regression P2-1)", () => {
+    // String() joins arrays element by element and recurses on nested
+    // arrays, overflowing the stack at a few thousand levels; 5,000 is
+    // well past that.
+    let value: unknown = 1;
+    for (let i = 0; i < 5000; i += 1) {
+      value = [value];
+    }
+
+    expect(() => truncateForLog(value)).not.toThrow();
+    const result = truncateForLog(value);
+    // Bounded by the configured maximum, not by the input's depth.
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeLessThanOrEqual(LOG_VALUE_MAX_LENGTH + 1);
+    // No unbounded structural expansion: the raw nesting is replaced by
+    // the depth-capped bounded form.
+    expect(result).not.toContain("[".repeat(100));
+  });
 });
 
 describe("truncateForLogList", () => {
@@ -604,6 +630,19 @@ describe("truncateForLogList", () => {
     const result = truncateForLogList(input);
     expect(result).not.toBe(input);
     expect(input).toEqual(snapshot);
+  });
+
+  it("survives a deeply nested element without RangeError (regression P2-1)", () => {
+    let value: unknown = 1;
+    for (let i = 0; i < 5000; i += 1) {
+      value = [value];
+    }
+
+    expect(() => truncateForLogList([value])).not.toThrow();
+    const result = truncateForLogList([value]);
+    expect(result).toHaveLength(1);
+    expect(result[0].length).toBeLessThanOrEqual(LOG_VALUE_MAX_LENGTH + 1);
+    expect(result[0]).not.toContain("[".repeat(100));
   });
 });
 
