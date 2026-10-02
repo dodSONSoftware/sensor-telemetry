@@ -138,6 +138,12 @@ export class PrometheusWriter {
     // single warn line (the counters carry the ongoing signal).
     private sourceCapExceededWarned = false;
     private firmwareCapExceededWarned = false;
+    // The blank/all-invalid-source warning is resolved independently by
+    // every metric setter (one health message calls admitSource 17+ times),
+    // so without a latch a single sustained condition would flood the WARN
+    // channel. Like the cap latches, the first observation is warned once;
+    // the ongoing condition stays visible through the metrics themselves.
+    private blankSourceWarned = false;
 
     // ---- stale-source removal (config: staleSourceRemovalSecs; 0 = disabled)
     // Last accepted-telemetry/health time (epoch ms) per admitted, non-fallback
@@ -1269,6 +1275,9 @@ export class PrometheusWriter {
      * - Truncates to MAX_SOURCE_LENGTH
      * - Falls back to "unknown" when stripping leaves nothing, so distinct
      *   all-invalid sources do not collide on an empty label
+     * - Warns once per process on the first blank/all-invalid source, since
+     *   every setter path resolves the label independently and a single
+     *   sustained condition would otherwise re-warn on every call
      * - Logs only when sanitization actually modifies the source beyond normalization
      */
     private sanitizeSource(source: string): string {
@@ -1277,20 +1286,27 @@ export class PrometheusWriter {
         // A source composed entirely of invalid characters would otherwise
         // collapse to "" and collide with every other all-invalid source on
         // a single empty label. Warn (not debug) because this is a data
-        // collision that must be visible at the default log level. For an
+        // collision that must be visible at the default log level — but
+        // warn-once: this method is invoked once per gauge (a single health
+        // message resolves the label 17+ times), so without the latch one
+        // misconfigured publisher would flood the WARN channel. The first
+        // observed raw source is the one the warning names. For an
         // all-invalid (or empty) source the dash normalization is a no-op,
         // so `source` is exactly the normalized form the message shows.
         if (sanitized === "") {
-            this.logger.write_warn(
-                "prometheus/sourceSanitized",
-                `Source '${truncateForLog(source)}' contains no valid characters — using 'unknown' label`,
-                {
-                    event: "sensor_source_sanitized",
-                    logType: "sensor",
-                    originalSource: truncateForLog(source),
-                    sanitizedSource: "unknown",
-                }
-            );
+            if (!this.blankSourceWarned) {
+                this.blankSourceWarned = true;
+                this.logger.write_warn(
+                    "prometheus/sourceSanitized",
+                    `Source '${truncateForLog(source)}' contains no valid characters — using 'unknown' label`,
+                    {
+                        event: "sensor_source_sanitized",
+                        logType: "sensor",
+                        originalSource: truncateForLog(source),
+                        sanitizedSource: "unknown",
+                    }
+                );
+            }
             return "unknown";
         }
 

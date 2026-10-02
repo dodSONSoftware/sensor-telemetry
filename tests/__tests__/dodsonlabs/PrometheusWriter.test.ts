@@ -1645,6 +1645,53 @@ describe("PrometheusWriter", () => {
       expect(metrics).toContain(`air_temperature{source="unknown"}`);
       expect(metrics).not.toContain(`air_temperature{source=""}`);
     });
+
+    it("warns only once across repeated setter calls and messages for a blank source", async () => {
+      // One V3 health message resolves the source label once PER HEALTH
+      // GAUGE (17+ setter paths), and repeated messages repeat that: a
+      // single sustained blank-source condition must stay one WARN line,
+      // not one per setter per message. Reset the latch so this test owns
+      // the first observation.
+      (writer as unknown as { blankSourceWarned: boolean }).blankSourceWarned = false;
+      logger.write_warn.mockClear();
+
+      const blank = "!!!";
+      writer.set_cpu_temp(blank, 50);
+      writer.set_heap_free_bytes(blank, 1_000_000);
+      writer.set_wifi_rssi_dbm(blank, -50);
+      writer.set_health_up(blank, 1);
+      writer.mark_source_seen(blank);
+
+      let warnings = logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "sensor_source_sanitized"
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0][2]).toMatchObject({
+        originalSource: blank,
+        sanitizedSource: "unknown",
+      });
+
+      // A second full message for the same condition does not re-warn.
+      writer.set_cpu_temp(blank, 51);
+      writer.set_heap_free_bytes(blank, 900_000);
+      writer.set_health_up(blank, 0);
+      warnings = logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "sensor_source_sanitized"
+      );
+      expect(warnings).toHaveLength(1);
+
+      // Metrics still land under the shared fallback identity, and valid
+      // telemetry after the blank-source traffic is processed normally.
+      const metrics = await getMetrics();
+      expect(metrics).toContain(`sensor_health_cpu_temperature_c{source="unknown"} 51`);
+      writer.publish_air(
+        { air: { temperature_c: 20, humidity_percent: 50 } },
+        "after-blank",
+        "1.0.0"
+      );
+      const after = await getMetrics();
+      expect(after).toContain(`air_temperature{source="after-blank"} 68`);
+    });
   });
 
   describe("sanitizeSource (direct unit)", () => {
@@ -1674,19 +1721,32 @@ describe("PrometheusWriter", () => {
       expect(sanitize("")).toBe("unknown");
     });
 
-    it("returns 'unknown' and warns when all characters are invalid", () => {
+    it("warns once for blank/all-invalid sources (warn-once latch)", () => {
+      // The shared writer's one-time blank-source warning may already have
+      // fired in an earlier test (the "###" publish above), so reset the
+      // latch to own the first observation.
+      (writer as unknown as { blankSourceWarned: boolean }).blankSourceWarned = false;
       logger.write_warn.mockClear();
 
       expect(sanitize("💩💩")).toBe("unknown");
+      // The first observation is warned, naming the raw source it saw.
+      let warnings = logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "sensor_source_sanitized"
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0][2]).toMatchObject({
+        originalSource: "💩💩",
+        sanitizedSource: "unknown",
+      });
 
-      expect(
-        logger.write_warn.mock.calls.some(
-          (call) =>
-            call[2]?.event === "sensor_source_sanitized" &&
-            call[2]?.originalSource === "💩💩" &&
-            call[2]?.sanitizedSource === "unknown"
-        )
-      ).toBe(true);
+      // A later, DIFFERENT all-invalid source — and an empty one — is the
+      // same shared fallback condition: no repeated warnings.
+      expect(sanitize("###")).toBe("unknown");
+      expect(sanitize("")).toBe("unknown");
+      warnings = logger.write_warn.mock.calls.filter(
+        (call) => call[2]?.event === "sensor_source_sanitized"
+      );
+      expect(warnings).toHaveLength(1);
     });
 
     it("truncates a source longer than the max length (30) to 30 chars", () => {
