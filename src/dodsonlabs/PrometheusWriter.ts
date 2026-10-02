@@ -527,6 +527,10 @@ export class PrometheusWriter {
                     logType: "audit",
                     method: req.method || "UNKNOWN",
                     url: req.url || "/",
+                    // The directly observed socket address, for operational
+                    // forensics — no reverse DNS, no proxy-header trust.
+                    // Never the token value itself.
+                    remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
                     statusCode: 401,
                 }
             );
@@ -688,6 +692,9 @@ export class PrometheusWriter {
                 method: req.method || "UNKNOWN",
                 url: req.url || "/",
                 origin: origin ?? "UNKNOWN",
+                // The directly observed socket address, for operational
+                // forensics — no reverse DNS, no proxy-header trust.
+                remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
                 statusCode: 403,
             }
         );
@@ -839,6 +846,10 @@ export class PrometheusWriter {
                     {
                         event: "config_body_too_large",
                         logType: "audit",
+                        // The directly observed socket address, for
+                        // operational forensics — no reverse DNS, no
+                        // proxy-header trust.
+                        remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
                         statusCode: 413,
                     }
                 );

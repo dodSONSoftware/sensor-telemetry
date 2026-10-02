@@ -170,6 +170,10 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
       (call) =>
         call[2]?.event === "config_token_rejected" &&
         call[2]?.logType === "audit" &&
+        // The rejection audit carries the directly observed socket address
+        // for forensics; over a real socket it is always present.
+        typeof call[2]?.remoteAddress === "string" &&
+        (call[2]?.remoteAddress as string).length > 0 &&
         call[2]?.statusCode === 401
     );
   }

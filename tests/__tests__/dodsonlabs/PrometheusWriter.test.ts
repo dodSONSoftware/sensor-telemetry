@@ -407,10 +407,14 @@ describe("PrometheusWriter", () => {
       expect(fs.readFileSync(configSource, "utf8")).toBe(diskBefore);
       expect(write_file_yaml).not.toHaveBeenCalled();
 
-      // The rejection is audited with a bounded warning.
+      // The rejection is audited with a bounded warning, carrying the
+      // directly observed socket address for forensics.
       expect(
         logger.write_warn.mock.calls.some(
-          (call) => call[2]?.event === "config_body_too_large"
+          (call) =>
+            call[2]?.event === "config_body_too_large" &&
+            typeof call[2]?.remoteAddress === "string" &&
+            (call[2]?.remoteAddress as string).length > 0
         )
       ).toBe(true);
 
@@ -1127,13 +1131,16 @@ describe("PrometheusWriter", () => {
       // another.
       expect(variesOnOrigin(res)).toBe(true);
       expect(res.headers.get("cache-control")).toBe("no-store");
-      // The rejection is audited with the offending origin, never the token.
+      // The rejection is audited with the offending origin and the directly
+      // observed socket address, never the token.
       expect(
         logger.write_warn.mock.calls.some(
           (call) =>
             call[2]?.event === "cors_origin_rejected" &&
             call[2]?.logType === "audit" &&
             call[2]?.origin === disallowedOrigin &&
+            typeof call[2]?.remoteAddress === "string" &&
+            (call[2]?.remoteAddress as string).length > 0 &&
             call[2]?.statusCode === 403
         )
       ).toBe(true);
