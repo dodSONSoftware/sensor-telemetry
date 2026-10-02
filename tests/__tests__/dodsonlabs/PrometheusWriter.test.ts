@@ -21,6 +21,13 @@ import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interface
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
+// The authoritative application version (package.json). The /about version is
+// asserted against this rather than a hardcoded duplicate, so the test tracks
+// the real version source.
+const packageJsonVersion = (JSON.parse(
+  fs.readFileSync(path.join(__dirname, "../../..", "package.json"), "utf8")
+) as { version: string }).version;
+
 // Fail the disk write on demand (chmod-based failures are unreliable when
 // the suite runs as root). Default behavior is the real write, and
 // everything else in SystemFunctions stays real.
@@ -833,16 +840,31 @@ describe("PrometheusWriter", () => {
       }
     });
 
-    it("serves /about on GET with the service description and route list", async () => {
+    it("serves /about on GET with the canonical identity and route list", async () => {
       const res = await fetch(`http://127.0.0.1:${port}/about`, {
         headers: { Connection: "close" },
       });
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
-        about: { name: string };
+        about: {
+          name: string;
+          version: string;
+          author: string;
+          copyright: string;
+          license: string;
+        };
         routes: { route: string }[];
       };
+      // Canonical identity/legal metadata, shared with aboutDude() via
+      // serviceMetadata. version is asserted against package.json (the
+      // authoritative source) rather than a hardcoded duplicate.
       expect(body.about.name).toBe("Sensor Telemetry Services");
+      expect(body.about.author).toBe("Randel Dodson");
+      expect(body.about.copyright).toBe(
+        "Copyright © 2026 dodson Software ( dodson labs )"
+      );
+      expect(body.about.license).toBe("MIT");
+      expect(body.about.version).toBe(packageJsonVersion);
       expect(body.routes.map((r) => r.route)).toContain("/endpoints");
     });
 

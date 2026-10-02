@@ -168,7 +168,7 @@ See `docker-compose.yml` for the production deployment configuration.
 ```
 src/
 ├── common/
-│   └── global.ts          # Global state, logger singleton, about info
+│   └── global.ts          # Global state, logger singleton, about info, and serviceMetadata (the single source of truth for service identity/legal metadata, shared by aboutDude() and the /about endpoint)
 ├── dodsonlabs/            # Core service modules
 │   ├── Interfaces.ts      # Type definitions
 │   ├── Logger.ts          # Winston wrapper
@@ -180,6 +180,7 @@ src/
 
 tests/
 └── __tests__/             # Jest suites (ts-jest, CommonJS via tsconfig.jest.json)
+    ├── common/            # global (serviceMetadata, aboutDude)
     ├── dodsonlabs/        # MqttNetworking, PrometheusWriter, Logger, SystemFunctions
     └── schemas/           # config schema validation
 ```

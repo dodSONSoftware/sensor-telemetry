@@ -17,6 +17,18 @@ const pkgRequire = createRequire(__filename);
 const packageJsonPath = path.join(__dirname, "../..", "package.json");
 const { version } = pkgRequire(packageJsonPath) as { version: string };
 
+// Single source of truth for the service's common identity and legal
+// metadata, shared by aboutDude() and the /about endpoint. version comes
+// from package.json (loaded above), never a hardcoded duplicate. Each
+// consumer keeps its own description text; only the common fields live here.
+export const serviceMetadata = {
+    name: "Sensor Telemetry Services",
+    version,
+    author: "Randel Dodson",
+    copyright: "Copyright © 2026 dodson Software ( dodson labs )",
+    license: "MIT",
+} as const;
+
 // **** public functions
 
 let _logger: Logger | undefined;
@@ -35,12 +47,12 @@ export function aboutDude(): IAbout {
     if (_aboutDudeInfo === null) {
         _aboutDudeInfo = {
             about: {
-                name: "Sensor Telemetry Services",
-                version,
-                author: "Randy Dodson (dodsonsoftware@gmail.com)",
+                name: serviceMetadata.name,
+                version: serviceMetadata.version,
+                author: serviceMetadata.author,
                 description: "MQTT-to-Prometheus telemetry bridge for IoT sensors.",
-                copyright: "Copyright © 2025-2026 dodson Software ( dodson labs )",
-                license: "Licensed under the MIT License with Patent Grant and NOTICE preservation."
+                copyright: serviceMetadata.copyright,
+                license: serviceMetadata.license
             },
         };
     }

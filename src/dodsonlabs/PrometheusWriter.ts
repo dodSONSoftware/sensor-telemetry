@@ -6,18 +6,13 @@
 import http from "http";
 import { createHash, timingSafeEqual } from "crypto";
 import { register, Gauge, Counter } from "prom-client";
-import { createRequire } from "module";
+import { serviceMetadata } from "../common/global";
 import { isJsonObject } from "./Interfaces";
 import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
 import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
-
-// Load version from package.json at module load time
-const pkgRequire = createRequire(__filename);
-const packageJsonPath = pkgRequire.resolve("../../package.json");
-const { version } = pkgRequire(packageJsonPath) as { version: string };
 
 export class PrometheusWriter {
     // ******** private properties
@@ -762,12 +757,12 @@ export class PrometheusWriter {
         const mqttStatus = this.mqttNetworking?.is_connected() ? "connected" : "disconnected";
         const aboutInfo = {
             about: {
-                name: "Sensor Telemetry Services",
-                version: version ?? "unknown",
-                author: "Randy Dodson (dodsonsoftware@gmail.com)",
+                name: serviceMetadata.name,
+                version: serviceMetadata.version,
+                author: serviceMetadata.author,
                 description: "**Sensor Telemetry Service** is the telemetry ingestion service for the SensorNET platform. Built with Node.js and TypeScript, it connects to MQTT-enabled IoT sensors, processes environmental and system telemetry, and exposes the collected data as Prometheus metrics for monitoring and visualization.\n\n**Sensor Telemetry Service** subscribes to MQTT telemetry and log topics, automatically reconnects when connectivity is interrupted, and supports V3 (per-device) telemetry message formats. Incoming messages are parsed, validated, and converted into standardized Prometheus gauges with normalized source labels. Supported telemetry includes air and water temperature, humidity, pressure, soil moisture, UV index, light intensity, CPU temperature, memory usage, Wi-Fi signal strength, and sensor health metrics. Unit conversions and derived values are calculated automatically.\n\n**Sensor Telemetry Service** exposes Prometheus metrics alongside HTTP endpoints for health monitoring, service information, runtime configuration management, and configuration reloading. Sensor log messages are forwarded using Loki-compatible structured labels, while sensitive configuration values are automatically redacted from application logs.\n\nProduction-focused features—including runtime configuration updates, source label sanitization to control Prometheus cardinality, graceful shutdown, resilient MQTT reconnection, secret redaction, and structured logging—help ensure reliable telemetry collection across the SensorNET environment.",
-                copyright: "Copyright © 2026 dodson Software ( dodson labs )",
-                license: "MIT License"
+                copyright: serviceMetadata.copyright,
+                license: serviceMetadata.license
             },
             system: {
                 status: "healthy",
