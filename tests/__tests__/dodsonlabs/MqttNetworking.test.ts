@@ -443,3 +443,100 @@ describe("MqttNetworking.close() shutdown branches (deterministic)", () => {
     expect(mockClient.end).toHaveBeenCalledWith(true, expect.any(Function));
   });
 });
+
+describe("MQTT reconnect error logging (noise reduction)", () => {
+  // mqtt.js retries every reconnectPeriod (5 s), so a broker outage used to
+  // log a full ERROR (with stack) per retry. The first failure keeps the
+  // full ERROR; repeats downgrade to WARN with an attempt count; a
+  // successful reconnect is an INFO and resets the count. mqtt.js still
+  // owns the reconnect — this only changes how the events are logged.
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  /** Construct on a fake client and return its registered event handlers. */
+  function build(): { logger: MockLogger & ILogger; handlers: Record<string, (...args: unknown[]) => unknown> } {
+    const logger = createMockLogger();
+    // The shared fake lacks subscribe(); on_connect calls it per topic, so
+    // this client carries a recording stand-in for the connect path.
+    const client = createMockMqttClient() as unknown as { subscribe: jest.Mock };
+    client.subscribe = jest.fn();
+    mockConnect.mockReset();
+    mockConnect.mockReturnValue(client);
+
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const handlers: Record<string, (...args: unknown[]) => unknown> = {};
+    for (const call of onMock.mock.calls) {
+      handlers[call[0] as string] = call[1] as (...args: unknown[]) => unknown;
+    }
+    return { logger, handlers };
+  }
+
+  it("logs the first connection failure as ERROR and repeats as WARN", () => {
+    const { logger, handlers } = build();
+    const failure = new Error("connect ECONNREFUSED 10.0.0.1:1883");
+    handlers.error(failure);
+    handlers.error(failure);
+    handlers.error(failure);
+
+    // Exactly one full ERROR for the whole outage ...
+    const errors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_connection_error"
+    );
+    expect(errors).toHaveLength(1);
+    // ... carrying the error object (message and stack) for diagnosis.
+    expect((errors[0]?.[2] as Record<string, unknown>).error).toBe(failure);
+
+    // ... and a WARN per retry, numbered from the second attempt.
+    const warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_reconnect_failed"
+    );
+    expect(warns).toHaveLength(2);
+    expect(warns[0]?.[2]).toMatchObject({ attempt: 2, error: failure.message });
+    expect(warns[1]?.[2]).toMatchObject({ attempt: 3, error: failure.message });
+  });
+
+  it("logs a successful reconnect as INFO and resets the failure count", async () => {
+    const { logger, handlers } = build();
+    handlers.error(new Error("connect ECONNREFUSED 10.0.0.1:1883"));
+    handlers.error(new Error("connect ECONNREFUSED 10.0.0.1:1883"));
+    await handlers.connect();
+
+    const reconnected = logger.write_info.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_reconnected"
+    );
+    expect(reconnected).toHaveLength(1);
+    expect(reconnected[0]?.[2]).toMatchObject({ failedAttempts: 2 });
+
+    // The count reset: the next failure is the FIRST of a new outage and
+    // gets the full ERROR again, not a WARN.
+    handlers.error(new Error("connect ECONNREFUSED 10.0.0.1:1883"));
+    const errors = logger.write_error.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_connection_error"
+    );
+    expect(errors).toHaveLength(2);
+  });
+
+  it("does not announce a reconnect for the initial connection", async () => {
+    const { logger, handlers } = build();
+    await handlers.connect();
+
+    expect(
+      logger.write_info.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_reconnected"
+      )
+    ).toHaveLength(0);
+    // The first connect still records its (debug-level) connected event.
+    expect(
+      logger.write_debug.mock.calls.some(
+        (call) => call[2]?.event === "mqtt_connected"
+      )
+    ).toBe(true);
+  });
+});

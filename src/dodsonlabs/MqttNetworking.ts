@@ -105,6 +105,13 @@ export class MqttNetworking implements IMqttNetworking {
     // during an in-flight close reuses the first close instead of re-entering
     // the client's end() path.
     private closePromise: Promise<void> | undefined;
+    // ----
+    // Consecutive connection failures since the last successful connect.
+    // mqtt.js retries every reconnectPeriod (5 s), so an outage would
+    // otherwise log a full ERROR per retry; the counter lets on_error()
+    // tier the noise (first failure = ERROR, repeats = WARN) and
+    // on_connect() mark the recovery (INFO).
+    private consecutive_connection_failures = 0;
 
     // ********
     // ******** PRIVATE FUNCTIONS
@@ -380,6 +387,21 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** MQTT HANDLER FUNCTIONS
 
     private async on_connect(): Promise<void> {
+        if (this.consecutive_connection_failures > 0) {
+            // A failed attempt preceded this connect: surface the recovery
+            // at INFO — an operator watching the logs should see the outage
+            // end as clearly as it began — and reset the count.
+            this.logger.write_info(
+                "networking/onConnect",
+                `Reconnected to the MQTT broker after ${this.consecutive_connection_failures} failed attempt(s)`,
+                {
+                    event: "mqtt_reconnected",
+                    logType: "service",
+                    failedAttempts: this.consecutive_connection_failures,
+                }
+            );
+            this.consecutive_connection_failures = 0;
+        }
         // log-it
         this.logger.write_debug(
             "networking/onConnect",
@@ -662,15 +684,36 @@ export class MqttNetworking implements IMqttNetworking {
     }
 
     private on_error(error: unknown): void {
-        this.logger.write_error(
-            "networking/onError",
-            `Cannot connect! ERROR=${sysFunc.ensureError(error).message}`,
-            {
-                event: "mqtt_connection_error",
-                logType: "service",
-                error: sysFunc.ensureError(error),
-            }
-        );
+        this.consecutive_connection_failures++;
+        const err = sysFunc.ensureError(error);
+        if (this.consecutive_connection_failures === 1) {
+            // First failure of the current outage: the full ERROR, with the
+            // error object (message and stack) for diagnosis.
+            this.logger.write_error(
+                "networking/onError",
+                `Cannot connect! ERROR=${err.message}`,
+                {
+                    event: "mqtt_connection_error",
+                    logType: "service",
+                    error: err,
+                }
+            );
+        } else {
+            // Every subsequent retry repeats the same failure (mqtt.js
+            // reconnects every 5 s): WARN with the attempt count keeps the
+            // outage visible without flooding the error channel with
+            // duplicate stacks.
+            this.logger.write_warn(
+                "networking/onError",
+                `MQTT reconnect attempt ${this.consecutive_connection_failures} failed: ${err.message}`,
+                {
+                    event: "mqtt_reconnect_failed",
+                    logType: "service",
+                    attempt: this.consecutive_connection_failures,
+                    error: err.message,
+                }
+            );
+        }
         // The mqtt library will auto-reconnect (reconnectPeriod: 5000).
         // Do NOT call on_connect() here — the client may be in an error state,
         // and calling subscribe() on it would trigger another error event.
