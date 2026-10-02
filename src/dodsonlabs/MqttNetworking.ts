@@ -134,8 +134,19 @@ export class MqttNetworking implements IMqttNetworking {
         });
 
         // ----
+        // 'close' — not 'disconnect' — is the lifecycle event that
+        // invalidates broker subscription state. mqtt.js emits
+        // 'disconnect' only when the client itself sends a DISCONNECT
+        // packet (end()); an ordinary transport loss (broker failure,
+        // network interruption, TCP/socket closure) surfaces as 'close'.
+        // Listening for 'disconnect' alone left subscription_active — and
+        // the mqtt_subscription_active gauge — reporting active on a dead
+        // connection until the next reconnect. 'close' fires for a clean
+        // end() too, so it is the single ownership point for the reset:
+        // keeping both listeners would log the disconnect twice for every
+        // graceful stop.
         client.on("connect", () => this.on_connect());
-        client.on("disconnect", () => this.on_disconnect());
+        client.on("close", () => this.on_disconnect());
         client.on("error", (err) => this.on_error(err));
         client.on(
             "message",

@@ -909,6 +909,84 @@ describe("subscription SUBACK handling (regression P2-3)", () => {
   });
 });
 
+describe("MQTT 'close' invalidates subscription state (regression P2-2)", () => {
+  // A transport loss (broker failure, network interruption, socket
+  // closure) emits mqtt.js's 'close' event — not 'disconnect', which is
+  // reserved for a client-sent DISCONNECT packet (end()). The 'close'
+  // handler is the single point that resets subscription_active, so the
+  // per-topic mqtt_subscription_active gauge cannot report 1 on a dead
+  // connection.
+  function driveConnect(): {
+    networking: MqttNetworking;
+    logger: MockLogger & ILogger;
+    subscribe: jest.Mock;
+    fireClose: () => void;
+  } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const client = (
+      networking as unknown as { mqtt_client: ReturnType<typeof createMockMqttClient> }
+    ).mqtt_client;
+    const connectCall = client.on.mock.calls.find((call) => call[0] === "connect");
+    if (!connectCall) {
+      throw new Error("MqttNetworking did not register a 'connect' handler");
+    }
+    (connectCall[1] as () => Promise<void>)();
+    const closeCall = client.on.mock.calls.find((call) => call[0] === "close");
+    if (!closeCall) {
+      throw new Error("MqttNetworking did not register a 'close' handler");
+    }
+    return {
+      networking,
+      logger,
+      subscribe: client.subscribe as jest.Mock,
+      fireClose: () => (closeCall[1] as () => void)(),
+    };
+  }
+
+  it("registers 'close' — and not 'disconnect' — as the connection-loss handler", () => {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const client = (
+      networking as unknown as { mqtt_client: ReturnType<typeof createMockMqttClient> }
+    ).mqtt_client;
+    const events = client.on.mock.calls.map((call) => call[0]);
+    // 'close' fires for both a transport loss and a clean end(), so it is
+    // the one ownership point for the reset; keeping a 'disconnect'
+    // listener too would log the disconnect twice on a graceful stop
+    // (end() emits both events).
+    expect(events).toContain("close");
+    expect(events).not.toContain("disconnect");
+  });
+
+  it("marks every subscription inactive on transport close and logs exactly one warning", () => {
+    const { networking, logger, subscribe, fireClose } = driveConnect();
+
+    // Successful SUBACK: the subscription is active.
+    (subscribe.mock.calls[0][1] as (err: Error | undefined, granted?: unknown) => void)(
+      undefined,
+      [{ topic: baseConfig.mqttTopicTelemetry, qos: 0, isValid: true }]
+    );
+    expect(networking.subscriptions_active()).toBe(true);
+    expect(networking.get_subscription_states()).toEqual([
+      { topic: baseConfig.mqttTopicTelemetry, active: true },
+    ]);
+
+    // Transport close: the broker-side session is gone.
+    fireClose();
+    expect(networking.subscriptions_active()).toBe(false);
+    expect(networking.get_subscription_states()).toEqual([
+      { topic: baseConfig.mqttTopicTelemetry, active: false },
+    ]);
+
+    // Exactly one connection-loss warning for the single loss.
+    const disconnects = logger.write_warn.mock.calls.filter(
+      (call) => (call[2] as Record<string, unknown>)?.event === "mqtt_disconnected"
+    );
+    expect(disconnects).toHaveLength(1);
+  });
+});
+
 describe("bounding untrusted MQTT values before logging", () => {
   // The logging path applies a size bound to attacker-controlled payload
   // values (source, device, message_type, degraded_reasons, and the
