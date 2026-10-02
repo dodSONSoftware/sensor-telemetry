@@ -121,9 +121,9 @@ export class PrometheusWriter {
     // ---- stale-source removal (config: staleSourceRemovalSecs; 0 = disabled)
     // Last accepted-telemetry/health time (epoch ms) per admitted, non-fallback
     // source, keyed by sanitized label. Mirrors
-    // sensor_last_seen_timestamp_seconds, which is deliberately retained after
-    // eviction as the staleness signal. Bounded by sourceCardinalityCap:
-    // entries are added in mark_source_seen and deleted in evictStaleSource.
+    // sensor_last_seen_timestamp_seconds, whose series is removed with the
+    // source on eviction. Bounded by sourceCardinalityCap: entries are added
+    // in mark_source_seen and deleted in evictStaleSource.
     // Known limitation: admittedFirmwareVersions slots are NOT freed on
     // eviction — no source→firmware map is tracked, so a permanently-gone
     // source's firmware label keeps its cap slot for the process lifetime.
@@ -135,10 +135,13 @@ export class PrometheusWriter {
     // wipe another source's data, so they are excluded from the map in
     // mark_source_seen and can never reach evictStaleSource.
     private static readonly NON_EVICTABLE_SOURCES: ReadonlySet<string> = new Set(["unknown", "unknown_source"]);
-    // The 26 per-source data gauges (9 readings + 17 sensor_health_*).
-    // Eviction calls .remove({source}) on exactly these — never on
-    // sensor_last_seen_timestamp_seconds, the topic-labeled
-    // mqtt_subscription_active gauge, or any counter.
+    // The 27 per-source gauges (9 readings + 17 sensor_health_* + the
+    // last-seen timestamp). Eviction calls .remove({source}) on exactly
+    // these — never on the topic-labeled mqtt_subscription_active gauge or
+    // any counter. The last-seen series is included on purpose: eviction
+    // frees the source's cardinality slot, so retaining one source-labeled
+    // series per evicted source would let source churn accumulate
+    // sensor_last_seen_timestamp_seconds series without bound.
     private prometheus_SourceDataGauges: Gauge[] = [];
     // Cap for /write-config request bodies. A valid config is < 2 KiB, so
     // anything larger is a misbehaving or hostile client, not a config.
@@ -1171,11 +1174,12 @@ export class PrometheusWriter {
     }
 
     /**
-     * Remove a stale source's per-source data gauge series and free its
-     * admitted-source slot so a returning sensor is re-admitted normally.
-     * sensor_last_seen_timestamp_seconds{source} is deliberately retained
-     * as the staleness signal; the fallback-labeled gauges, the
-     * topic-labeled subscription gauge, and all counters are untouched.
+     * Remove a stale source's per-source gauge series — including
+     * sensor_last_seen_timestamp_seconds{source}, so that freeing the
+     * source's admitted slot never leaks a source-labeled series past the
+     * cardinality cap — and free the slot so a returning sensor is
+     * re-admitted normally. The fallback-labeled gauges, the topic-labeled
+     * subscription gauge, and all counters are untouched.
      * gauge.remove() is a no-op for a label set the source never set (e.g.
      * a soil-only source has no air gauges), so the fixed list is safe for
      * partial reporters.
@@ -1188,7 +1192,7 @@ export class PrometheusWriter {
         this.admittedSources.delete(source);
         this.logger.write_warn(
             "prometheus/staleSourceRemoved",
-            `Removing data gauges for source idle for ${ageSeconds}s (threshold ${this.staleSourceRemovalSecs}s); sensor_last_seen_timestamp_seconds is retained`,
+            `Removing per-source series (including sensor_last_seen_timestamp_seconds) for source idle for ${ageSeconds}s (threshold ${this.staleSourceRemovalSecs}s)`,
             {
                 event: "stale_source_removed",
                 logType: "audit",
@@ -2446,9 +2450,11 @@ export class PrometheusWriter {
         // as time() - sensor_last_seen_timestamp_seconds. By default the
         // series live forever — staleness thresholds belong in
         // Prometheus/Grafana. When staleSourceRemovalSecs > 0, the stale
-        // sweep (see evictStaleSource) removes the 26 per-source data
-        // gauges for sources idle past the threshold while retaining this
-        // series as the staleness signal; fallback labels (unknown,
+        // sweep (see evictStaleSource) removes this series along with the
+        // per-source data gauges for sources idle past the threshold: the
+        // staleness signal is useful until the threshold says the source
+        // should go, and retaining it afterward would leak a source-labeled
+        // series past the cardinality cap. Fallback labels (unknown,
         // unknown_source) are never evicted.
         this.prometheus_Gauge_SensorLastSeenTimestamp = new Gauge({
             name: "sensor_last_seen_timestamp_seconds",
@@ -2478,10 +2484,10 @@ export class PrometheusWriter {
             },
         });
 
-        // The eviction target list: exactly the 26 per-source data gauges
-        // (9 readings + 17 sensor_health_*). Deliberately excludes
-        // SensorLastSeenTimestamp (retained as the staleness signal) and
-        // MqttSubscriptionActive (topic-labeled service diagnostic).
+        // The eviction target list: exactly the 27 per-source gauges
+        // (9 readings + 17 sensor_health_* + the last-seen timestamp).
+        // Deliberately excludes MqttSubscriptionActive (topic-labeled
+        // service diagnostic).
         this.prometheus_SourceDataGauges = [
             this.prometheus_Gauge_AirTemp,
             this.prometheus_Gauge_AirHumidity,
@@ -2509,6 +2515,7 @@ export class PrometheusWriter {
             this.prometheus_Gauge_OutboundRejected,
             this.prometheus_Gauge_UtcValid,
             this.prometheus_Gauge_UtcSyncAgeSec,
+            this.prometheus_Gauge_SensorLastSeenTimestamp,
         ];
     }
 

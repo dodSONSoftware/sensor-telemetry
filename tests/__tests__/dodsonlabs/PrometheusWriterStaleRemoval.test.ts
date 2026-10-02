@@ -49,9 +49,10 @@ function getFreePort(): Promise<number> {
 }
 
 /**
- * The 26 per-source data gauges the sweep is allowed to remove (9 readings
- * + 17 sensor_health_*). Mirrors PrometheusWriter.prometheus_SourceDataGauges
- * by metric name so the test fails if the writer's eviction list drifts.
+ * The 27 per-source gauges the sweep is allowed to remove (9 readings +
+ * 17 sensor_health_* + the last-seen timestamp). Mirrors
+ * PrometheusWriter.prometheus_SourceDataGauges by metric name so the test
+ * fails if the writer's eviction list drifts.
  */
 const DATA_METRIC_NAMES = [
   "air_temperature",
@@ -80,6 +81,7 @@ const DATA_METRIC_NAMES = [
   "sensor_health_outbound_rejected",
   "sensor_health_utc_valid",
   "sensor_health_utc_sync_age_sec",
+  "sensor_last_seen_timestamp_seconds",
 ];
 
 /**
@@ -99,6 +101,18 @@ async function seriesValue(metricName: string, source: string): Promise<number |
     values: Array<{ labels: Record<string, string>; value: number }>;
   };
   return values.find((entry) => entry.labels.source === source)?.value;
+}
+
+/** All source labels currently present on a metric's series, sorted. */
+async function seriesSources(metricName: string): Promise<string[]> {
+  const metric = register.getSingleMetric(metricName);
+  if (!metric) {
+    throw new Error(`${metricName} is not registered`);
+  }
+  const { values } = (await metric.get()) as unknown as {
+    values: Array<{ labels: Record<string, string> }>;
+  };
+  return values.map((entry) => entry.labels.source).sort();
 }
 
 async function counterValue(metricName: string): Promise<number> {
@@ -211,7 +225,7 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     expect(evictionWarnings()).toHaveLength(0);
   });
 
-  it("removes the data gauges after the threshold, retaining sensor_last_seen_timestamp_seconds", async () => {
+  it("removes all per-source series, including sensor_last_seen_timestamp_seconds, after the threshold", async () => {
     // Next pass at 3600s is age == threshold (strictly older required);
     // the one at 3660s evicts.
     jest.advanceTimersByTime(120_000);
@@ -219,10 +233,10 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     for (const name of DATA_METRIC_NAMES) {
       expect(await seriesValue(name, "alpha")).toBeUndefined();
     }
-    // The staleness signal survives at its original stamp.
-    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "alpha")).toBe(
-      Math.floor(new Date("2026-09-30T12:00:00Z").getTime() / 1000)
-    );
+    // The last-seen series goes with the data: eviction frees the source's
+    // cardinality slot, so retaining its one source-labeled series would
+    // let source churn accumulate this metric without bound.
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "alpha")).toBeUndefined();
     const evictions = evictionWarnings();
     expect(evictions).toHaveLength(1);
     expect(evictions[0]).toMatchObject({
@@ -292,6 +306,72 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     ]);
   });
 
+  it("eviction removes the last-seen series, so source churn stays within the cap", async () => {
+    // Regression for the retained-last-seen leak: eviction frees the
+    // source's admitted slot, so each evicted source's slot is reused by
+    // the next source. If the evicted source's
+    // sensor_last_seen_timestamp_seconds series survived, every churned
+    // source (replaced sensors, a churning publisher) would leak one series
+    // and the metric would grow without bound despite
+    // sensorSourceCardinalityCap (2 here, see beforeAll).
+    //
+    // Timing is phase-robust: the sweep passes every 60s at an unknown
+    // phase, so a source is guaranteed evicted once past the 3600s
+    // threshold plus one full period, and guaranteed kept while its age at
+    // the last possible sweep before the assertion is at most 3600s
+    // (eviction is strictly older-than).
+    const rejectedBefore = await counterValue("sensor_sources_rejected_total");
+
+    // 1-2. Admit source-1, then source-2 3500s later: both are admitted
+    // (at the cap), and source-1 is at most 3500s old at the last sweep so
+    // far — nothing evicted yet.
+    writer.mark_source_seen("source-1");
+    jest.advanceTimersByTime(3_500_000);
+    writer.mark_source_seen("source-2");
+
+    // 3. 161s later a sweep finds source-1 strictly past the threshold and
+    // evicts it; source-2 is at most 161s old and stays.
+    jest.advanceTimersByTime(161_000);
+    expect(evictionWarnings().at(-1)).toMatchObject({ source: "source-1" });
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-1")).toBeUndefined();
+    expect(await seriesSources("sensor_last_seen_timestamp_seconds")).toEqual(["source-2"]);
+
+    // 4. source-3 takes source-1's freed slot — no rejection, and the
+    // concrete label set is at the cap, held by live sources only.
+    writer.mark_source_seen("source-3");
+    expect(await counterValue("sensor_sources_rejected_total")).toBe(rejectedBefore);
+    expect(await seriesSources("sensor_last_seen_timestamp_seconds")).toEqual([
+      "source-2",
+      "source-3",
+    ]);
+
+    // 5. source-2 crosses the threshold and is evicted; source-3's age at
+    // the last sweep is at most 3600s, so the strictly-older rule keeps it.
+    jest.advanceTimersByTime(3_600_000);
+    expect(evictionWarnings().at(-1)).toMatchObject({ source: "source-2" });
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-2")).toBeUndefined();
+    expect(await seriesSources("sensor_last_seen_timestamp_seconds")).toEqual(["source-3"]);
+
+    // 6. source-4 takes source-2's freed slot.
+    writer.mark_source_seen("source-4");
+
+    // The spec's end state: the evicted sources' historical last-seen
+    // series are gone, the live sources are present, the concrete label set
+    // sits at — not above — the cap, and no source was ever rejected.
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-1")).toBeUndefined();
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-2")).toBeUndefined();
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-3")).toBeDefined();
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "source-4")).toBeDefined();
+    const lastSeenSources = await seriesSources("sensor_last_seen_timestamp_seconds");
+    expect(lastSeenSources).toEqual(["source-3", "source-4"]);
+    expect(lastSeenSources.length).toBeLessThanOrEqual(2); // sensorSourceCardinalityCap
+    expect(await counterValue("sensor_sources_rejected_total")).toBe(rejectedBefore);
+
+    // Age both out so downstream tests start from an empty map, as before.
+    jest.advanceTimersByTime(3_661_000);
+    expect(await seriesSources("sensor_last_seen_timestamp_seconds")).toEqual([]);
+  });
+
   it("clamps the sweep interval to [10s, 60s] and warns on sub-300s thresholds", async () => {
     commitConfig({ staleSourceRemovalSecs: 100 });
     expect(enabledAudits().find((meta) => meta.thresholdSeconds === 100)).toMatchObject({
@@ -314,7 +394,7 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     writer.set_cpu_temp("flappy", 1);
     jest.advanceTimersByTime(20_000);
     expect(await seriesValue("sensor_health_cpu_temperature_c", "flappy")).toBeUndefined();
-    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "flappy")).toBeDefined();
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "flappy")).toBeUndefined();
   });
 
   it("re-arms the sweep on runtime config changes (enable, disable, re-enable)", async () => {
@@ -350,7 +430,7 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     // still exactly at, not past, the threshold.
     jest.advanceTimersByTime(300_000);
     expect(await seriesValue("sensor_health_cpu_temperature_c", "ancient")).toBeUndefined();
-    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "ancient")).toBeDefined();
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "ancient")).toBeUndefined();
     expect(await seriesValue("sensor_health_cpu_temperature_c", "freshly")).toBe(2);
   });
 

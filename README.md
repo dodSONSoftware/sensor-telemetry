@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.4.
+**Release:** Zinc Falcon — firmware 4.1.5.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -148,7 +148,7 @@ forwardSensorLogsLevel: debug
 | `sensorSourceMaxLength` | Max length for source labels | 30 |
 | `sensorSourceValidCharsRegex` | Valid characters for source names — the value is escaped into a negated character class, so it must form a valid one: `z-a` (an out-of-order range) is rejected at config load so `/write-config` cannot persist a value that crash-loops the next restart | a-zA-Z0-9._- |
 | `sensorSourceCardinalityCap` | Max distinct source / firmware_version label values admitted as Prometheus labels; values beyond the cap map to a fallback label | 1024 |
-| `staleSourceRemovalSecs` | Inactivity threshold (integer seconds, 0 = disabled, max 31536000): when set, a sweep timer removes a source's 26 per-source data gauges (readings + `sensor_health_*`) once it has sent no accepted telemetry/health for longer, while retaining `sensor_last_seen_timestamp_seconds{source}` as the staleness signal. Eviction also frees the source's cardinality-cap slot. Runtime-updatable via `/write-config` / `/reload-config` (omitting the key re-disables). Sweep interval is threshold/2 clamped to 10-60s, so removal lags the threshold by up to one interval — set the threshold well above the longest expected reporting interval | disabled (0/absent) |
+| `staleSourceRemovalSecs` | Inactivity threshold (integer seconds, 0 = disabled, max 31536000): when set, a sweep timer removes all of a source's per-source series (readings + `sensor_health_*` + `sensor_last_seen_timestamp_seconds{source}`) once it has sent no accepted telemetry/health for longer. Eviction also frees the source's cardinality-cap slot. Runtime-updatable via `/write-config` / `/reload-config` (omitting the key re-disables). Sweep interval is threshold/2 clamped to 10-60s, so removal lags the threshold by up to one interval — set the threshold well above the longest expected reporting interval | disabled (0/absent) |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
 
@@ -411,7 +411,7 @@ Metrics are exposed at `http://localhost:3301/metrics`:
 | `sensor_health_outbound_rejected` | Gauge | source | Total outbound messages rejected by the queue |
 | `sensor_health_utc_valid` | Gauge | source | UTC time sync status (1 = valid, 0 = not valid) |
 | `sensor_health_utc_sync_age_sec` | Gauge | source | Age of the last successful UTC time sync in seconds |
-| `sensor_last_seen_timestamp_seconds` | Gauge | source | Unix timestamp (seconds) of the most recent **accepted** telemetry or health message from the source — stamped once per accepted message, not per gauge. Sensor age: `time() - sensor_last_seen_timestamp_seconds`. By default the service does not remove series from offline sources (staleness thresholds belong in Prometheus/Grafana alerting); with `staleSourceRemovalSecs > 0` the 26 per-source data gauges of an idle source are removed once it is older than the threshold, while this series is retained as the staleness signal |
+| `sensor_last_seen_timestamp_seconds` | Gauge | source | Unix timestamp (seconds) of the most recent **accepted** telemetry or health message from the source — stamped once per accepted message, not per gauge. Sensor age: `time() - sensor_last_seen_timestamp_seconds`. By default the service does not remove series from offline sources (staleness thresholds belong in Prometheus/Grafana alerting); with `staleSourceRemovalSecs > 0` all 27 per-source series of an idle source — including this one — are removed once it is older than the threshold, and the source's admission slot is freed (retaining this series after freeing the slot would let source churn accumulate it without bound) |
 | `telemetry_messages_total` | Counter | source_type | Total telemetry messages by type |
 | `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
 | `sensor_firmware_versions_rejected_total` | Counter | — | Firmware version values mapped to the `unknown_firmware` fallback because the firmware version cardinality cap was reached |
@@ -426,6 +426,8 @@ Source names are sanitized before being used as Prometheus labels:
 3. Sources that sanitize to an empty string (e.g. composed entirely of invalid characters) fall back to the `unknown` label, so distinct sources never collide on `source=""`
 
 Sanitization bounds each label *value* but not how many distinct values appear, so a distinct-value cap (`sensorSourceCardinalityCap`) bounds cardinality. Once the cap is reached, each new distinct source maps to the fixed `unknown_source` label (counted in `sensor_sources_rejected_total`) and each new distinct firmware version maps to `unknown_firmware` (counted in `sensor_firmware_versions_rejected_total`). This stops an MQTT publisher minting fresh random source or firmware values from growing the Prometheus series set without bound.
+
+The cap limits **concurrently admitted** concrete sensor sources: the shared fallback labels `unknown` and `unknown_source` are not admitted source identities, and firmware-version cardinality (the `unknown_firmware` fallback) is managed independently of source admission. When stale-source removal is enabled (`staleSourceRemovalSecs > 0`), eviction removes all of the source's series — including `sensor_last_seen_timestamp_seconds` — and frees its admission slot, so a source that publishes again is treated as newly seen and source churn cannot accumulate historical series past the cap.
 
 ## Graceful Shutdown
 
