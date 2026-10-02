@@ -7,7 +7,10 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install
+# npm ci (not npm install): installs exactly what package-lock.json pins,
+# so the image is reproducible and a drifted lock file fails the build
+# instead of silently resolving newer versions.
+RUN npm ci
 
 COPY . .
 
@@ -23,7 +26,9 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
 
-RUN npm install --only=production --omit=dev && npm cache clean --force
+# npm ci --omit=dev (not npm install): production deps exactly as pinned in
+# the lock file (copied above), no dev dependencies in the runtime image.
+RUN npm ci --omit=dev && npm cache clean --force
 
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 

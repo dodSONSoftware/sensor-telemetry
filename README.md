@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Iron Falcon — firmware 4.0.18.
+**Release:** Iron Falcon — firmware 4.0.19.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
