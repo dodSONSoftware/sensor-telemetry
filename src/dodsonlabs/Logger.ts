@@ -5,6 +5,7 @@
 
 import winston, { format } from "winston";
 import { createRequire } from "module";
+import { LOG_BOUND_MAX_DEPTH, LOG_BOUND_DEPTH_MARKER } from "./SystemFunctions";
 import { LogLevel } from "./Interfaces";
 import type {
   ILogger,
@@ -53,8 +54,18 @@ function isSecretKey(key: string): boolean {
 /**
  * Recursively redact sensitive values from an object.
  * Does not mutate the original object.
+ *
+ * Depth-bounded: this pass recurses through the whole log record, and log
+ * metadata can carry arbitrary untrusted MQTT-supplied structures — without
+ * a cap a deeply nested payload would exhaust the call stack per log line
+ * (and the resulting JSON record would be unbounded). Past LOG_BOUND_MAX_DEPTH
+ * the whole subtree collapses to the same bounded marker boundForLog uses,
+ * so the record stays shallow and serializable. The bound applies to the
+ * nesting, not to redaction: secret keys at or below the cap are still
+ * replaced, and Error instances are always serialized to their
+ * name/message/stack form (bounded by construction) regardless of depth.
  */
-function redactSensitiveValues(value: unknown): unknown {
+function redactSensitiveValues(value: unknown, depth: number = 0): unknown {
   if (value === null || typeof value !== "object") {
     return value;
   }
@@ -67,9 +78,15 @@ function redactSensitiveValues(value: unknown): unknown {
     return { name: value.name, message: value.message, stack: value.stack };
   }
 
+  // Depth cap: past the bound the whole subtree becomes a marker instead of
+  // recursing (see the function doc for why this must exist).
+  if (depth >= LOG_BOUND_MAX_DEPTH) {
+    return LOG_BOUND_DEPTH_MARKER;
+  }
+
   // Handle arrays
   if (Array.isArray(value)) {
-    return value.map((item) => redactSensitiveValues(item));
+    return value.map((item) => redactSensitiveValues(item, depth + 1));
   }
 
   // Handle plain objects
@@ -78,7 +95,7 @@ function redactSensitiveValues(value: unknown): unknown {
     if (isSecretKey(key)) {
       result[key] = "[REDACTED]";
     } else if (val !== null && typeof val === "object") {
-      result[key] = redactSensitiveValues(val);
+      result[key] = redactSensitiveValues(val, depth + 1);
     } else {
       result[key] = val;
     }

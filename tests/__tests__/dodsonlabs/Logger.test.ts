@@ -4,6 +4,10 @@
  */
 
 import { Logger } from "../../../src/dodsonlabs/Logger";
+import {
+  LOG_BOUND_MAX_DEPTH,
+  LOG_BOUND_DEPTH_MARKER,
+} from "../../../src/dodsonlabs/SystemFunctions";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
@@ -292,5 +296,111 @@ describe("Logger printf-token messages keep structured metadata", () => {
     expect(record.service).toBe("sensor-telemetry");
     expect(typeof record.version).toBe("string");
     expect(record.environment).toBe(process.env.NODE_ENV ?? "development");
+  });
+});
+
+describe("Logger deep untrusted metadata (regression P2-1)", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 3301,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  /** One log call -> one single-line JSON record (the chain ends in json()). */
+  function parseRecord(out: string): Record<string, unknown> {
+    const line = out.trim().split("\n").pop();
+    if (!line) {
+      throw new Error(`no log line captured (output: ${JSON.stringify(out)})`);
+    }
+    return JSON.parse(line);
+  }
+
+  it("completes on a deeply nested array without RangeError, still redacting, bounded at the depth cap", async () => {
+    // 500 nesting levels: the redaction pass used to recurse unbounded, so
+    // an arbitrary MQTT-supplied structure could exhaust the call stack per
+    // log line.
+    let deep: unknown = { leaf: "bottom" };
+    for (let i = 0; i < 500; i++) deep = [deep];
+
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_error("test/deepMetadata", "deep untrusted metadata", {
+        event: "deep_metadata",
+        logType: "sensor",
+        password: "hunter2",
+        nested: deep,
+      });
+    });
+
+    // The pipeline completed and emitted a parseable record (no throw).
+    record = parseRecord(out);
+    expect(record.event).toBe("deep_metadata");
+
+    // Secret redaction still applies to shallow fields.
+    expect(record.password).toBe("[REDACTED]");
+
+    // The nested structure terminates in the bounded depth marker after a
+    // few array levels — not 500.
+    let current: unknown = record.nested;
+    let arrayLevels = 0;
+    while (Array.isArray(current)) {
+      current = current[0];
+      arrayLevels++;
+      expect(arrayLevels).toBeLessThanOrEqual(LOG_BOUND_MAX_DEPTH);
+    }
+    expect(current).toBe(LOG_BOUND_DEPTH_MARKER);
+    expect(out).toContain(LOG_BOUND_DEPTH_MARKER);
+  });
+
+  it("bounds a deeply nested object the same way", async () => {
+    let deepObject: Record<string, unknown> = { leaf: "bottom" };
+    for (let i = 0; i < 500; i++) deepObject = { child: deepObject };
+
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_warn("test/deepObject", "deep untrusted object", {
+        event: "deep_object",
+        logType: "sensor",
+        detail: deepObject,
+      });
+    });
+
+    record = parseRecord(out);
+    expect(record.event).toBe("deep_object");
+
+    let current: unknown = record.detail;
+    let levels = 0;
+    while (
+      current !== null &&
+      typeof current === "object" &&
+      !Array.isArray(current) &&
+      "child" in (current as Record<string, unknown>)
+    ) {
+      current = (current as Record<string, unknown>).child;
+      levels++;
+      expect(levels).toBeLessThanOrEqual(LOG_BOUND_MAX_DEPTH);
+    }
+    expect(current).toBe(LOG_BOUND_DEPTH_MARKER);
+  });
+
+  it("keeps Error fields serializable at any depth", async () => {
+    // Error handling must survive the depth cap unchanged: the stack
+    // survives into the record (bounded by construction), not flattened.
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_error("test/errorDepth", "failure", {
+        event: "error_depth",
+        error: new Error("boom"),
+      });
+    });
+
+    record = parseRecord(out);
+    const error = record.error as { message?: string; stack?: string };
+    expect(error.message).toBe("boom");
+    expect(error.stack).toContain("boom");
   });
 });

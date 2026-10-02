@@ -345,10 +345,12 @@ export function truncateForLogList(
 // depth caps are what structured data additionally needs, and the depth cap
 // exists because the Logger's redaction pass recurses through the metadata —
 // an arbitrarily deep MQTT payload would exhaust the call stack otherwise.
+// The depth cap and marker are also the Logger's own redaction depth guard
+// (shared constants, so the two bounding passes cannot drift).
 const LOG_BOUND_MAX_ITEMS = 10;
 const LOG_BOUND_MAX_KEYS = 10;
-const LOG_BOUND_MAX_DEPTH = 8;
-const LOG_BOUND_DEPTH_MARKER = "[truncated: max depth]";
+export const LOG_BOUND_MAX_DEPTH = 8;
+export const LOG_BOUND_DEPTH_MARKER = "[truncated: max depth]";
 
 /**
  * Bound an untrusted structured value (object/array graph) for inclusion in
