@@ -265,16 +265,18 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     }
 
     // startupResult === "ready": the server is up; startup succeeds.
+    // Note: startup deliberately does NOT log mqtt_subscription_started —
+    // HTTP readiness proves nothing about MQTT. The event is owned by
+    // MqttNetworking.on_connect(), which emits it per topic right before
+    // the subscribe() call that actually starts the subscription. Logging
+    // it here would announce a subscription that has not been attempted
+    // (the broker may be unreachable and the client still in its reconnect
+    // loop), contradicting /ready and the mqtt_subscription_active gauge.
     appLogger.write_info("index.ts/applicationStarted", `${dude.about.name} v${dude.about.version} started.`, {
       event: "application_started",
       logType: "service",
       version: dude.about.version,
       apiPort,
-      mqttTopic: config.mqttTopicTelemetry,
-    });
-    appLogger.write_info("index.ts/listeningOnMqtt", `Listening on MQTT topic: ${config.mqttTopicTelemetry}`, {
-      event: "mqtt_subscription_started",
-      logType: "service",
       mqttTopic: config.mqttTopicTelemetry,
     });
   } catch (err: unknown) {

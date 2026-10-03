@@ -704,6 +704,104 @@ describe("telemetry acceptance includes physical-range validation (regression P2
     expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts bme280 telemetry carrying a valid altitude", () => {
+    // Altitude is optional but range-checked: a plausible barometric value
+    // passes and the message publishes and stamps freshness as before.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: {
+        temperature_c: 25,
+        humidity_percent: 45,
+        pressure_pa: 100000,
+        altitude_m: 500,
+      },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects bme280 telemetry with a finite but absurdly high altitude", () => {
+    // The publisher reads altitude generically with only a finiteness
+    // guard, so without the routing boundary a finite 999999 m would reach
+    // the air_altitude_ft gauge unchecked. The range check rejects the
+    // whole message before any publish/stamp/admission.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "bme280",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: {
+        temperature_c: 25,
+        humidity_percent: 45,
+        pressure_pa: 100000,
+        altitude_m: 999999,
+      },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "altitude_m");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: 999999, minRange: -1000, maxRange: 20000 });
+  });
+
+  it("rejects sht35 (air) telemetry with a finite but absurdly low altitude, though it does not carry one", () => {
+    // The publisher reads altitude generically whenever present, not just
+    // for bme280, so a malformed sht35 payload carrying a finite altitude
+    // below the barometric floor would otherwise reach the gauge
+    // unchecked. The routing layer validates an optional-but-present
+    // altitude the same way and rejects the message before any
+    // publish/stamp/admission.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "sht35",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25, humidity_percent: 45, altitude_m: -999999999 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "altitude_m");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: -999999999, minRange: -1000, maxRange: 20000 });
+  });
+
+  it("accepts sht35 (air) telemetry with an absent or non-finite altitude and no warning", () => {
+    // An optional field the device omits is not a validation failure, and a
+    // present-but-non-finite value (which get_numeric_field reports as
+    // undefined — including the null the firmware sends when the adjusted
+    // pressure is non-positive) is likewise skipped rather than rejected —
+    // neither should raise telemetry_field_missing for a device that does
+    // not carry an altitude reading.
+    for (const altitude of [undefined, "not-a-number", null]) {
+      const { prom, logger } = driveMessage({
+        message_type: "telemetry",
+        device: "sht35",
+        source: "v3-src",
+        firmware_version: fw,
+        payload: {
+          temperature_c: 25,
+          humidity_percent: 45,
+          ...(altitude === undefined ? {} : { altitude_m: altitude }),
+        },
+      });
+
+      expect(prom.publish_air).toHaveBeenCalledTimes(1);
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "telemetry_field_missing" && call[2]?.field === "altitude_m"
+        )
+      ).toBe(false);
+    }
+  });
+
   it("rejects light telemetry with negative lux", () => {
     const { prom, logger } = driveMessage({
       message_type: "telemetry",

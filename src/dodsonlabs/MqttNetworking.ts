@@ -1284,6 +1284,18 @@ export class MqttNetworking implements IMqttNetworking {
                 // present one must still be non-negative.
                 specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0, optional: true });
             }
+            // Altitude is optional for every air device: bme280 is the only
+            // one expected to send it (null when the adjusted pressure is
+            // non-positive), but the publisher reads altitude_m generically
+            // whenever it is present — the same shape as pressure — so a
+            // malformed payload carrying a finite altitude from any air
+            // device would otherwise reach the gauge unchecked. An absent or
+            // non-finite field stays valid; a present one must sit within
+            // the barometric range, which comfortably encompasses every
+            // plausible fixed-sensor deployment (lowest land surface
+            // ~-430 m; well above the highest attainable barometric
+            // altitude) while rejecting obviously invalid values.
+            specs.push({ field: "altitude_m", min: -1000, max: 20000, optional: true });
             if (this.is_telemetry_valid(devicePayload, source, specs)) {
                 // Valid message: admit the firmware version, then publish.
                 const firmwareVersion = this.getFirmwareVersion(json_doc);

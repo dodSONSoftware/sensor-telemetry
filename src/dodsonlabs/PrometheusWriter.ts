@@ -1905,8 +1905,12 @@ export class PrometheusWriter {
             );
         }
 
-        // V3 bme280 messages carry altitude in meters (null when the adjusted
-        // pressure is non-positive); only bme280 devices send it.
+        // Altitude arrives in meters (null when the adjusted pressure is
+        // non-positive). bme280 is the only device expected to send it, but
+        // like pressure the publisher reads it generically whenever present,
+        // so the physical range is enforced at the routing boundary
+        // (handle_v3_device_telemetry), not here — the writer keeps a single
+        // finiteness guard and no second range policy.
         const altitudeM = get_numeric_field(air, "altitude_m");
         const altitudeFt = altitudeM === undefined ? NaN : this.metersToFeet(altitudeM);
         if (Number.isFinite(altitudeFt)) {
