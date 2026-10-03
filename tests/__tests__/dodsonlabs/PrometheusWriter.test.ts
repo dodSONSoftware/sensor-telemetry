@@ -1688,6 +1688,122 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("discrete health counters reject non-integer values (regression P3-2)", () => {
+    // devices_active / devices_configured / outbound_* count discrete
+    // quantities (devices, queue entries, messages) — 2.5 active devices is
+    // impossible — but the V4 health fields are extracted with the
+    // general-purpose numeric helper, which also serves fractional
+    // measurements (temperature, pressure). The setters must enforce the
+    // stronger integer invariant themselves.
+    // short: abbreviated counter id kept in the test source names, which
+    // must stay under sensorSourceMaxLength (30) so the raw name survives
+    // sanitization untouched and can be matched in the metric label.
+    const discreteCounters: Array<{
+      short: string;
+      field: string;
+      metric: string;
+      set: (source: string, value: number) => void;
+    }> = [
+      {
+        short: "dev-act",
+        field: "devices_active",
+        metric: "sensor_health_devices_active",
+        set: (source, value) => writer.set_devices_active(source, value),
+      },
+      {
+        short: "dev-cfg",
+        field: "devices_configured",
+        metric: "sensor_health_devices_configured",
+        set: (source, value) => writer.set_devices_configured(source, value),
+      },
+      {
+        short: "q-depth",
+        field: "outbound_queue_depth",
+        metric: "sensor_health_outbound_queue_depth",
+        set: (source, value) => writer.set_outbound_queue_depth(source, value),
+      },
+      {
+        short: "evicted",
+        field: "outbound_evicted",
+        metric: "sensor_health_outbound_evicted",
+        set: (source, value) => writer.set_outbound_evicted(source, value),
+      },
+      {
+        short: "rejected",
+        field: "outbound_rejected",
+        metric: "sensor_health_outbound_rejected",
+        set: (source, value) => writer.set_outbound_rejected(source, value),
+      },
+    ];
+
+    const sourceFor = (counter: (typeof discreteCounters)[number], label: string): string =>
+      `p32-${counter.short}-${label}`;
+
+    function gaugeValueFor(
+      metrics: string,
+      metric: string,
+      source: string
+    ): string | undefined {
+      const line = metrics
+        .split("\n")
+        .find((l) => l.startsWith(`${metric}{source="${source}"}`));
+      return line === undefined ? undefined : line.slice(line.lastIndexOf(" ") + 1);
+    }
+
+    it.each([
+      ["zero", 0],
+      ["one", 1],
+      ["forty-two", 42],
+    ])(
+      "accepts the integer value %s for every discrete counter",
+      async (label, value) => {
+        for (const counter of discreteCounters) {
+          const source = sourceFor(counter, label);
+          counter.set(source, value);
+
+          const metrics = await getMetrics();
+          expect(gaugeValueFor(metrics, counter.metric, source)).toBe(
+            String(value)
+          );
+        }
+      }
+    );
+
+    it.each([
+      ["fractional", 1.5],
+      ["negative", -1],
+      ["nan", NaN],
+      ["infinity", Infinity],
+    ])(
+      "rejects the %s value with a warning and leaves the gauge unchanged for every discrete counter",
+      async (label, value) => {
+        for (const counter of discreteCounters) {
+          const source = sourceFor(counter, label);
+          // Seed a valid baseline so "unchanged" is observable — an
+          // un-set gauge also has no series, which would pass vacuously.
+          counter.set(source, 7);
+          counter.set(source, value);
+
+          const warnCall = logger.write_warn.mock.calls.find(
+            (call) =>
+              call[2]?.event === "telemetry_invalid_value" &&
+              call[2]?.field === counter.field &&
+              call[2]?.source === source
+          );
+          expect(warnCall).toBeDefined();
+          if (Number.isNaN(value)) {
+            expect(warnCall?.[2]?.value).toBeNaN();
+          } else {
+            expect(warnCall?.[2]?.value).toBe(value);
+          }
+
+          const metrics = await getMetrics();
+          expect(gaugeValueFor(metrics, counter.metric, source)).toBe("7");
+        }
+      }
+    );
+  });
+
   describe("source label sanitization", () => {
     it("maps an all-invalid source to the 'unknown' label instead of an empty label", async () => {
       // The shared writer uses the default char set (a-zA-Z0-9._-), so "###"

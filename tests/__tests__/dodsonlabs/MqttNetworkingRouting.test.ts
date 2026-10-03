@@ -865,6 +865,20 @@ describe("MqttNetworking V3 health field mapping", () => {
     expect(prom.set_uptime_seconds).toHaveBeenCalledWith("v3-src", 3600);
   });
 
+  it("truncates a fractional top-level uptime_ms to integer milliseconds before the seconds conversion", () => {
+    // uptime_ms is extracted through get_millisecond_field: the truncation
+    // is declared by the call site, so 3600000.9 ms -> 3600000 ms -> 3600 s
+    // (not 3600.0009).
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "v3-src",
+      uptime_ms: 3600000.9,
+      payload: { status: "healthy" },
+    });
+
+    expect(prom.set_uptime_seconds).toHaveBeenCalledWith("v3-src", 3600);
+  });
+
   it("errors when a V3 health message has no payload", () => {
     const { prom, logger } = driveMessage({
       message_type: "health",

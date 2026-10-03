@@ -36,8 +36,13 @@ let _logger: Logger | undefined;
 export function setLogger(l: Logger) { _logger = l; }
 export const logger = () => _logger;
 
-export const createLogger = (config: z.infer<typeof configSchema>) => {
-    setLogger(new Logger(config));
+export const createLogger = (config: z.infer<typeof configSchema>): Logger => {
+    const log = new Logger(config);
+    setLogger(log);
+    // Returning the constructed instance lets the startup path use it
+    // directly instead of reading the global back through logger() and
+    // asserting the type.
+    return log;
 };
 
 

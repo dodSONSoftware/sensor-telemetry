@@ -13,6 +13,7 @@ import {
   CONFIG_FILE_CANDIDATES,
   getStringField,
   getStringOrFiniteNumberField,
+  get_millisecond_field,
   get_numeric_field,
   get_timestamp_iso,
   LOG_VALUE_MAX_LENGTH,
@@ -404,9 +405,35 @@ describe("get_numeric_field", () => {
     ).toBe(12);
   });
 
-  it("truncates fields named time/Time/millis/Millis to integers", () => {
-    expect(get_numeric_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234);
-    expect(get_numeric_field({ durationMillis: 87.4 }, "durationMillis")).toBe(87);
+  it("never truncates based on the field's name", () => {
+    // The old heuristic truncated any field whose name contained
+    // time/Time/millis/Millis — semantics inferred from spelling. The
+    // helper is now purely extractive: fractional values come through
+    // exactly as parsed, whatever the field is called.
+    expect(get_numeric_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234.9);
+    expect(get_numeric_field({ durationMillis: 87.4 }, "durationMillis")).toBe(87.4);
+  });
+});
+
+describe("get_millisecond_field", () => {
+  it("truncates fractional millisecond values to integers (toward zero)", () => {
+    expect(get_millisecond_field({ uptime_ms: 1234.9 }, "uptime_ms")).toBe(1234);
+    expect(get_millisecond_field({ duration_ms: 87.4 }, "duration_ms")).toBe(87);
+    expect(get_millisecond_field({ durationMs: -87.4 }, "durationMs")).toBe(-87);
+  });
+
+  it("keeps integer millisecond values and numeric strings exact", () => {
+    expect(get_millisecond_field({ uptime_ms: 3600000 }, "uptime_ms")).toBe(3600000);
+    expect(get_millisecond_field({ uptime_ms: " 1234.9 " }, "uptime_ms")).toBe(1234);
+  });
+
+  it("shares get_numeric_field's absent-value contract across aliases", () => {
+    // Empty string / non-numeric / non-finite first alias falls through to
+    // the next alias; no usable value yields undefined (not 0, not NaN).
+    expect(get_millisecond_field({ a: "", b: "7.9" }, "a", "b")).toBe(7);
+    expect(get_millisecond_field({ a: "abc" }, "a")).toBeUndefined();
+    expect(get_millisecond_field({ uptime_ms: true }, "uptime_ms")).toBeUndefined();
+    expect(get_millisecond_field({ other_ms: 5 }, "uptime_ms")).toBeUndefined();
   });
 });
 

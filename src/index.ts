@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { aboutDude, createLogger, logger } from "./common/global";
-import type { Logger } from "./dodsonlabs/Logger";
+import { aboutDude, createLogger } from "./common/global";
 import {
   CONFIG_FILE_CANDIDATES,
   ensureError,
@@ -45,9 +44,7 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   const config = validate_config(configResult.data);
 
   // create logger
-  createLogger(config);
-  // createLogger(config) above guarantees logger() returns a defined Logger
-  const appLogger = logger() as Logger;
+  const appLogger = createLogger(config);
 
   // display configuration source and contents
   appLogger.write_info(

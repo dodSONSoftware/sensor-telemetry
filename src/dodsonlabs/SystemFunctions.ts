@@ -426,8 +426,10 @@ export function boundForLog(value: unknown, depth: number = 0): unknown {
  *   a false zero reading, so they are treated as absent and the next alias
  *   is tried.
  * - Values that do not parse to a finite number are likewise absent.
- * - Fields whose name contains time/Time/millis/Millis (e.g. uptime_ms) are
- *   truncated to integer milliseconds.
+ * - The value is returned exactly as parsed — this helper never rounds or
+ *   truncates. Millisecond-unit fields use get_millisecond_field instead,
+ *   so the integer-millisecond invariant is declared at the call site
+ *   rather than inferred from the field's spelling.
  *
  * Returns undefined if no field holds a valid finite number.
  */
@@ -448,17 +450,31 @@ export function get_numeric_field(
       continue;
     }
     if (!Number.isFinite(numValue)) continue;
-    if (
-      fieldName.includes("time") ||
-      fieldName.includes("Time") ||
-      fieldName.includes("millis") ||
-      fieldName.includes("Millis")
-    ) {
-      return Math.trunc(numValue);
-    }
     return numValue;
   }
   return undefined;
+}
+
+/**
+ * Get a millisecond-unit numeric field from an untrusted JSON object,
+ * truncated to integer milliseconds (Math.trunc — toward zero).
+ *
+ * Extraction semantics are exactly get_numeric_field's (first alias with a
+ * usable value wins; only numbers and numeric strings accepted; empty
+ * strings and non-finite values are absent); the only difference is the
+ * truncation. The invariant lives in the helper's identity, not in the
+ * field's name — a field whose spelling happens to contain "time" or
+ * "millis" is not truncated by get_numeric_field, and a millisecond field
+ * spelled without either (e.g. duration_ms) is truncated here.
+ *
+ * Returns undefined if no field holds a valid finite number.
+ */
+export function get_millisecond_field(
+  obj: JsonObject,
+  ...fieldNames: string[]
+): number | undefined {
+  const value = get_numeric_field(obj, ...fieldNames);
+  return value === undefined ? undefined : Math.trunc(value);
 }
 
 /**

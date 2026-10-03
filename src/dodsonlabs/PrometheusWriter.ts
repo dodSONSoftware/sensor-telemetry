@@ -139,6 +139,29 @@ export class PrometheusWriter {
     // which is the documented approximation that keeps memory bounded.
     private readonly rejectedSources = new Set<string>();
     private readonly admittedFirmwareVersions = new Set<string>();
+    // Label -> raw-firmware-version ownership: mirrors sourceLabelOwnership
+    // for the firmware_version label. Sanitization (invalid-character
+    // strip, truncation) is lossy, so distinct raw versions can collapse
+    // onto one sanitized form — this map is what keeps two distinct
+    // versions from silently sharing a telemetry series (see
+    // resolveFirmwareLabel). Bounded by sourceCardinalityCap: entries are
+    // claimed when a non-fallback label is admitted and never freed (see
+    // the known eviction limitation below). The blank "unknown" fallback
+    // is shared by design and never claimed.
+    private readonly firmwareLabelOwnership = new Map<string, string>();
+    // Resolved labels currently rejected by the firmware cardinality cap,
+    // keyed by the resolved (bounded-length) label: the episode-scoped
+    // warn-once dedupe for sensor_firmware_collision on cap-rejected
+    // colliding versions (one warning while this rejection state persists,
+    // not per process lifetime — see CLAUDE.md) — rejected labels never
+    // receive ownership entries, so without this the collision warning
+    // would re-fire on every resolution of the same rejected version.
+    // Reclaimable: admission deletes the entry (ending the episode).
+    // Bounded: cleared once it grows to 4× the cap (same strategy as
+    // rejectedSources), which starts a new episode. The rejection COUNTER
+    // is not deduped by this set — it increments per occurrence, as
+    // before.
+    private readonly rejectedFirmwareVersions = new Set<string>();
     // Warn-once latches: a rejected value is counted on every occurrence,
     // but the warning fires once per cap so a sustained flood stays a
     // single warn line (the counters carry the ongoing signal).
@@ -168,6 +191,12 @@ export class PrometheusWriter {
     // wipe another source's data, so they are excluded from the map in
     // mark_source_seen and can never reach evictStaleSource.
     private static readonly NON_EVICTABLE_SOURCES: ReadonlySet<string> = new Set(["unknown", "unknown_source"]);
+    // Reserved firmware-label fallback identities: "unknown" is shared by
+    // blank/all-invalid versions, "unknown_firmware" by cap overflow. A
+    // REAL version that sanitizes to either is disambiguated rather than
+    // merged with the fallback (resolveFirmwareLabel), exactly like a real
+    // source named "unknown" is disambiguated from the source fallbacks.
+    private static readonly FIRMWARE_FALLBACK_LABELS: ReadonlySet<string> = new Set(["unknown", "unknown_firmware"]);
     // The 27 per-source gauges (9 readings + 17 sensor_health_* + the
     // last-seen timestamp). Eviction calls .remove({source}) on exactly
     // these — never on the topic-labeled mqtt_subscription_active gauge or
@@ -1348,16 +1377,18 @@ export class PrometheusWriter {
     }
 
     /**
-     * Deterministic disambiguated label for a raw source whose sanitized
-     * form collides: the sanitized base, truncated to leave room, plus "-"
-     * and an 8-hex-character sha256 fingerprint of the raw source. Stable
-     * for the process lifetime (a pure function of the raw source — no
-     * mutable state), always within MAX_SOURCE_LENGTH, and distinct per
-     * raw source except for an effectively unreachable 8-hex fingerprint
-     * collision.
+     * Deterministic disambiguated label for a raw identity (source or
+     * firmware version) whose sanitized form collides: the sanitized
+     * base, truncated to leave room, plus "-" and an 8-hex-character
+     * sha256 fingerprint of the raw identity. Stable for the process
+     * lifetime (a pure function of the raw identity — no mutable state),
+     * always within MAX_SOURCE_LENGTH, and distinct per raw identity
+     * except for an effectively unreachable 8-hex fingerprint collision.
+     * Shared by the source and firmware label paths so both identity
+     * spaces disambiguate identically.
      */
-    private disambiguatedSourceLabel(sanitized: string, source: string): string {
-        const suffix = createHash("sha256").update(source, "utf8").digest("hex").slice(0, 8);
+    private disambiguatedLabel(sanitized: string, identity: string): string {
+        const suffix = createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 8);
         const room = this.MAX_SOURCE_LENGTH - (suffix.length + 1);
         return `${sanitized.slice(0, Math.max(0, room))}-${suffix}`;
     }
@@ -1408,7 +1439,7 @@ export class PrometheusWriter {
         // (lossy sanitization collapsed two distinct identities) or is a
         // reserved fallback identity (unknown / unknown_source) that a real
         // source would otherwise be indistinguishable from.
-        const disambiguated = this.disambiguatedSourceLabel(sanitized, source);
+        const disambiguated = this.disambiguatedLabel(sanitized, source);
         if (
             this.sourceLabelOwnership.get(disambiguated) === undefined &&
             !this.rejectedSources.has(disambiguated)
@@ -1540,32 +1571,133 @@ export class PrometheusWriter {
     }
 
     /**
-     * Admit a firmware version as a telemetry_messages_total label value.
-     * firmware_version comes straight from MQTT payloads, so apply the same
-     * bounds as source labels — invalid-character strip, truncation to
-     * MAX_SOURCE_LENGTH — plus the same distinct-value cap: values beyond
-     * the cap map to the fixed "unknown_firmware" label and increment
-     * sensor_firmware_versions_rejected_total.
+     * Resolve a raw firmware version to its telemetry_messages_total label,
+     * preserving identity: one raw version always maps to the same label
+     * for the process lifetime, and two distinct raw versions never map to
+     * the same concrete label.
+     *
+     * Sanitization is lossy (invalid-character strip, truncation), so
+     * distinct raw versions can collapse onto one sanitized form (fw+123 /
+     * fw123 -> fw123; two long versions that differ only past
+     * MAX_SOURCE_LENGTH), and a real version can even sanitize to a
+     * reserved fallback identity. The caller (admitFirmwareVersion)
+     * records which raw version owns each admitted label, and this method
+     * consults that ownership:
+     *
+     * - a version made entirely of invalid characters shares the "unknown"
+     *   fallback (the blank contract — deliberately merged, never claimed,
+     *   so blank churn cannot exhaust the ownership map),
+     * - a sanitized label already owned by the same raw version is reused,
+     * - a free, non-reserved sanitized label is returned as-is (the
+     *   caller claims ownership when it admits it),
+     * - otherwise (the label is owned by a DIFFERENT raw version, or it is
+     *   a reserved fallback identity that a real version sanitizes to)
+     *   the label is disambiguated deterministically — never silently
+     *   merged.
      */
-    public admitFirmwareVersion(firmwareVersion: string): string {
-        // No Unicode dash normalization: firmware identity is not
-        // cross-referenced with source identity, so plain strip/truncate
-        // is sufficient to bound the label value.
+    private resolveFirmwareLabel(firmwareVersion: string): string {
         let sanitized = firmwareVersion.replace(this.VALID_CHARS, "");
         if (sanitized.length > this.MAX_SOURCE_LENGTH) {
             sanitized = sanitized.substring(0, this.MAX_SOURCE_LENGTH);
         }
         // A firmware version made entirely of invalid characters collapses
-        // to "" — reuse the "unknown" label the missing-field path uses.
+        // to "" — every such version shares the "unknown" label the
+        // missing-field path uses.
         if (sanitized === "") {
-            sanitized = "unknown";
+            return "unknown";
         }
-        if (this.admittedFirmwareVersions.has(sanitized)) {
+        const owner = this.firmwareLabelOwnership.get(sanitized);
+        if (owner === firmwareVersion) {
+            // The same raw version keeps the label it already owns: a
+            // label is stable for a raw version for the process lifetime.
             return sanitized;
+        }
+        if (owner === undefined && !PrometheusWriter.FIRMWARE_FALLBACK_LABELS.has(sanitized)) {
+            return sanitized;
+        }
+        // The sanitized label is already owned by a different raw version
+        // (lossy sanitization collapsed two distinct identities) or is a
+        // reserved fallback identity (unknown / unknown_firmware) that a
+        // real version would otherwise be indistinguishable from.
+        const disambiguated = this.disambiguatedLabel(sanitized, firmwareVersion);
+        if (
+            this.firmwareLabelOwnership.get(disambiguated) === undefined &&
+            !this.rejectedFirmwareVersions.has(disambiguated)
+        ) {
+            // First sighting of this disambiguation: a new distinct
+            // version identity is appearing in the label space. Ownership
+            // alone cannot dedupe a CAP-REJECTED disambiguated label
+            // (rejected versions never receive ownership entries), so
+            // rejectedFirmwareVersions carries the episode-scoped dedupe,
+            // mirroring resolveSourceLabel.
+            this.logger.write_warn(
+                "prometheus/firmwareCollision",
+                `Firmware version '${truncateForLog(firmwareVersion)}' sanitizes to '${sanitized}', which is already in use by another version or is a reserved fallback label — using '${disambiguated}'`,
+                {
+                    event: "sensor_firmware_collision",
+                    logType: "sensor",
+                    originalFirmware: truncateForLog(firmwareVersion),
+                    sanitizedFirmware: sanitized,
+                    finalLabel: disambiguated,
+                }
+            );
+        }
+        return disambiguated;
+    }
+
+    /**
+     * Admit a firmware version as a telemetry_messages_total label value.
+     * firmware_version comes straight from MQTT payloads, so apply the same
+     * bounds as source labels — invalid-character strip, truncation to
+     * MAX_SOURCE_LENGTH — preserve raw-version identity (no silent
+     * collisions; see resolveFirmwareLabel), plus the same distinct-value
+     * cap: values beyond the cap map to the fixed "unknown_firmware"
+     * label and increment sensor_firmware_versions_rejected_total.
+     *
+     * Invariant: for non-fallback labels, firmwareLabelOwnership and
+     * admittedFirmwareVersions stay in lockstep — a label is claimed only
+     * when it is admitted here, and the blank "unknown" fallback is the
+     * one admitted label that never receives an ownership entry (blank
+     * versions are deliberately merged, like blank sources).
+     */
+    public admitFirmwareVersion(firmwareVersion: string): string {
+        const label = this.resolveFirmwareLabel(firmwareVersion);
+        const owner = this.firmwareLabelOwnership.get(label);
+        if (owner === firmwareVersion) {
+            return label;
+        }
+        if (owner !== undefined) {
+            // A different raw version owns the resolved label — only
+            // reachable for an 8-hex fingerprint collision at the
+            // disambiguated level (effectively unreachable). Merging the
+            // two identities would be exactly the defect the ownership
+            // map exists to prevent, so fall back to the reserved label.
+            return "unknown_firmware";
+        }
+        if (this.admittedFirmwareVersions.has(label)) {
+            // Admitted without ownership: the shared blank "unknown"
+            // fallback. Reusing it must not depend on which blank version
+            // first claimed the slot.
+            return label;
         }
         if (this.admittedFirmwareVersions.size < this.sourceCardinalityCap) {
-            this.admittedFirmwareVersions.add(sanitized);
-            return sanitized;
+            this.admittedFirmwareVersions.add(label);
+            if (!PrometheusWriter.FIRMWARE_FALLBACK_LABELS.has(label)) {
+                this.firmwareLabelOwnership.set(label, firmwareVersion);
+            }
+            // Admission ends any rejection episode for this label: a
+            // later re-rejection (after cap churn) warns again.
+            this.rejectedFirmwareVersions.delete(label);
+            return label;
+        }
+        if (!this.rejectedFirmwareVersions.has(label)) {
+            // First rejection of this label in the current episode — the
+            // warn-once dedupe for sensor_firmware_collision (the counter
+            // below stays per-occurrence, as before).
+            if (this.rejectedFirmwareVersions.size >= this.sourceCardinalityCap * 4) {
+                this.rejectedFirmwareVersions.clear();
+            }
+            this.rejectedFirmwareVersions.add(label);
         }
         this.prometheus_counter_firmware_versions_rejected?.inc();
         if (!this.firmwareCapExceededWarned) {
@@ -1576,18 +1708,18 @@ export class PrometheusWriter {
                 {
                     event: "sensor_firmware_cap_exceeded",
                     logType: "audit",
-                    firmwareVersion: sanitized,
+                    firmwareVersion: label,
                     cap: this.sourceCardinalityCap,
                 }
             );
         }
         this.logger.write_debug(
             "prometheus/firmwareRejected",
-            `Firmware version '${sanitized}' rejected by cardinality cap, using 'unknown_firmware' label`,
+            `Firmware version '${label}' rejected by cardinality cap, using 'unknown_firmware' label`,
             {
                 event: "sensor_firmware_rejected",
                 logType: "sensor",
-                firmwareVersion: sanitized,
+                firmwareVersion: label,
             }
         );
         return "unknown_firmware";
@@ -2215,7 +2347,9 @@ export class PrometheusWriter {
 
     set_devices_active(source: string, count: number): void {
         const sanitized = this.admitSource(source);
-        if (!Number.isFinite(count) || count < 0) {
+        // Discrete quantity: a fractional count (2.5 active devices) is
+        // impossible, so integers only — NaN/±Infinity are rejected too.
+        if (!Number.isInteger(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setDevicesActiveInvalid",
                 `Source: ${sanitized}, invalid devices_active`,
@@ -2245,7 +2379,7 @@ export class PrometheusWriter {
 
     set_devices_configured(source: string, count: number): void {
         const sanitized = this.admitSource(source);
-        if (!Number.isFinite(count) || count < 0) {
+        if (!Number.isInteger(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setDevicesConfiguredInvalid",
                 `Source: ${sanitized}, invalid devices_configured`,
@@ -2339,7 +2473,7 @@ export class PrometheusWriter {
 
     set_outbound_queue_depth(source: string, depth: number): void {
         const sanitized = this.admitSource(source);
-        if (!Number.isFinite(depth) || depth < 0) {
+        if (!Number.isInteger(depth) || depth < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundQueueDepthInvalid",
                 `Source: ${sanitized}, invalid outbound_queue_depth`,
@@ -2369,7 +2503,7 @@ export class PrometheusWriter {
 
     set_outbound_evicted(source: string, count: number): void {
         const sanitized = this.admitSource(source);
-        if (!Number.isFinite(count) || count < 0) {
+        if (!Number.isInteger(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundEvictedInvalid",
                 `Source: ${sanitized}, invalid outbound_evicted`,
@@ -2399,7 +2533,7 @@ export class PrometheusWriter {
 
     set_outbound_rejected(source: string, count: number): void {
         const sanitized = this.admitSource(source);
-        if (!Number.isFinite(count) || count < 0) {
+        if (!Number.isInteger(count) || count < 0) {
             this.logger.write_warn(
                 "prometheus/setOutboundRejectedInvalid",
                 `Source: ${sanitized}, invalid outbound_rejected`,

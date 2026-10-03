@@ -965,7 +965,7 @@ export class MqttNetworking implements IMqttNetworking {
         const schemaVersion = sysFunc.getStringField(json_doc, "message_schema_version", "schema_version");
         const runtimeId = sysFunc.getStringField(json_doc, "runtime_id");
         const firmwareVersion = sysFunc.getStringOrFiniteNumberField(json_doc, "firmware_version");
-        const uptimeMs = sysFunc.get_numeric_field(json_doc, "uptime_ms");
+        const uptimeMs = sysFunc.get_millisecond_field(json_doc, "uptime_ms");
         const sequence = sysFunc.get_numeric_field(json_doc, "sequence");
 
         // Remove service-managed fields from log data (not metadata)
@@ -1053,7 +1053,10 @@ export class MqttNetworking implements IMqttNetworking {
         if (responseTopic !== undefined) metadata.responseTopic = sysFunc.truncateForLog(responseTopic);
         const payloadSize = sysFunc.get_numeric_field(logData, "payload_size", "payloadSize");
         if (payloadSize !== undefined) metadata.payloadSize = payloadSize;
-        const durationMs = sysFunc.get_numeric_field(logData, "duration_ms", "durationMs");
+        // Both aliases are millisecond-unit and truncate identically —
+        // under the old name-based heuristic only the camelCase alias
+        // matched, so the two spellings of one field disagreed.
+        const durationMs = sysFunc.get_millisecond_field(logData, "duration_ms", "durationMs");
         if (durationMs !== undefined) metadata.durationMs = durationMs;
         const deviceIp = sysFunc.getStringField(logData, "device_ip", "deviceIp");
         if (deviceIp !== undefined) metadata.deviceIp = sysFunc.truncateForLog(deviceIp);
@@ -1478,9 +1481,9 @@ export class MqttNetworking implements IMqttNetworking {
             );
         }
         // uptime_ms sits at the top level of V3 messages (fallback to payload)
-        let uptimeMs = sysFunc.get_numeric_field(json_doc, "uptime_ms");
+        let uptimeMs = sysFunc.get_millisecond_field(json_doc, "uptime_ms");
         if (uptimeMs === undefined) {
-            uptimeMs = sysFunc.get_numeric_field(payload, "uptime_ms");
+            uptimeMs = sysFunc.get_millisecond_field(payload, "uptime_ms");
         }
         if (uptimeMs !== undefined) {
             this.promWriter.set_uptime_seconds(source, uptimeMs / 1000);
