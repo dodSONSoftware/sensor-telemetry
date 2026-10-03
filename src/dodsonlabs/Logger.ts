@@ -15,7 +15,7 @@ import type {
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
-const { combine, timestamp, errors, json } = format;
+const { combine, timestamp, json } = format;
 
 // Load version from package.json at module load time
 const pkgRequire = createRequire(__filename);
@@ -206,10 +206,14 @@ export class Logger implements ILogger {
         environment: process.env.NODE_ENV ?? "development",
         version: version ?? "unknown",
       },
+      // No winston errors() formatter: every log call passes a string message
+      // (errors ride in metadata as error: <Error>), so errors() — which only
+      // restructures an info.message that IS an Error — would never fire.
+      // Error stack preservation is owned by createRedactionFormat's
+      // instanceof-Error branch, which runs first here.
       format: combine(
         createRedactionFormat(),
         timestamp({ format: "YYYY-MM-DDTHH:mm:ss.SSSZ" }),
-        errors({ stack: true }),
         json(),
       ),
       transports: [

@@ -44,12 +44,19 @@ const RESTART_ONLY_KEYS = [
 type RestartOnlyKey = (typeof RESTART_ONLY_KEYS)[number];
 
 /**
- * Spec for one required V3 telemetry field. `field` is the canonical name
+ * Spec for one V3 telemetry field. `field` is the canonical name
  * used in warnings; `aliases` are additional accepted field names (the
  * first one holding a usable value wins, as in get_numeric_field).
  * `min`/`max` are inclusive physical bounds checked on the value after
  * `convert` (unit conversion — the payload carries Celsius, the supported
  * range is Fahrenheit).
+ *
+ * `optional` marks a field a device may legitimately omit: when true, a
+ * missing/non-finite value is skipped silently (no warning, no failure),
+ * while a *present* finite value is still range-checked. Used for a field
+ * the publisher reads generically whenever it appears — a malformed
+ * publisher that omits the field is fine, but one that sends an
+ * out-of-range value must not reach the gauge unchecked.
  */
 interface TelemetryFieldSpec {
     field: string;
@@ -57,6 +64,7 @@ interface TelemetryFieldSpec {
     convert?: (value: number) => number;
     min?: number;
     max?: number;
+    optional?: boolean;
 }
 
 export class MqttNetworking implements IMqttNetworking {
@@ -565,7 +573,7 @@ export class MqttNetworking implements IMqttNetworking {
      *
      * A denied subscription is not signaled through `granted`. The broker
      * rejects it with a SUBACK grant carrying a 0x80-bit code (128
-     * "unspecified error", 135 "not authorized", ...), and mqtt@5.15.2
+     * "unspecified error", 135 "not authorized", ...), and MQTT.js
      * converts that into a truthy `err` before invoking the subscribe
      * callback — the `granted` QoS is only written on the success path and
      * never carries the 128. The `if (error)` branch below is therefore the
@@ -943,13 +951,6 @@ export class MqttNetworking implements IMqttNetworking {
         return undefined;
     }
 
-    /**
-     * Get a value from log data, trying each field name in order.
-     */
-    private getLogField(logData: JsonObject | null | undefined, ...fieldNames: string[]): unknown {
-        return this.getField(logData, ...fieldNames);
-    }
-
     private handle_mqtt_message_log(json_doc: JsonObject): void {
         // Extract the log data from the "payload" envelope when present
         // (current log messages wrap the fields in "payload"), otherwise
@@ -989,7 +990,7 @@ export class MqttNetworking implements IMqttNetworking {
             sysFunc.getStringOrFiniteNumberField(json_doc, "source") ??
             "unknown";
         const level = sysFunc.getStringField(logData, "level", "log_level") ?? "info";
-        const message = this.getLogField(logData, "message", "msg") ?? logData;
+        const message = this.getField(logData, "message", "msg") ?? logData;
 
         // Gate: only forward if the sensor's log level meets the configured threshold
         const sensor_level = this.sensor_log_level_to_enum(level.toLowerCase());
@@ -1038,7 +1039,7 @@ export class MqttNetworking implements IMqttNetworking {
         // include it as structured metadata for Loki compatibility, bounded
         // (string length, property/item counts, nesting depth) so the
         // structure stays queryable without becoming an unbounded log entry.
-        const data = this.getLogField(logData, "data");
+        const data = this.getField(logData, "data");
         if (data !== undefined) metadata.data = sysFunc.boundForLog(data);
 
         // Add optional fields if present (snake_case preferred, with camelCase fallbacks).
@@ -1275,6 +1276,13 @@ export class MqttNetworking implements IMqttNetworking {
                 // "max" is not a defensible range without a deployment
                 // contract.
                 specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0 });
+            } else {
+                // The publisher reads pressure generically whenever it is
+                // present (not just for bme280), so a malformed non-bme280
+                // payload carrying a finite pressure would otherwise reach
+                // the gauge unchecked. An absent field stays valid; a
+                // present one must still be non-negative.
+                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0, optional: true });
             }
             if (this.is_telemetry_valid(devicePayload, source, specs)) {
                 // Valid message: admit the firmware version, then publish.
@@ -1564,6 +1572,14 @@ export class MqttNetworking implements IMqttNetworking {
                 ...(spec.aliases ?? [])
             );
             if (value === undefined) {
+                // An optional field the device legitimately omits is not a
+                // failure — get_numeric_field returns undefined for both a
+                // missing field and a present-but-non-finite value, and the
+                // publisher's own NaN guard means a non-finite value would
+                // never reach the gauge either way, so skip silently.
+                if (spec.optional) {
+                    continue;
+                }
                 this.logger.write_warn(
                     "networking/isTelemetryValid",
                     `Source: ${sysFunc.truncateForLog(source)}, missing or invalid field '${spec.field}', skipping`,

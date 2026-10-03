@@ -868,6 +868,31 @@ describe("PrometheusWriter", () => {
       expect(body.routes.map((r) => r.route)).toContain("/endpoints");
     });
 
+    it("documents the /write-config runtime-effective vs restart-only split in /about (regression P3-3)", async () => {
+      // The short /about route descriptions must not overstate that a
+      // successful /write-config fully applies the submitted configuration:
+      // only a subset of keys is runtime-effective, the rest need a restart.
+      // Assert the two concepts are present without snapshotting the prose.
+      const res = await fetch(`http://127.0.0.1:${port}/about`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        routes: { route: string; description: string }[];
+      };
+      const writeConfig = body.routes.find((r) => r.route === "/write-config");
+      expect(writeConfig).toBeDefined();
+      const description = writeConfig!.description.toLowerCase();
+      // Persistence is still advertised...
+      expect(description).toContain("persist");
+      // ...and so is immediate application of the runtime-effective subset,
+      // which is what "reload" used to overstate.
+      expect(description).toContain("runtime-effective");
+      expect(description).toContain("immediately");
+      // ...while the restart-only remainder is explicitly deferred.
+      expect(description).toContain("restart");
+    });
+
     it("serves /endpoints on GET with the advertised verbs", async () => {
       const res = await fetch(`http://127.0.0.1:${port}/endpoints`, {
         headers: { Connection: "close" },
@@ -989,6 +1014,45 @@ describe("PrometheusWriter", () => {
       const loggedPath = call![2].path as string;
       expect(loggedPath).toBe(`${longPath.slice(0, LOG_VALUE_MAX_LENGTH)}…`);
       expect(loggedPath.length).toBe(LOG_VALUE_MAX_LENGTH + 1);
+    });
+
+    it("bounds an over-long x-request-id in the route_not_found audit log", async () => {
+      // x-request-id is client-controlled correlation metadata on an
+      // unauthenticated path: the log-size policy caps it the same way as the
+      // unmatched URL. The response is unaffected (still a 404) — only the
+      // logged value is capped.
+      logger.write_warn.mockClear();
+
+      const longRequestId = "r".repeat(LOG_VALUE_MAX_LENGTH + 100);
+      const res = await fetch(`http://127.0.0.1:${port}/no-such-route`, {
+        headers: { Connection: "close", "x-request-id": longRequestId },
+      });
+
+      expect(res.status).toBe(404);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "route_not_found"
+      );
+      expect(call).toBeDefined();
+      const loggedId = call![2].requestId as string;
+      expect(loggedId).toBe(`${"r".repeat(LOG_VALUE_MAX_LENGTH)}…`);
+      expect(loggedId.length).toBe(LOG_VALUE_MAX_LENGTH + 1);
+    });
+
+    it("omits requestId entirely when no x-request-id header is sent", async () => {
+      // A missing header must stay absent from the metadata (undefined), not
+      // be stringified to the literal "undefined" by the bounding helper.
+      logger.write_warn.mockClear();
+
+      const res = await fetch(`http://127.0.0.1:${port}/no-such-route`, {
+        headers: { Connection: "close" },
+      });
+
+      expect(res.status).toBe(404);
+      const call = logger.write_warn.mock.calls.find(
+        (c) => c[2]?.event === "route_not_found"
+      );
+      expect(call).toBeDefined();
+      expect(call![2].requestId).toBeUndefined();
     });
 
     it("bounds the over-long URL in the http_request_received debug log", async () => {

@@ -480,13 +480,20 @@ export class PrometheusWriter {
                 // path/query string, and the log-size policy caps untrusted
                 // input before it is written.
                 const requestUrlForLog = truncateForLog(req.url || "/");
+                // The client-supplied x-request-id is untrusted correlation
+                // metadata — cap it the same way. A missing header stays
+                // undefined (truncateForLog would stringify it to the literal
+                // "undefined", changing the no-header log shape).
+                const requestIdForLog = requestId === undefined
+                    ? undefined
+                    : truncateForLog(requestId);
                 this.logger.write_warn(
                     "prometheus/routeNotFound",
                     "HTTP route not found",
                     {
                         event: "route_not_found",
                         logType: "service",
-                        requestId,
+                        requestId: requestIdForLog,
                         method: req.method,
                         path: requestUrlForLog,
                         statusCode: 404,
@@ -805,7 +812,7 @@ export class PrometheusWriter {
                 { route: "/ready", description: "Readiness check endpoint (503 when the MQTT client is not connected or a subscription is not active)." },
                 { route: "/metrics", description: "Prometheus metrics endpoint." },
                 { route: "/read-config", description: "Reads the current configuration." },
-                { route: "/write-config", description: "Updates the configuration and reloads it." },
+                { route: "/write-config", description: "Validates and persists the configuration; runtime-effective settings are applied immediately, restart-only settings take effect on the next restart." },
                 { route: "/reload-config", description: "Reloads the configuration from disk without changing the payload." }
             ]
         };

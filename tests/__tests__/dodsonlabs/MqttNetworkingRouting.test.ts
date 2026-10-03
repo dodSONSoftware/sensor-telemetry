@@ -620,6 +620,73 @@ describe("telemetry acceptance includes physical-range validation (regression P2
     expect(warn?.[2]).not.toHaveProperty("maxRange");
   });
 
+  it("rejects sht35 (air) telemetry with a finite but negative pressure, though it does not carry one", () => {
+    // The publisher reads pressure generically whenever present, not just
+    // for bme280, so a malformed sht35 payload carrying a finite negative
+    // pressure would otherwise reach the gauge unchecked. The routing layer
+    // validates an optional-but-present pressure the same way (non-negative)
+    // and rejects the message before any publish/stamp/admission.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "sht35",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25, humidity_percent: 45, pressure_pa: -100 },
+    });
+
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.admitFirmwareVersion).not.toHaveBeenCalled();
+    const warn = outOfRangeWarn(logger, "pressure_pa");
+    expect(warn).toBeDefined();
+    expect(warn?.[2]).toMatchObject({ value: -100, minRange: 0 });
+    expect(warn?.[2]).not.toHaveProperty("maxRange");
+  });
+
+  it("accepts sht35 (air) telemetry carrying a valid (non-negative) pressure", () => {
+    // Present-and-valid is not the same as present-and-out-of-range: a
+    // non-bme280 air device that does send a usable pressure is accepted and
+    // published, so the optional check only rejects out-of-range values.
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "sht35",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25, humidity_percent: 45, pressure_pa: 100000 },
+    });
+
+    expect(prom.publish_air).toHaveBeenCalledTimes(1);
+    expect(prom.mark_source_seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts sht35 (air) telemetry with an absent or non-finite pressure and no warning", () => {
+    // An optional field the device omits is not a validation failure, and a
+    // present-but-non-finite value (which get_numeric_field reports as
+    // undefined) is likewise skipped rather than rejected — neither should
+    // raise telemetry_field_missing for a device that legitimately has no
+    // pressure sensor.
+    for (const pressure of [undefined, "not-a-number"]) {
+      const { prom, logger } = driveMessage({
+        message_type: "telemetry",
+        device: "sht35",
+        source: "v3-src",
+        firmware_version: fw,
+        payload: {
+          temperature_c: 25,
+          humidity_percent: 45,
+          ...(pressure === undefined ? {} : { pressure_pa: pressure }),
+        },
+      });
+
+      expect(prom.publish_air).toHaveBeenCalledTimes(1);
+      expect(
+        logger.write_warn.mock.calls.some(
+          (call) => call[2]?.event === "telemetry_field_missing" && call[2]?.field === "pressure_pa"
+        )
+      ).toBe(false);
+    }
+  });
+
   it("accepts bme280 telemetry carrying the legacy pressure_pascal alias", () => {
     const { prom } = driveMessage({
       message_type: "telemetry",
