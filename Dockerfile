@@ -30,12 +30,15 @@ COPY --from=builder /app/package*.json ./
 # the lock file (copied above), no dev dependencies in the runtime image.
 RUN npm ci --omit=dev && npm cache clean --force
 
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+# Create the configs directory writable by the node user (uid 1000): /write-config
+# persists via temp file + rename, which needs write access to this directory. The
+# host-side bind mount must be owned by uid/gid 1000:1000 for the same reason —
+# see the preflight in docker-refresh.sh and "Docker config folder requirement"
+# in CLAUDE.md.
+RUN mkdir -p /app/configs && chown -R node:node /app/configs
 
-# Create configs directory with write permissions
-RUN mkdir -p /app/configs && chown -R appuser:appgroup /app/configs
-
-USER appuser
+# Run as the node image's unprivileged node user (uid 1000, gid 1000)
+USER node
 
 # Internal API port: 3301 must stay in sync with config.yml's `apiPort`, the
 # application's source of truth. config.yml is a mounted file the baked image

@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.26.
+**Release:** Zinc Falcon — firmware 4.1.27.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -374,6 +374,30 @@ node index.js
 
 ## Docker Deployment
 
+The image ships no `config.yml` — the Dockerfile creates `/app/configs` owned by the unprivileged `node` user (uid 1000, gid 1000) and expects the configuration to arrive via a bind mount.
+
+### Configuration folder requirement
+
+`/write-config` persists the configuration by writing a temp file into `/app/configs` and atomically renaming it over `config.yml`. For that to work:
+
+- Mount the **directory**, read-write: `/mnt/sensor-telemetry:/app/configs:rw` (the same mount `docker-compose.yml` uses).
+- The host config folder must be **writable by the container user**. The container runs as the node image's `node` user — uid 1000, gid 1000. On the host:
+
+  ```bash
+  sudo chown 1000:1000 /mnt/sensor-telemetry /mnt/sensor-telemetry/config.yml
+  ```
+
+- Do **not** mount `:ro` — the rename has nowhere to land and every `/write-config` call fails.
+- Do **not** mount a single file (e.g. `-v /mnt/sensor-telemetry/config.yml:/app/configs/config.yml`): a file bind mount stays attached at the mount point, so the rename cannot replace it. The write appears to succeed inside the container, but the host file is never updated and the next startup reads the stale configuration.
+
+**Ownership semantics:**
+
+- Only the **directory** needs to be writable. The persistence step creates the temp file inside the directory and swaps it over `config.yml` via rename; neither step opens the existing file for writing, so the file only needs to be *readable*. After the first successful `/write-config`, the host file is automatically owned by uid 1000 — the rename lands a fresh file created by the container user — which is why `docker-refresh.sh` only chowns the directory.
+- Ownership is **numeric**, not by name. The host maps the mount to whichever local account owns uid 1000 / gid 1000, and `ls` prints that host-local name (it is cosmetic, not the container user). Verify ownership with `stat -c '%u:%g' /mnt/sensor-telemetry`, not the displayed name.
+- The directory must match the **container's** user. If the container user is ever changed in the image — or the image is rolled back to a build with a different uid — re-chown the host directory to the new uid before starting, or `/write-config` fails with EACCES. The preflight in `docker-refresh.sh` checks exactly this on every deployment.
+
+Getting this wrong does not break startup — the service only needs *read* access to boot. A misowned or read-only folder surfaces as `500 Failed to persist configuration; no changes were applied` on the first `/write-config` call; a single-file mount fails silently as lost updates.
+
 ### Build Image
 
 ```bash
@@ -386,7 +410,7 @@ docker build -t sensor-telemetry .
 docker run -d \
   --name sensor-telemetry \
   -p 3301:3301 \
-  -v /mnt/sensor-telemetry/config.yml:/app/configs/config.yml:ro \
+  -v /mnt/sensor-telemetry:/app/configs:rw \
   sensor-telemetry
 ```
 
@@ -402,7 +426,7 @@ services:
     ports:
       - "3301:3301"
     volumes:
-      - /mnt/sensor-telemetry/config.yml:/app/configs/config.yml:ro
+      - /mnt/sensor-telemetry:/app/configs:rw
     restart: unless-stopped
 ```
 
