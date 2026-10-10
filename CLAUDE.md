@@ -80,7 +80,7 @@ npm run test:coverage # Run tests with coverage report
 | Option | Description | Default |
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug, critical — critical filters at winston error level) | info |
-| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 3301 in three places — the Dockerfile `EXPOSE 3301` and HEALTHCHECK probe (`localhost:3301/health`), and the docker-compose port mapping (`3301:3301`) — so changing `apiPort` in a container deployment requires updating those deployment files to match, or the healthcheck fails and the host port never reaches the service. This is an **intentional, documented constraint — not a defect**: a true single source of truth (an env var read by the app as well as the healthcheck/compose) would require the application to take an env override of `config.yml`'s `apiPort`, which was deliberately declined to avoid complicating the app for a rarely-changed, Prometheus-pinned port. Do not re-flag the `3301` hardcoding as a bug | required |
+| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 32002 in three places — the Dockerfile `EXPOSE 32002` and HEALTHCHECK probe (`localhost:32002/health`), and the docker-compose port mapping (`32002:32002`) — so changing `apiPort` in a container deployment requires updating those deployment files to match, or the healthcheck fails and the host port never reaches the service. This is an **intentional, documented constraint — not a defect**: a true single source of truth (an env var read by the app as well as the healthcheck/compose) would require the application to take an env override of `config.yml`'s `apiPort`, which was deliberately declined to avoid complicating the app for a rarely-changed, Prometheus-pinned port. Do not re-flag the `32002` hardcoding as a bug | required |
 | `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, each with an optional `:port` (1-65535); no scheme (`mqtt://`) — the value is appended to `mqtt://` in `MqttNetworking`. Validated at config load because an unparseable value (e.g. out-of-range port) would otherwise throw synchronously from `mqtt.connect` inside the `MqttNetworking` constructor, which runs before index.ts's structured startup try | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages | - |
@@ -94,7 +94,7 @@ npm run test:coverage # Run tests with coverage report
 
 ## Prometheus Metrics Endpoint
 
-Metrics are exposed at `/metrics` (default: `http://localhost:3301/metrics`).
+Metrics are exposed at `/metrics` (default: `http://localhost:32002/metrics`).
 
 Also available:
 - `/health` — Liveness check endpoint. Returns 200 while the process is responsive, regardless of MQTT state, so the Docker healthcheck does not restart the container on a transient broker outage (the MQTT layer reconnects on its own)
@@ -160,7 +160,7 @@ docker build -t sensor-telemetry .
 # The image ships no config.yml — mount the config *directory* read-write, owned by
 # uid 1000/gid 1000 (the node image's node user), or /write-config cannot persist.
 # See the "Docker config folder requirement" in the Configuration section.
-docker run -p 3301:3301 -v /mnt/sensor-telemetry:/app/configs:rw sensor-telemetry
+docker run -p 32002:32002 -v /mnt/sensor-telemetry:/app/configs:rw sensor-telemetry
 ```
 
 ### Docker Compose

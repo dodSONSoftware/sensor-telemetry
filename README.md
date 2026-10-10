@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.27.
+**Release:** Zinc Falcon — firmware 4.1.28.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -127,7 +127,7 @@ Create a `config.yml` file:
 
 ```yaml
 logLevel: debug
-apiPort: 3301
+apiPort: 32002
 mqttBrokerIpAddress: "10.10.10.64"
 mqttTopicTelemetry: "iot/v3/telemetry"
 mqttTopicLog: "iot/v3/log"
@@ -143,7 +143,7 @@ forwardSensorLogsLevel: debug
 | Option | Description | Default |
 |--------|-------------|---------|
 | `logLevel` | Logging verbosity (error, warn, info, debug) | info |
-| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 3301 (image healthcheck probes `localhost:3301`, compose maps `3301:3301`), so changing this value in Docker also requires updating those deployment files. This is an intentional, documented constraint, not a defect — a true single source of truth would require the app to take an env override of this value, deliberately declined | required |
+| `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 32002 (image healthcheck probes `localhost:32002`, compose maps `32002:32002`), so changing this value in Docker also requires updating those deployment files. This is an intentional, documented constraint, not a defect — a true single source of truth would require the app to take an env override of this value, deliberately declined | required |
 | `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, with an optional `:port` (1-65535); no scheme — validated at config load so an unparseable value fails as a clean config error instead of a synchronous throw from `mqtt.connect` | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
 | `mqttTopicLog` | MQTT topic for log messages (separate from telemetry) | - |
@@ -409,7 +409,7 @@ docker build -t sensor-telemetry .
 ```bash
 docker run -d \
   --name sensor-telemetry \
-  -p 3301:3301 \
+  -p 32002:32002 \
   -v /mnt/sensor-telemetry:/app/configs:rw \
   sensor-telemetry
 ```
@@ -424,7 +424,7 @@ services:
     image: sensor-telemetry:latest
     container_name: sensor-telemetry
     ports:
-      - "3301:3301"
+      - "32002:32002"
     volumes:
       - /mnt/sensor-telemetry:/app/configs:rw
     restart: unless-stopped
@@ -432,7 +432,7 @@ services:
 
 ## Prometheus Metrics
 
-Metrics are exposed at `http://localhost:3301/metrics`:
+Metrics are exposed at `http://localhost:32002/metrics`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

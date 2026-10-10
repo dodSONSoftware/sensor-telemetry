@@ -53,7 +53,7 @@ async function captureLogOutput(fn: () => void): Promise<string> {
 describe("Logger log level handling", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
@@ -99,7 +99,7 @@ describe("Logger log level handling", () => {
 describe("Logger error serialization and secret redaction", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
@@ -174,7 +174,7 @@ describe("Logger error serialization and secret redaction", () => {
 describe("Logger printf-token messages keep structured metadata", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
@@ -302,7 +302,7 @@ describe("Logger printf-token messages keep structured metadata", () => {
 describe("Logger deep untrusted metadata (regression P2-1)", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };

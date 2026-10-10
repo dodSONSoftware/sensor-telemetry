@@ -4,7 +4,7 @@
 logLevel: debug
 
 # API server port
-apiPort: 3301
+apiPort: 32002
 
 # MQTT broker connection
 mqttBrokerIpAddress: 10.10.10.64

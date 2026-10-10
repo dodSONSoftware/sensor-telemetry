@@ -85,7 +85,7 @@ type MockProm = Record<string, jest.Mock>;
 
 const baseConfig: z.infer<typeof configSchema> = {
   logLevel: "info",
-  apiPort: 3301,
+  apiPort: 32002,
   mqttBrokerIpAddress: "10.0.0.1",
   mqttTopicTelemetry: "iot/v3/telemetry",
 };

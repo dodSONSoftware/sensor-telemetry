@@ -10,7 +10,7 @@ services:
     # healthcheck fails. Intentional, documented constraint (see CLAUDE.md,
     # "Configuration Options"), not a bug.
     ports:
-      - "3301:3301"
+      - "32002:32002"
     volumes:
       - /mnt/sensor-telemetry:/app/configs:rw
     restart: unless-stopped

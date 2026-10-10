@@ -7,7 +7,7 @@ import { validateConfig } from "../../../src/schemas/config";
 
 const validConfig = {
   logLevel: "info",
-  apiPort: 3301,
+  apiPort: 32002,
   mqttBrokerIpAddress: "10.0.0.1",
   mqttTopicTelemetry: "iot/v3/telemetry",
 };
@@ -82,7 +82,7 @@ describe("validateConfig", () => {
 
   it("rejects a missing required key", () => {
     expect(() =>
-      validateConfig({ logLevel: "info", apiPort: 3301 })
+      validateConfig({ logLevel: "info", apiPort: 32002 })
     ).toThrow(/mqttBrokerIpAddress/);
   });
 

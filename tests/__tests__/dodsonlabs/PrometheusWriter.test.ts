@@ -1445,7 +1445,7 @@ describe("PrometheusWriter", () => {
       const parsed = parse("http://browser.test:3000");
       expect(resolve("http://browser.test:3000", parsed)).toBe("http://browser.test:3000");
       // Same host, different port / scheme / suffix: all distinct origins.
-      expect(resolve("http://browser.test:3301", parsed)).toBeNull();
+      expect(resolve("http://browser.test:32002", parsed)).toBeNull();
       expect(resolve("https://browser.test:3000", parsed)).toBeNull();
       expect(resolve("http://browser.test:3000.evil.example", parsed)).toBeNull();
     });

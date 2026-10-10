@@ -40,22 +40,22 @@ RUN mkdir -p /app/configs && chown -R node:node /app/configs
 # Run as the node image's unprivileged node user (uid 1000, gid 1000)
 USER node
 
-# Internal API port: 3301 must stay in sync with config.yml's `apiPort`, the
+# Internal API port: 32002 must stay in sync with config.yml's `apiPort`, the
 # application's source of truth. config.yml is a mounted file the baked image
 # cannot read at build time, so there is no single source of truth across the
 # file and the image — three places hardcode it (an intentional, documented
 # constraint, not a bug; see CLAUDE.md, "Configuration Options"):
 #   EXPOSE (below)         informational only
-#   HEALTHCHECK (below)    probes localhost:3301/health
-#   compose "3301:3301"    host -> container mapping (docker-compose.yml)
+#   HEALTHCHECK (below)    probes localhost:32002/health
+#   compose "32002:32002"    host -> container mapping (docker-compose.yml)
 # Changing apiPort means editing all three to match, or the healthcheck fails
 # and the host port never reaches the service.
-EXPOSE 3301
+EXPOSE 32002
 
 WORKDIR /app/dist
 
 # Health check - polls the /health endpoint
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3301/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+    CMD node -e "require('http').get('http://localhost:32002/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 CMD ["node", "index.js"]

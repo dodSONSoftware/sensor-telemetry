@@ -80,7 +80,7 @@ function createMockLogger(): MockLogger & ILogger {
 describe("MqttNetworking.connect options", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
     sensorSourceMaxLength: 30,
@@ -118,7 +118,7 @@ describe("MqttNetworking.connect options", () => {
 describe("MqttNetworking.updateConfig restart-only key warning", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
     sensorSourceMaxLength: 30,
@@ -239,7 +239,7 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
 describe("MqttNetworking.close() shutdown ordering", () => {
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
     sensorSourceMaxLength: 30,
@@ -389,7 +389,7 @@ describe("MqttNetworking.close() shutdown branches (deterministic)", () => {
   // pinned deterministically.
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
     sensorSourceMaxLength: 30,
@@ -490,7 +490,7 @@ describe("MQTT disconnect logging (intentional vs unexpected, regression P3-3)",
   // still run the subscription-state reset in on_disconnect.
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };
@@ -562,7 +562,7 @@ describe("MQTT reconnect error logging (noise reduction)", () => {
   // owns the reconnect — this only changes how the events are logged.
   const baseConfig: z.infer<typeof configSchema> = {
     logLevel: "info",
-    apiPort: 3301,
+    apiPort: 32002,
     mqttBrokerIpAddress: "10.0.0.1",
     mqttTopicTelemetry: "iot/v3/telemetry",
   };

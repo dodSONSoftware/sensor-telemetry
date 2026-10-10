@@ -636,7 +636,7 @@ export class PrometheusWriter {
      * comma-separated exact-match allowlist (entries are trimmed of
      * whitespace, empty entries are dropped). An origin is the full
      * scheme://host:port tuple, so there is no prefix, wildcard-domain, or
-     * regex matching: http://host:3000 and http://host:3301 are distinct.
+     * regex matching: http://host:3000 and http://host:32002 are distinct.
      */
     private static parseCorsOrigins(raw: string | undefined): {
         allowAllOrigins: boolean;
@@ -875,7 +875,7 @@ export class PrometheusWriter {
                 verb: "POST",
                 requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (integer, at least 9, optional), sensorSourceValidCharsRegex (string, optional), sensorSourceCardinalityCap (positive integer, optional), staleSourceRemovalSecs (non-negative integer, 0 = disabled, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional). Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
                 responseBody: "{ success: boolean, message: string }",
-                description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel, staleSourceRemovalSecs). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, sensorSourceValidCharsRegex, or sensorSourceCardinalityCap take effect on the next restart. When running in Docker, an apiPort change additionally requires updating the deployment configuration: the image healthcheck probes localhost:3301 and the compose port mapping is 3301:3301."
+                description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel, staleSourceRemovalSecs). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, sensorSourceValidCharsRegex, or sensorSourceCardinalityCap take effect on the next restart. When running in Docker, an apiPort change additionally requires updating the deployment configuration: the image healthcheck probes localhost:32002 and the compose port mapping is 32002:32002."
             },
             {
                 name: "Reload Config",
