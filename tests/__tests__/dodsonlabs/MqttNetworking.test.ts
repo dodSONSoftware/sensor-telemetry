@@ -772,11 +772,50 @@ describe("MQTT reconnect error logging (noise reduction)", () => {
         (call) => call[2]?.event === "mqtt_reconnected"
       )
     ).toHaveLength(0);
-    // The first connect still records its (debug-level) connected event.
+    // The first connect records its connected event at INFO — promoted
+    // from debug so the initial connection is visible at the default
+    // log level — and no reconnect announcement.
+    const connected = logger.write_info.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_connected"
+    );
+    expect(connected).toHaveLength(1);
+  });
+
+  it("logs a no-error reconnect as neither connected nor reconnected", async () => {
+    const { logger, handlers } = build();
+    await handlers.connect();
+    // A clean broker DISCONNECT closes the session without an error
+    // event, so the failure counter is 0 when the client reconnects.
+    await handlers.connect();
+
     expect(
-      logger.write_debug.mock.calls.some(
+      logger.write_info.mock.calls.filter(
         (call) => call[2]?.event === "mqtt_connected"
       )
-    ).toBe(true);
+    ).toHaveLength(1);
+    expect(
+      logger.write_info.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_reconnected"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("does not duplicate mqtt_connected alongside mqtt_reconnected", async () => {
+    const { logger, handlers } = build();
+    handlers.error(new Error("connect ECONNREFUSED 10.0.0.1:1883"));
+    handlers.error(new Error("connect ECONNREFUSED 10.0.0.1:1883"));
+    await handlers.connect();
+
+    const reconnected = logger.write_info.mock.calls.filter(
+      (call) => call[2]?.event === "mqtt_reconnected"
+    );
+    expect(reconnected).toHaveLength(1);
+    expect(reconnected[0]?.[2]).toMatchObject({ failedAttempts: 2 });
+    // The recovery announcement stands alone — no paired connected line.
+    expect(
+      logger.write_info.mock.calls.filter(
+        (call) => call[2]?.event === "mqtt_connected"
+      )
+    ).toHaveLength(0);
   });
 });

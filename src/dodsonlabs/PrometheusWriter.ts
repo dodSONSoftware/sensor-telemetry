@@ -4,6 +4,7 @@
  */
 
 import http from "http";
+import type { Socket } from "net";
 import { createHash, timingSafeEqual } from "crypto";
 import { register, Gauge, Counter } from "prom-client";
 import { serviceMetadata } from "../common/global";
@@ -541,6 +542,51 @@ export class PrometheusWriter {
             );
         });
 
+        // Raw-socket protocol errors: malformed request lines, oversized
+        // headers, resets during the handshake. Node's http server answers
+        // these with a 400 and destroys the socket — but that default is a
+        // LISTENER, and adding our own 'clientError' listener REPLACES it
+        // (EventEmitter semantics), so this handler must reproduce the
+        // default response itself or clients get a bare disconnect with no
+        // status line. The handler must also be total: a throw here escapes
+        // into the server's emit() path and would surface as an
+        // uncaughtException, which index.ts treats as fatal (exit 1). It
+        // works before and after listen (clientError only fires for
+        // accepted connections, which require listen — nothing else to
+        // gate), and a connection that is already destroyed is handled by
+        // the !writable branch (destroy() on a destroyed socket is a safe
+        // no-op).
+        this.server.on("clientError", (err: NodeJS.ErrnoException, socket: Socket) => {
+            try {
+                if (socket.writable) {
+                    // The same 400 the default handler wrote.
+                    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                } else {
+                    socket.destroy();
+                }
+            } catch {
+                try { socket.destroy(); } catch { /* nothing left to do */ }
+            }
+            this.logger.write_warn(
+                "prometheus/clientError",
+                `HTTP protocol error before request parsing: ${truncateForLog(err.message)}`,
+                {
+                    event: "http_client_error",
+                    logType: "audit",
+                    // No url is available here: the parser failed before
+                    // the request line (and hence any path) was extracted.
+                    // The error code carries the class (HPE_* for parser
+                    // errors, ECONNRESET, ...) — nothing is logged that
+                    // was not observed.
+                    code: err.code ?? "UNKNOWN",
+                    remoteAddress: socket.remoteAddress ?? "UNKNOWN",
+                    // err.message for a parser error can quote input
+                    // bytes; bound it like every other untrusted value.
+                    error: truncateForLog(err.message),
+                }
+            );
+        });
+
         // handle listen errors (e.g., port already in use)
         this.server.on("error", (err: NodeJS.ErrnoException) => {
             // Record the definitive failure so the startup wait can bail out
@@ -903,7 +949,7 @@ export class PrometheusWriter {
         this.sendJson(res, 200, { endpoints });
     }
 
-    private async handleReadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    private async handleReadConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
             // Pure read: report what is on disk without mutating in-memory
             // state. Silently overwriting this.config here could roll back a
@@ -917,6 +963,27 @@ export class PrometheusWriter {
 const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
+                // Read audit: a SUCCESSFUL read proves the caller held the
+                // config token (when one is configured), so this event only
+                // fires for authenticated operator clients — unauthenticated
+                // probes 401 in verifyConfigToken and never reach here, which
+                // is what bounds its volume without throttling. (With no
+                // token set the deployment is deliberately open, and
+                // /read-config is not an orchestrator-polled endpoint —
+                // /health, /ready, and /metrics are, and those are the ones
+                // whose per-request logging is suppressed.) Config VALUES
+                // are never logged — remoteAddress only, the same forensics
+                // policy as the rejection audits.
+                this.logger.write_info(
+                    "prometheus/configReadCompleted",
+                    "Configuration served to client",
+                    {
+                        event: "config_read_completed",
+                        logType: "audit",
+                        remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                        statusCode: 200,
+                    }
+                );
                 this.sendJson(res, 200, validatedConfig);
             } else {
                 this.sendJson(res, 500, {
@@ -926,6 +993,26 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             }
         } catch (error) {
             const err = ensureError(error);
+            // Validation/parse failure audit. The result.data === null
+            // 500 above is deliberately NOT audited here: read_file_yaml
+            // already logs it as yaml_parse_failed / file_read_failed at
+            // ERROR, and this catch covers the separate class — a parseable
+            // file that fails schema validation — which otherwise left no
+            // trace at all.
+            this.logger.write_warn(
+                "prometheus/configReadFailed",
+                `/read-config failed: ${truncateForLog(err.message)}`,
+                {
+                    event: "config_read_failed",
+                    logType: "audit",
+                    remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                    statusCode: 500,
+                    // Validation/parse messages can quote file contents —
+                    // bound them like every other untrusted value; never
+                    // log the file itself.
+                    error: truncateForLog(err.message),
+                }
+            );
             this.sendJson(res, 500, {
                 success: false,
                 message: err.message
@@ -977,13 +1064,20 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         });
         req.on("end", () => {
             if (rejected) return;
+            // Capture the directly observed socket address NOW: the
+            // transaction runs later on the config write chain and the
+            // socket may be closed by then. Same forensics policy as the
+            // rejection audits — no proxy-header trust — and the address
+            // is metadata for the commit audit, never part of the logged
+            // config content.
+            const remoteAddress = req.socket.remoteAddress ?? "UNKNOWN";
             // The body is bounded by the 'data' handler's size cap above,
             // so this concatenation/decode is bounded. The write
             // transaction itself is appended to the config write chain
             // (queueConfigWrite) so concurrent requests run it one at a
             // time, each to completion.
             const body = Buffer.concat(chunks).toString("utf8");
-            this.queueConfigWrite(() => this.performConfigWrite(body, res));
+            this.queueConfigWrite(() => this.performConfigWrite(body, res, remoteAddress));
         });
 
         // A client that vanishes mid-body (aborted fetch, dropped TCP) makes
@@ -1069,10 +1163,15 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
      * configuration (disk, in-memory, runtime) end up on the same config
      * before the response goes out.
      */
-    private async performConfigWrite(body: string, res: http.ServerResponse): Promise<void> {
+    private async performConfigWrite(body: string, res: http.ServerResponse, remoteAddress: string): Promise<void> {
         try {
             const newConfigRaw = JSON.parse(body);
             const validatedConfig = validateConfig(newConfigRaw);
+
+            // Diff against the running config BEFORE the commit below
+            // replaces it: this.config is the "old" side and is
+            // overwritten a few lines down.
+            const changedKeys = this.diffChangedConfigKeys(this.config, validatedConfig);
 
             // Extract old and new log levels
             const oldLogLevel = this.config.logLevel;
@@ -1107,12 +1206,51 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                 this.configChangeCallback(validatedConfig);
             }
 
+            // Commit audit at the HTTP layer: the configuration_updated
+            // event from MqttNetworking.updateConfig only fires when
+            // networking is constructed and carries no remoteAddress, no
+            // write-vs-reload distinction, and no changed-key list. Key
+            // names only — never values: mqttBrokerIpAddress is guarded by
+            // the config token against reads and must not become a second
+            // (persistent) read channel through the log, and logLevel's
+            // old→new is already audited by applyLogLevelChange.
+            this.logger.write_info(
+                "prometheus/configWriteCommitted",
+                `Configuration committed via /write-config — changed keys: ${changedKeys.length > 0 ? changedKeys.join(", ") : "none"}`,
+                {
+                    event: "config_write_committed",
+                    logType: "audit",
+                    remoteAddress,
+                    path: "write",
+                    changedKeys,
+                }
+            );
+
             this.sendJson(res, 200, {
                 success: true,
                 message: "Configuration updated successfully"
             });
         } catch (error) {
             const err = ensureError(error);
+            // Validation/parse rejection audit. A malformed JSON body or a
+            // schema violation previously answered 400 with no log at all,
+            // while every sibling rejection (401/403/413/404) was audited.
+            // The persist-failure 500 above is deliberately NOT audited
+            // here: write_file_yaml already logs yaml_write_failed at ERROR.
+            this.logger.write_warn(
+                "prometheus/configWriteRejected",
+                `/write-config request rejected: ${truncateForLog(err.message)}`,
+                {
+                    event: "config_write_rejected",
+                    logType: "audit",
+                    remoteAddress,
+                    statusCode: 400,
+                    // Validation messages can quote body fragments — bound
+                    // them like every other untrusted value; never log the
+                    // raw body.
+                    error: truncateForLog(err.message),
+                }
+            );
             this.sendJson(res, 400, {
                 success: false,
                 message: err.message
@@ -1120,7 +1258,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         }
     }
 
-    private async handleReloadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    private async handleReloadConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
             // Pass the logger so a read/parse failure is reported as a structured
 // winston error (respecting the configured level) instead of falling back
@@ -1128,6 +1266,11 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
 const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
+                // Diff against the RUNNING config before the commit below
+                // replaces it: the operator asked "apply what's on disk",
+                // so the audit reports what the running service actually
+                // changed, not what the file contains.
+                const changedKeys = this.diffChangedConfigKeys(this.config, validatedConfig);
                 const oldLogLevel = this.config.logLevel;
                 this.config = { ...validatedConfig };
 
@@ -1143,6 +1286,20 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     this.configChangeCallback(validatedConfig);
                 }
 
+                // Commit audit at the HTTP layer — same rationale as the
+                // /write-config commit audit (key names only, never values).
+                this.logger.write_info(
+                    "prometheus/configReloadCompleted",
+                    `Configuration reloaded from disk — changed keys: ${changedKeys.length > 0 ? changedKeys.join(", ") : "none"}`,
+                    {
+                        event: "config_reload_completed",
+                        logType: "audit",
+                        remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                        path: "reload",
+                        changedKeys,
+                    }
+                );
+
                 this.sendJson(res, 200, {
                     success: true,
                     message: "Configuration reloaded successfully"
@@ -1155,6 +1312,23 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             }
         } catch (error) {
             const err = ensureError(error);
+            // Schema-validation failure audit: a parseable on-disk file
+            // that fails validateConfig previously answered 500 with no log
+            // (the result.data === null branch is already covered by
+            // yaml_parse_failed / file_read_failed, not this catch).
+            this.logger.write_warn(
+                "prometheus/configReloadFailed",
+                `/reload-config failed: ${truncateForLog(err.message)}`,
+                {
+                    event: "config_reload_failed",
+                    logType: "audit",
+                    remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                    statusCode: 500,
+                    // Validation messages can quote file contents — bound
+                    // them like every other untrusted value.
+                    error: truncateForLog(err.message),
+                }
+            );
             this.sendJson(res, 500, {
                 success: false,
                 message: err.message
@@ -1163,6 +1337,47 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
     }
 
     // ******** private methods
+
+    // Effective (default-coalesced) values for the optional config keys,
+    // mirroring the coalescing the running process actually applies: the
+    // constructor (the three source-label keys, whose defaults it already
+    // holds as module constants), applyStaleSourceRemoval
+    // (`staleSourceRemovalSecs ?? 0`), and MqttNetworking (forwardSensorLogs
+    // `?? true`, forwardSensorLogsLevel absent → debug). A key omitted from
+    // one config and set at its default in the other is the SAME running
+    // value, so it must not be reported as a changed key — the same
+    // default-coalescing rule MqttNetworking's effectiveRestartOnlyValue
+    // applies for the restart-only diff.
+    private static readonly CONFIG_EFFECTIVE_DEFAULTS: Readonly<Record<string, string | number | boolean>> = {
+        sensorSourceMaxLength: DEFAULT_SOURCE_MAX_LENGTH,
+        sensorSourceValidCharsRegex: DEFAULT_SOURCE_VALID_CHARS,
+        sensorSourceCardinalityCap: DEFAULT_SOURCE_CARDINALITY_CAP,
+        staleSourceRemovalSecs: 0,
+        forwardSensorLogs: true,
+        forwardSensorLogsLevel: "debug",
+    };
+
+    /**
+     * Top-level keys whose EFFECTIVE (default-coalesced) value differs
+     * between two validated configs. Shared by /write-config and
+     * /reload-config commit audits so both paths report the same change
+     * semantics. Both sides come from validateConfig (strict schema, so
+     * the key set is the schema's), but the union is taken anyway — zero
+     * cost, no assumption. Object.is matches the comparison in
+     * MqttNetworking.updateConfig's restart-only diff. Order follows
+     * config insertion order, so the list is deterministic for a pair.
+     */
+    private diffChangedConfigKeys(
+        oldConfig: z.infer<typeof configSchema>,
+        newConfig: z.infer<typeof configSchema>
+    ): string[] {
+        const keys = [...new Set([...Object.keys(oldConfig), ...Object.keys(newConfig)])];
+        const effective = (key: string, cfg: z.infer<typeof configSchema>): unknown => {
+            const raw = (cfg as Record<string, unknown>)[key];
+            return raw === undefined ? PrometheusWriter.CONFIG_EFFECTIVE_DEFAULTS[key] : raw;
+        };
+        return keys.filter((key) => !Object.is(effective(key, oldConfig), effective(key, newConfig)));
+    }
 
     /**
      * Apply a log-level change to the running logger, auditing the

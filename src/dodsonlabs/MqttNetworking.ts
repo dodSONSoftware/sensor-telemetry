@@ -7,7 +7,7 @@ import mqtt from "mqtt";
 import * as sysFunc from "./SystemFunctions";
 import { DEFAULT_SOURCE_CARDINALITY_CAP, DEFAULT_SOURCE_MAX_LENGTH, DEFAULT_SOURCE_VALID_CHARS, PrometheusWriter } from "./PrometheusWriter";
 import { LogLevel, isJsonObject } from "./Interfaces";
-import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
+import type { ILogger, IMqttNetworking, JsonObject, LogMetadata } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
@@ -212,6 +212,36 @@ export class MqttNetworking implements IMqttNetworking {
     // they are not connection failures and must not consume the
     // first-failure ERROR slot of the next real outage.
     private consecutive_connection_failures = 0;
+    // True after the first successful 'connect' event. Gates the
+    // mqtt_connected INFO (see on_connect): the failure counter alone
+    // cannot tell a first connect from a reconnect with no preceding
+    // error event (a clean broker DISCONNECT produces a close without an
+    // error), so the flag is the one unambiguous "has a session ever been
+    // established" signal.
+    private hasConnectedOnce = false;
+
+    // Re-warn cadence for the throttled per-message rejection warnings (see
+    // logThrottledRejection): after the first (always-logged) occurrence,
+    // repeats are counted and re-warned at most once per interval. A fixed
+    // constant rather than a config key: this is a log-volume policy, not
+    // an operator tuning knob, and the strict config schema would need a
+    // default + docs for a value nobody changes. Time-based so the re-warn
+    // rate is independent of message rate — a hostile publisher at
+    // 10 msg/s re-warns at most once per minute, exactly like a
+    // misconfigured sensor at 1 msg/min.
+    private static readonly REJECTION_REWARN_INTERVAL_MS = 60_000;
+
+    // Throttle state for the per-message rejection warnings (see
+    // logThrottledRejection). Keyed by EVENT NAME — never by source: a
+    // source is raw, unsanitized MQTT payload content a hostile publisher
+    // can mint fresh per message, so a per-source map would grow without
+    // bound (the exact leak vector the warn-once latches elsewhere avoid).
+    // The key set is the fixed set of events routed through the helper
+    // (mqtt_message_missing_type, mqtt_unknown_message_type,
+    // mqtt_unknown_v3_device, mqtt_health_invalid_payload,
+    // telemetry_field_missing, telemetry_out_of_range), so the map holds at
+    // most 6 entries for the process lifetime and never needs cleanup.
+    private readonly rejectionWarnThrottle = new Map<string, { lastWarnMs: number; suppressedCount: number }>();
 
     // ********
     // ******** PRIVATE FUNCTIONS
@@ -525,16 +555,27 @@ export class MqttNetworking implements IMqttNetworking {
                 }
             );
             this.consecutive_connection_failures = 0;
+        } else if (!this.hasConnectedOnce) {
+            // FIRST connect since process start — logged at INFO (promoted
+            // from debug) so the initial connection, which opens the /ready
+            // readiness window, is visible at the default log level. On a
+            // reconnect this branch is skipped on purpose:
+            // mqtt_reconnected already announces the recovery at INFO, and
+            // a no-error reconnect (clean broker DISCONNECT, logged as the
+            // mqtt_disconnected WARN that precedes it) stays announced by
+            // that warning plus the SUBACK path (mqtt_subscribed /
+            // mqtt_subscription_failed) and /ready — rather than by a
+            // duplicate connected line on every reconnect.
+            this.logger.write_info(
+                "networking/onConnect",
+                "Connected to the MQTT broker",
+                {
+                    event: "mqtt_connected",
+                    logType: "service",
+                }
+            );
         }
-        // log-it
-        this.logger.write_debug(
-            "networking/onConnect",
-            "Connected to the MQTT broker",
-            {
-                event: "mqtt_connected",
-                logType: "service",
-            }
-        );
+        this.hasConnectedOnce = true;
 
         // A new MQTT session starts with no broker-side subscriptions: seed
         // every configured topic as inactive so the gauge shows them while
@@ -886,6 +927,82 @@ export class MqttNetworking implements IMqttNetworking {
     // ****************************************************************
     // ******** PROCESSING MQTT MESSAGES
 
+    /**
+     * Log a per-message rejection warning, throttled per EVENT (see the
+     * rejectionWarnThrottle field for the state-bounding rationale):
+     * - the FIRST occurrence since process start is always logged —
+     *   operators must see a new problem immediately — with exactly the
+     *   metadata the call site built (no suppressedCount field, so the
+     *   first line is byte-identical to the pre-throttle shape),
+     * - repeats within REJECTION_REWARN_INTERVAL_MS are suppressed and
+     *   counted,
+     * - when the interval elapses, one re-warn fires carrying
+     *   `suppressedCount` (occurrences suppressed since the last logged
+     *   one — the re-warned occurrence itself is not counted, it was
+     *   logged, so the field only ever carries values >= 1) and the
+     *   window restarts; the message text is the most recent
+     *   occurrence's. An occurrence landing past the interval with
+     *   nothing suppressed in between is logged with the plain
+     *   (first-occurrence) metadata rather than a zero suppressedCount.
+     * Event name, level, and base metadata are unchanged from the
+     * unthrottled call, so existing queries and alerting keep working.
+     * There is deliberately no per-source granularity in the re-warn:
+     * the first occurrence (the line operators act on) carries the full
+     * source/field detail; the periodic re-warns prove the condition is
+     * ongoing and how large it is.
+     */
+    private logThrottledRejection(
+        level: "warn" | "error",
+        originator: string,
+        event: string,
+        message: string,
+        metadata: LogMetadata
+    ): void {
+        const now = Date.now();
+        const state = this.rejectionWarnThrottle.get(event);
+        if (state === undefined) {
+            this.rejectionWarnThrottle.set(event, { lastWarnMs: now, suppressedCount: 0 });
+            this.emitRejection(level, originator, message, metadata);
+            return;
+        }
+        if (now - state.lastWarnMs < MqttNetworking.REJECTION_REWARN_INTERVAL_MS) {
+            // Within the cadence: this occurrence is suppressed — count
+            // it for the next re-warn and stay quiet.
+            state.suppressedCount++;
+            return;
+        }
+        // The interval elapsed. The re-warned occurrence is logged, not
+        // suppressed, so only the counted suppressions ride along (and
+        // only when there were any — see the doc above).
+        state.lastWarnMs = now;
+        const suppressed = state.suppressedCount;
+        state.suppressedCount = 0;
+        this.emitRejection(
+            level,
+            originator,
+            message,
+            suppressed > 0 ? { ...metadata, suppressedCount: suppressed } : metadata
+        );
+    }
+
+    /**
+     * Level dispatch for logThrottledRejection: keeps the throttle logic
+     * level-agnostic — mqtt_message_missing_type stays an ERROR, the
+     * other throttled rejections warn.
+     */
+    private emitRejection(
+        level: "warn" | "error",
+        originator: string,
+        message: string,
+        metadata: LogMetadata
+    ): void {
+        if (level === "error") {
+            this.logger.write_error(originator, message, metadata);
+        } else {
+            this.logger.write_warn(originator, message, metadata);
+        }
+    }
+
     private handle_mqtt_message(json_doc: JsonObject): void {
         // initialize
         // message_type is a scalar protocol field: proven scalar at the
@@ -898,12 +1015,22 @@ export class MqttNetworking implements IMqttNetworking {
             "message-type"
         );
         if (msg_type === undefined) {
-            this.logger.write_error(
+            // Throttled per event — see logThrottledRejection: first
+            // occurrence always logged (as an ERROR, unchanged), repeats
+            // re-warned at most every 60s with suppressedCount. Source is
+            // proven scalar at the boundary like every other identifier
+            // field; a missing/structured value logs no source field
+            // rather than stringifying garbage.
+            const debugSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
+            this.logThrottledRejection(
+                "error",
                 "networking/handleMessage",
+                "mqtt_message_missing_type",
                 "Missing 'message_type' key, dropping message",
                 {
                     event: "mqtt_message_missing_type",
                     logType: "sensor",
+                    source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
                 }
             );
             return;
@@ -926,13 +1053,20 @@ export class MqttNetworking implements IMqttNetworking {
             break;
 
         default:
-            this.logger.write_warn(
+            // Throttled per event — see logThrottledRejection: first
+            // occurrence always logged, repeats re-warned at most every
+            // 60s with suppressedCount.
+            const debugSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
+            this.logThrottledRejection(
+                "warn",
                 "networking/handleMessage",
+                "mqtt_unknown_message_type",
                 `Unknown message_type '${sysFunc.truncateForLog(msg_type)}', dropping message`,
                 {
                     event: "mqtt_unknown_message_type",
                     logType: "sensor",
                     messageType: sysFunc.truncateForLog(msg_type),
+                    source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
                 }
             );
         }
@@ -1244,8 +1378,13 @@ export class MqttNetworking implements IMqttNetworking {
 
         const category = MqttNetworking.V3_DEVICE_CATEGORIES[device];
         if (category === undefined) {
-            this.logger.write_warn(
+            // Throttled per event — see logThrottledRejection: first
+            // occurrence always logged, repeats re-warned at most every
+            // 60s with suppressedCount.
+            this.logThrottledRejection(
+                "warn",
                 "networking/handleV3Telemetry",
+                "mqtt_unknown_v3_device",
                 `Unknown V3 device type '${sysFunc.truncateForLog(device)}', dropping message`,
                 {
                     event: "mqtt_unknown_v3_device",
@@ -1413,8 +1552,13 @@ export class MqttNetworking implements IMqttNetworking {
         // would let a garbage body count as accepted activity and refresh
         // the source's freshness stamp.
         if (!isJsonObject(rawPayload)) {
-            this.logger.write_warn(
+            // Throttled per event — see logThrottledRejection: first
+            // occurrence always logged, repeats re-warned at most every
+            // 60s with suppressedCount.
+            this.logThrottledRejection(
+                "warn",
                 "networking/handleHealth",
+                "mqtt_health_invalid_payload",
                 "Invalid health payload, expected an object",
                 {
                     event: "mqtt_health_invalid_payload",
@@ -1624,8 +1768,13 @@ export class MqttNetworking implements IMqttNetworking {
                 if (spec.optional) {
                     continue;
                 }
-                this.logger.write_warn(
+                // Throttled per event — see logThrottledRejection: first
+                // occurrence always logged, repeats re-warned at most every
+                // 60s with suppressedCount.
+                this.logThrottledRejection(
+                    "warn",
                     "networking/isTelemetryValid",
+                    "telemetry_field_missing",
                     `Source: ${sysFunc.truncateForLog(source)}, missing or invalid field '${spec.field}', skipping`,
                     {
                         event: "telemetry_field_missing",
@@ -1641,8 +1790,13 @@ export class MqttNetworking implements IMqttNetworking {
                 (spec.min !== undefined && checked < spec.min) ||
                 (spec.max !== undefined && checked > spec.max)
             ) {
-                this.logger.write_warn(
+                // Throttled per event — see logThrottledRejection: first
+                // occurrence always logged, repeats re-warned at most every
+                // 60s with suppressedCount.
+                this.logThrottledRejection(
+                    "warn",
                     "networking/isTelemetryValid",
+                    "telemetry_out_of_range",
                     `Source: ${sysFunc.truncateForLog(source)}, field '${spec.field}' out of physical range (${value}), skipping`,
                     {
                         event: "telemetry_out_of_range",
