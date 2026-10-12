@@ -22,18 +22,18 @@ const { combine, timestamp, json } = format;
 /**
  * Case-insensitive regex patterns for sensitive field names.
  */
+// Each pattern must not be subsumed by another: a key matching a removed
+// (redundant) pattern still matched the base pattern it was folded into,
+// so trimming is behavior-identical. "apiKey" / "privateKey" look similar
+// to the folded "clientSecret" but are NOT subsumed (no password/token/
+// secret substring), so they stay.
 const SECRET_PATTERNS = [
   /password/i,
   /passwd/i,
-  /wifi-password/i,
-  /wifiPassword/i,
   /authorization/i,
   /cookie/i,
   /token/i,
-  /accessToken/i,
-  /refreshToken/i,
   /secret/i,
-  /clientSecret/i,
   /apiKey/i,
   /privateKey/i,
 ];

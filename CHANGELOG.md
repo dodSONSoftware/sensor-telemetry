@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.38] — Zinc Falcon (2026-10-11)
+
+- Trim five redundant patterns from the logger's secret-redaction list — `/wifi-password/i`, `/wifiPassword/i`, `/accessToken/i`, `/refreshToken/i`, and `/clientSecret/i` were each a strict subset of `/password/i`, `/token/i`, or `/secret/i`, so redaction behavior is identical; a regression test now pins the subsumed keys redacting through their base patterns, so a future loosening of a base pattern fails the suite instead of silently widening what reaches the log
+
 ## [4.1.37] — Zinc Falcon (2026-10-11)
 
 - The 8-hex fingerprint-collision fallbacks in source and firmware label disambiguation (an effectively-unreachable SHA-256 collision at the disambiguated-label level, documented as such) are now instrumented instead of silent: a colliding source increments `sensor_sources_rejected_total` once per rejection episode and a colliding firmware version increments `sensor_firmware_versions_rejected_total` per occurrence, so the approximation is observable in Prometheus if it ever fires

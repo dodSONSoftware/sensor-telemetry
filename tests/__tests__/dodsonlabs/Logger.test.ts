@@ -169,6 +169,49 @@ describe("Logger error serialization and secret redaction", () => {
     expect(error.stack).toContain("async rejection detail");
     expect(error.stack).toMatch(/at /);
   });
+
+  it("still redacts every key whose dedicated pattern was trimmed as subsumed", async () => {
+    // Regression guard for the SECRET_PATTERNS trim: /wifi-password/i,
+    // /wifiPassword/i, /accessToken/i, /refreshToken/i, and /clientSecret/i
+    // were removed because each is a strict subset of /password/i, /token/i,
+    // or /secret/i — so every one of these keys must still redact through
+    // its base pattern. If a base pattern were ever loosened, this is the
+    // test that fails. apiKey / privateKey / passwd stayed (not subsumed)
+    // and are covered for good measure.
+    let record: Record<string, unknown>;
+    const out = await captureLogOutput(() => {
+      const logger = new Logger(baseConfig);
+      logger.write_info("test/redactionSubsumption", "all subsumed keys present", {
+        event: "redaction_subsumption",
+        logType: "service",
+        "wifi-password": "hunter2",
+        wifiPassword: "hunter2",
+        accessToken: "tok-1",
+        refreshToken: "tok-2",
+        clientSecret: "sec-1",
+        apiKey: "key-1",
+        privateKey: "key-2",
+        passwd: "hunter3",
+      });
+    });
+
+    record = parseSingleLine(out);
+    for (const key of [
+      "wifi-password",
+      "wifiPassword",
+      "accessToken",
+      "refreshToken",
+      "clientSecret",
+      "apiKey",
+      "privateKey",
+      "passwd",
+    ]) {
+      expect(record[key]).toBe("[REDACTED]");
+    }
+    // A non-secret sibling stays untouched — the patterns match key names
+    // only, never values — so no raw secret survives into the line.
+    expect(out).not.toContain("hunter2");
+  });
 });
 
 describe("Logger printf-token messages keep structured metadata", () => {
