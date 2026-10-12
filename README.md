@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Aluminum Falcon — firmware 4.2.1.
+**Release:** Tin Falcon — firmware 4.3.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -475,6 +475,17 @@ Metrics are exposed at `http://localhost:32002/metrics`:
 | `sensor_sources_rejected_total` | Counter | — | Source values mapped to the `unknown_source` fallback because the source cardinality cap was reached |
 | `sensor_firmware_versions_rejected_total` | Counter | — | Firmware version values mapped to the `unknown_firmware` fallback because the firmware version cardinality cap was reached |
 | `mqtt_subscription_active` | Gauge | topic | This service's per-topic MQTT subscription state (1 = broker acknowledged, 0 = pending/denied/lost); the same state `/ready` decides on |
+| `mqtt_client_connected` | Gauge | — | This service's own MQTT client connection state (1 = connected to the broker, 0 = not connected) — pulled at scrape time, the service-side counterpart of the sensor-labeled `sensor_health_mqtt_connected` |
+| `mqtt_connection_errors_total` | Counter | kind | MQTT client errors on this service's own connection: `kind="connection"` = a failed connect/reconnect attempt, `kind="client"` = an error on a live connection (e.g. a failed publish) |
+| `mqtt_reconnects_total` | Counter | — | Successful reconnections after a connection failure (the first connect is not a reconnect) |
+| `mqtt_messages_received_total` | Counter | — | MQTT messages received on the subscribed topics, before validation |
+| `mqtt_messages_dropped_total` | Counter | reason | MQTT messages dropped by this service, by a closed set of reasons: `payload_too_large`, `parse_error`, `not_object`, `missing_message_type`, `unknown_message_type`, `missing_device`, `unknown_device`, `telemetry_missing_payload`, `health_missing_payload`, `health_invalid_payload`, `telemetry_field_missing`, `telemetry_out_of_range`, `handling_error`. Label values are fixed by design — untrusted payload content never becomes a label |
+| `process_uptime_seconds` | Gauge | — | Process uptime in seconds |
+| `process_heap_used_bytes` | Gauge | — | Process used JavaScript heap memory in bytes |
+| `process_heap_total_bytes` | Gauge | — | Process allocated JavaScript heap memory in bytes |
+| `process_resident_memory_bytes` | Gauge | — | Process resident set size in bytes |
+| `process_event_loop_lag_ms` | Gauge | — | Mean event-loop delay in milliseconds since the previous scrape |
+| `http_requests_total` | Counter | path, status | HTTP requests served by the API, labeled by route (a fixed set; paths that match no route count as `unknown`) and response status code |
 
 ## Source Label Sanitization
 

@@ -250,3 +250,28 @@ export interface IMqttNetworking {
   /** True once the Prometheus HTTP server is listening and can serve /metrics. */
   prometheus_server_ready(): boolean;
 }
+
+/**
+ * Closed set of reasons a received MQTT message is dropped by
+ * MqttNetworking, used as the `reason` label of the
+ * mqtt_messages_dropped_total counter (PrometheusWriter). The set is fixed
+ * at the type level on purpose: label values come from a hostile,
+ * untrusted publisher, so the label can never carry payload content —
+ * the same cardinality policy that keys the rejection throttle by event
+ * name rather than by source. One member per drop point in
+ * MqttNetworking; the values mirror the corresponding log event names.
+ */
+export type MqttMessageDropReason =
+  | "payload_too_large"
+  | "parse_error"
+  | "not_object"
+  | "missing_message_type"
+  | "unknown_message_type"
+  | "missing_device"
+  | "unknown_device"
+  | "telemetry_missing_payload"
+  | "health_missing_payload"
+  | "health_invalid_payload"
+  | "telemetry_field_missing"
+  | "telemetry_out_of_range"
+  | "handling_error";

@@ -6,10 +6,12 @@
 import http from "http";
 import type { Socket } from "net";
 import { createHash, timingSafeEqual } from "crypto";
+import { monitorEventLoopDelay } from "perf_hooks";
+import type { IntervalHistogram } from "perf_hooks";
 import { register, Gauge, Counter } from "prom-client";
 import { serviceMetadata } from "../common/global";
 import { isJsonObject } from "./Interfaces";
-import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
+import type { ILogger, IMqttNetworking, JsonObject, MqttMessageDropReason } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
@@ -75,6 +77,35 @@ export class PrometheusWriter {
     // ******** service diagnostics (this service's own MQTT subscriptions)
 
     private prometheus_Gauge_MqttSubscriptionActive: Gauge | undefined;
+    // ----
+    // ******** application metrics (this service's own health, not the
+    // sensors'). Service-level by design: no source/topic labels, so none
+    // of these enter prometheus_SourceDataGauges (the stale-sweep eviction
+    // target list) and none can grow with sensor churn.
+    // This service's own broker connection state (sensor-side connection
+    // state is sensor_health_mqtt_connected, source-labeled — a different
+    // thing). Pulled at scrape time, like mqtt_subscription_active.
+    private prometheus_Gauge_MqttClientConnected: Gauge | undefined;
+    // ----
+    private prometheus_counter_mqtt_connection_errors: Counter | undefined;
+    private prometheus_counter_mqtt_reconnects: Counter | undefined;
+    private prometheus_counter_mqtt_messages_received: Counter | undefined;
+    // `reason` is a closed type-level set (MqttMessageDropReason) — label
+    // values never carry untrusted MQTT payload content.
+    private prometheus_counter_mqtt_messages_dropped: Counter | undefined;
+    // ---- process gauges (pull model; values always current at scrape
+    // time, no periodic push timer).
+    private prometheus_Gauge_ProcessUptime: Gauge | undefined;
+    private prometheus_Gauge_ProcessHeapUsed: Gauge | undefined;
+    private prometheus_Gauge_ProcessHeapTotal: Gauge | undefined;
+    private prometheus_Gauge_ProcessResidentMemory: Gauge | undefined;
+    private prometheus_Gauge_ProcessEventLoopLag: Gauge | undefined;
+    // perf_hooks monitor for event-loop lag, enabled in the constructor and
+    // disabled in close(). The collect() callback reads the mean since the
+    // last scrape and resets, so each reading covers the scrape interval.
+    private eventLoopLag: IntervalHistogram;
+    // ---- HTTP request counter (incremented once per response on 'finish').
+    private prometheus_counter_http_requests: Counter | undefined;
     // ----
     private prometheus_counter_telemetry_messages: Counter | undefined;
     // Cardinality-overflow counters: incremented each time a label value
@@ -219,6 +250,21 @@ export class PrometheusWriter {
     // Cap for /write-config request bodies. A valid config is < 2 KiB, so
     // anything larger is a misbehaving or hostile client, not a config.
     private static readonly MAX_CONFIG_BODY_BYTES = 64 * 1024;
+    // The fixed route set for the http_requests_total path label. Any
+    // request path outside this set is counted as "unknown" (the router
+    // answers it with the same 404), so untrusted request paths can never
+    // become label values — the cardinality policy every other label in
+    // this service follows.
+    private static readonly HTTP_METRIC_PATHS: ReadonlySet<string> = new Set([
+        "/metrics",
+        "/health",
+        "/ready",
+        "/about",
+        "/endpoints",
+        "/read-config",
+        "/write-config",
+        "/reload-config",
+    ]);
     // CORS preflight contract for browser clients: the methods and headers
     // cross-origin requests may use, and how long a browser may cache the
     // preflight answer (bounds how long a stale policy can persist).
@@ -291,6 +337,16 @@ export class PrometheusWriter {
         this.corsAllowAllOrigins = corsOrigins.allowAllOrigins;
         this.corsAllowedOrigins = corsOrigins.allowedOrigins;
 
+        // Event-loop lag monitor (process_event_loop_lag_ms). Created before
+        // create_prometheus_gauges because the lag gauge's collect() closure
+        // reads it at scrape time. enable() is idempotent on runtimes where
+        // the constructor already starts sampling, and required on older
+        // ones; close() disables it so the monitor cannot outlive the
+        // server (the process exits right after, but a second writer in a
+        // test process must not keep sampling behind its back).
+        this.eventLoopLag = monitorEventLoopDelay({ resolution: 20 });
+        this.eventLoopLag.enable();
+
         // create prometheus gauges
         this.create_prometheus_gauges();
 
@@ -324,6 +380,23 @@ export class PrometheusWriter {
             // against it 404s well-formed requests. The full req.url is
             // still logged where it matters for diagnostics.
             const path = (req.url ?? "/").split("?")[0];
+
+            // Count every completed response exactly once, on whichever
+            // path the request took (200/400/401/403/404/405/413/500,
+            // CORS preflights, the 413 body-cap path that destroys the
+            // request after answering): 'finish' fires once when the
+            // response is flushed, with the final status code, so no
+            // individual response site needs its own counter call. The
+            // path label is normalized to the fixed route set so a
+            // probe hammering random paths cannot mint label values.
+            // A client that disconnects before the response completes
+            // never counts (there was no response served).
+            res.on("finish", () => {
+                this.prometheus_counter_http_requests?.inc({
+                    path: PrometheusWriter.normalizeMetricPath(path),
+                    status: res.statusCode,
+                });
+            });
 
             // CORS is handled at the server boundary, not in sendJson():
             // /health, /metrics, and 404 responses never pass through
@@ -738,6 +811,16 @@ export class PrometheusWriter {
             return "*";
         }
         return allowedOrigins.has(origin) ? origin : null;
+    }
+
+    /**
+     * Map a request path to its http_requests_total label value: one of
+     * the fixed HTTP_METRIC_PATHS, or "unknown" for anything else. The
+     * input is untrusted (the raw request line), so the output is never
+     * the input itself unless it is a known route.
+     */
+    private static normalizeMetricPath(path: string): string {
+        return PrometheusWriter.HTTP_METRIC_PATHS.has(path) ? path : "unknown";
     }
 
     /**
@@ -2012,7 +2095,10 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         this._ready = false;
         // Before the !this.server early return so a second close (and a
         // close of a writer whose listen failed) still stops the sweep.
+        // disable() is idempotent, which is what keeps the double-close
+        // path safe the same way clearStaleSweepTimer is.
         this.clearStaleSweepTimer();
+        this.eventLoopLag.disable();
         if (!this.server) {
             // close() must be idempotent: a second shutdown signal while the
             // first is still in flight would otherwise call server.close()
@@ -2878,6 +2964,51 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         );
     }
 
+    // ******** public methods for application metrics
+
+    /**
+     * Record an MQTT client error for this service's own broker connection.
+     * kind "client" = an error on a LIVE connection (a failed publish, a
+     * protocol error mid-stream); kind "connection" = a failed
+     * connect/reconnect attempt. MqttNetworking.on_error() is the single
+     * call site; the counter is the ongoing signal, the log stays tiered
+     * (first failure ERROR, repeats WARN).
+     */
+    public record_mqtt_connection_error(kind: "client" | "connection"): void {
+        this.prometheus_counter_mqtt_connection_errors?.inc({ kind });
+    }
+
+    /**
+     * Record a successful MQTT reconnection (a 'connect' that follows at
+     * least one failed attempt). The first connect since process start is
+     * not a reconnect — MqttNetworking gates the call with
+     * consecutive_connection_failures > 0.
+     */
+    public record_mqtt_reconnect(): void {
+        this.prometheus_counter_mqtt_reconnects?.inc();
+    }
+
+    /**
+     * Record a message received on a subscribed topic. Called once per
+     * delivery at the top of MqttNetworking.on_message, before the size
+     * guard and parse: a message that is later dropped was still
+     * received, so received = accepted + dropped for the pipeline.
+     */
+    public record_mqtt_message_received(): void {
+        this.prometheus_counter_mqtt_messages_received?.inc();
+    }
+
+    /**
+     * Record a dropped message by its (closed-set) drop reason. One call
+     * site per drop point in MqttNetworking, adjacent to — not replacing —
+     * the existing (throttled) log statement. reason is type-checked to
+     * MqttMessageDropReason, so a call site cannot mint a label value
+     * from untrusted payload content.
+     */
+    public record_mqtt_message_dropped(reason: MqttMessageDropReason): void {
+        this.prometheus_counter_mqtt_messages_dropped?.inc({ reason });
+    }
+
     // ******** public methods for sensor freshness
 
     /**
@@ -3129,6 +3260,106 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     );
                 }
             },
+        });
+
+        // ******** application metrics (this service's own health)
+
+        // Service-level diagnostics: no source/topic labels, so none of
+        // these is added to the eviction target list below and none can
+        // grow with sensor churn.
+
+        // This service's own broker connection (mqtt.js client), pulled at
+        // scrape time exactly like mqtt_subscription_active. Absent (no
+        // series) when no networking is attached, as in unit tests that
+        // use a bare writer.
+        this.prometheus_Gauge_MqttClientConnected = new Gauge({
+            name: "mqtt_client_connected",
+            help: "This service's MQTT client connection state (1 = connected to the broker, 0 = not connected).",
+            collect: () => {
+                const connected = this.mqttNetworking?.is_connected();
+                if (connected === undefined) return;
+                this.prometheus_Gauge_MqttClientConnected!.set(connected ? 1 : 0);
+            },
+        });
+
+        // Process gauges: pulled at scrape time so the values are always
+        // current and no periodic push timer is needed. Names follow the
+        // Node/Prometheus process_* convention (operators and dashboards
+        // recognize them) even though the sampling is hand-rolled.
+        this.prometheus_Gauge_ProcessUptime = new Gauge({
+            name: "process_uptime_seconds",
+            help: "Process uptime in seconds.",
+            collect: () => {
+                this.prometheus_Gauge_ProcessUptime!.set(process.uptime());
+            },
+        });
+        this.prometheus_Gauge_ProcessHeapUsed = new Gauge({
+            name: "process_heap_used_bytes",
+            help: "Process used JavaScript heap memory in bytes.",
+            collect: () => {
+                this.prometheus_Gauge_ProcessHeapUsed!.set(process.memoryUsage().heapUsed);
+            },
+        });
+        this.prometheus_Gauge_ProcessHeapTotal = new Gauge({
+            name: "process_heap_total_bytes",
+            help: "Process allocated JavaScript heap memory in bytes.",
+            collect: () => {
+                this.prometheus_Gauge_ProcessHeapTotal!.set(process.memoryUsage().heapTotal);
+            },
+        });
+        this.prometheus_Gauge_ProcessResidentMemory = new Gauge({
+            name: "process_resident_memory_bytes",
+            help: "Process resident set size in bytes.",
+            collect: () => {
+                this.prometheus_Gauge_ProcessResidentMemory!.set(process.memoryUsage().rss);
+            },
+        });
+        // Mean event-loop delay in milliseconds since the previous scrape:
+        // the collect() callback reads the perf_hooks histogram and resets
+        // it, so each reading covers exactly the interval since the last
+        // scrape. A scrape that arrives before the monitor has sampled a
+        // single loop delay reports 0 (the loop has not lagged measurably,
+        // not "no data"): mean() with zero observations is 0/0 = NaN, which
+        // would expose as a non-numeric "Nan" series.
+        this.prometheus_Gauge_ProcessEventLoopLag = new Gauge({
+            name: "process_event_loop_lag_ms",
+            help: "Mean event-loop delay in milliseconds since the previous scrape.",
+            collect: () => {
+                const lagMs = this.eventLoopLag.count > 0 ? this.eventLoopLag.mean / 1e6 : 0;
+                this.prometheus_Gauge_ProcessEventLoopLag!.set(lagMs);
+                this.eventLoopLag.reset();
+            },
+        });
+
+        // Application counters: MQTT connection events and the message
+        // pipeline (received / dropped). All label sets are fixed and
+        // closed — kind is a 2-value union, reason is the
+        // MqttMessageDropReason type — so a hostile publisher cannot mint
+        // new series (the same policy the source cardinality cap
+        // enforces for sensor labels).
+        this.prometheus_counter_mqtt_connection_errors = new Counter({
+            name: "mqtt_connection_errors_total",
+            help: "MQTT client errors, labeled by kind (client = error on a live connection, connection = failed connect/reconnect attempt).",
+            labelNames: ["kind"] as const,
+        });
+        this.prometheus_counter_mqtt_reconnects = new Counter({
+            name: "mqtt_reconnects_total",
+            help: "Successful MQTT reconnections after a connection failure (the first connect is not a reconnect).",
+        });
+        this.prometheus_counter_mqtt_messages_received = new Counter({
+            name: "mqtt_messages_received_total",
+            help: "Total MQTT messages received on the subscribed topics, before validation.",
+        });
+        this.prometheus_counter_mqtt_messages_dropped = new Counter({
+            name: "mqtt_messages_dropped_total",
+            help: "Total MQTT messages dropped by this service, labeled by drop reason (closed set; see MqttMessageDropReason).",
+            labelNames: ["reason"] as const,
+        });
+        // ----
+        this.prometheus_counter_http_requests = new Counter({
+            name: "http_requests_total",
+            help: "HTTP requests served by this service's API, labeled by route (unknown = no matching route) and response status.",
+            labelNames: ["path", "status"] as const,
         });
 
         // The eviction target list: exactly the 27 per-source gauges

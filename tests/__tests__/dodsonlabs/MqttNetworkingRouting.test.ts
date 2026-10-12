@@ -2661,3 +2661,272 @@ describe("error classification in on_message (regression P2-1)", () => {
     expect(allEvents).not.toContain("mqtt_message_parse_error");
   });
 });
+
+describe("mqtt pipeline application metrics (received/dropped/reconnect/errors)", () => {
+  // The counter call sites mirror the log call sites one-for-one: every
+  // drop point records its (fixed-set) reason next to its log statement,
+  // and every delivery is counted received before validation. The
+  // auto-mocked writer makes each record_* call observable per instance.
+
+  function droppedReasons(prom: MockProm): unknown[] {
+    return prom.record_mqtt_message_dropped.mock.calls.map((call) => call[0]);
+  }
+
+  it("counts an accepted message as received without any drop", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "tbl-ok",
+      firmware_version: "1.0",
+      payload: { temperature_c: 20 },
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(prom.record_mqtt_message_dropped).not.toHaveBeenCalled();
+  });
+
+  it("counts an oversized payload as received and dropped (payload_too_large)", () => {
+    const { prom } = driveRawPayload(Buffer.alloc(MAX_MQTT_PAYLOAD_BYTES + 1, 49));
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["payload_too_large"]);
+  });
+
+  it("counts a malformed body as dropped (parse_error)", () => {
+    const { prom } = driveRawPayload(Buffer.from('{"message_type":"telemetry","devic', "utf8"));
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["parse_error"]);
+  });
+
+  it("counts a non-object body as dropped (not_object)", () => {
+    const { prom } = driveMessage([1, 2, 3] as unknown as Record<string, unknown>);
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["not_object"]);
+  });
+
+  it("counts a missing message_type as dropped (missing_message_type)", () => {
+    const { prom } = driveMessage({ source: "tbl-notype" });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["missing_message_type"]);
+  });
+
+  it("counts an unknown message_type as dropped (unknown_message_type), never as the raw value", () => {
+    const { prom } = driveMessage({
+      message_type: "totally-unknown-type",
+      source: "tbl-unktype",
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    // The label is the fixed reason, not the untrusted message_type string.
+    expect(droppedReasons(prom)).toEqual(["unknown_message_type"]);
+  });
+
+  it("counts a telemetry message without a device as dropped (missing_device)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      source: "tbl-nodev",
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["missing_device"]);
+  });
+
+  it("counts an unknown device as dropped (unknown_device)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "unknown_chip",
+      source: "tbl-unkdev",
+      payload: { temperature_c: 20 },
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["unknown_device"]);
+  });
+
+  it("counts a telemetry message without a payload as dropped (telemetry_missing_payload)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "tbl-nopay",
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["telemetry_missing_payload"]);
+  });
+
+  it("counts a health message without a payload as dropped (health_missing_payload)", () => {
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "tbl-health-nopay",
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["health_missing_payload"]);
+  });
+
+  it("counts a non-object health payload as dropped (health_invalid_payload)", () => {
+    const { prom } = driveMessage({
+      message_type: "health",
+      source: "tbl-health-badpay",
+      payload: "garbage",
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["health_invalid_payload"]);
+  });
+
+  it("counts a missing required field as dropped (telemetry_field_missing)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "tbl-missfield",
+      payload: {},
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["telemetry_field_missing"]);
+    // A dropped message never reaches a publisher.
+    expect(prom.publish_water).not.toHaveBeenCalled();
+  });
+
+  it("counts an out-of-range field as dropped (telemetry_out_of_range)", () => {
+    const { prom } = driveMessage({
+      message_type: "telemetry",
+      device: "ds18b20",
+      source: "tbl-oor",
+      payload: { temperature_c: 9999 },
+    });
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["telemetry_out_of_range"]);
+    expect(prom.publish_water).not.toHaveBeenCalled();
+  });
+
+  it("counts a processing throw as dropped (handling_error)", () => {
+    // A fresh instance per message (driveMessage) cannot pre-arm a throwing
+    // publisher, so build the driver inline the way the error-classification
+    // suite does.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const messageCall = onMock.mock.calls
+      .filter((call) => call[0] === "message")
+      .at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    const prom = (networking as unknown as { promWriter: MockProm }).promWriter;
+    prom.publish_water.mockImplementation(() => {
+      throw new Error("simulated handler failure");
+    });
+
+    handler(
+      baseConfig.mqttTopicTelemetry,
+      Buffer.from(
+        JSON.stringify({
+          message_type: "telemetry",
+          device: "ds18b20",
+          source: "tbl-throw",
+          payload: { temperature_c: 20 },
+        })
+      ),
+      {}
+    );
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(1);
+    expect(droppedReasons(prom)).toEqual(["handling_error"]);
+  });
+
+  it("counts one received per delivery when several messages share an instance", () => {
+    const { prom } = driveMessages([
+      {
+        message_type: "telemetry",
+        device: "ds18b20",
+        source: "tbl-batch",
+        payload: { temperature_c: 20 },
+      },
+      { source: "tbl-batch-notype" },
+      {
+        message_type: "telemetry",
+        device: "nope",
+        source: "tbl-batch-unkdev",
+        payload: { temperature_c: 20 },
+      },
+    ]);
+
+    expect(prom.record_mqtt_message_received).toHaveBeenCalledTimes(3);
+    expect(droppedReasons(prom)).toEqual([
+      "missing_message_type",
+      "unknown_device",
+    ]);
+  });
+
+  // ---- connection lifecycle counters
+
+  function driveLifecycle(): {
+    prom: MockProm;
+    client: ReturnType<typeof createMockMqttClient>;
+    connect: () => void;
+    error: (err: Error) => void;
+  } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+    const client = (
+      networking as unknown as { mqtt_client: ReturnType<typeof createMockMqttClient> }
+    ).mqtt_client;
+    const connectCall = client.on.mock.calls.find((call) => call[0] === "connect");
+    const errorCall = client.on.mock.calls.find((call) => call[0] === "error");
+    if (!connectCall || !errorCall) {
+      throw new Error("MqttNetworking did not register lifecycle handlers");
+    }
+    return {
+      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+      client,
+      connect: () => (connectCall[1] as () => void)(),
+      error: (err: Error) => (errorCall[1] as (e: Error) => void)(err),
+    };
+  }
+
+  it("does not count the first connect as a reconnect", () => {
+    const { prom, connect } = driveLifecycle();
+    connect();
+
+    expect(prom.record_mqtt_reconnect).not.toHaveBeenCalled();
+    expect(prom.record_mqtt_connection_error).not.toHaveBeenCalled();
+  });
+
+  it("counts a failed attempt (kind connection) and the following reconnect", () => {
+    const { prom, client, connect, error } = driveLifecycle();
+    // The client starts disconnected, so the failure is a connection
+    // failure, not a live-connection client error.
+    client.connected = false;
+    error(new Error("ECONNREFUSED"));
+    expect(prom.record_mqtt_connection_error).toHaveBeenCalledTimes(1);
+    expect(prom.record_mqtt_connection_error).toHaveBeenCalledWith("connection");
+
+    // The library's retry succeeds: on_connect sees one failed attempt.
+    client.connected = true;
+    connect();
+    expect(prom.record_mqtt_reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts an error on a live connection as kind client, not connection", () => {
+    const { prom, client, error } = driveLifecycle();
+    client.connected = true;
+    error(new Error("simulated protocol error"));
+
+    expect(prom.record_mqtt_connection_error).toHaveBeenCalledTimes(1);
+    expect(prom.record_mqtt_connection_error).toHaveBeenCalledWith("client");
+    expect(prom.record_mqtt_reconnect).not.toHaveBeenCalled();
+  });
+});

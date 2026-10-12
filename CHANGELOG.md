@@ -4,6 +4,13 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.3.0] — Tin Falcon (2026-10-12)
+
+- The service now exposes its own health to Prometheus alongside the sensor metrics it serves: a pull-model `mqtt_client_connected` gauge (1/0 from the live broker connection, 0 while the client is absent), `mqtt_connection_errors_total{kind}` (`client` for errors on a live connection, `connection` for connect failures), and `mqtt_reconnects_total` (counted only for a reconnect after a failure — never the initial connect)
+- The MQTT message funnel is now countable: `mqtt_messages_received_total` increments once per delivery (including messages later dropped), and `mqtt_messages_dropped_total{reason}` buckets every drop point across the routing pipeline under a fixed 13-value reason set (`payload_too_large`, `parse_error`, `not_object`, missing/unknown `message_type` or `device`, missing/invalid payloads, `telemetry_field_missing`, `telemetry_out_of_range`, `handling_error`) — the counters increment per occurrence even while the matching warning is log-throttled, so a hostile or misconfigured publisher's impact stays observable without flooding the log
+- The process is self-instrumented with hand-rolled gauges (no default prom-client collector set): `process_uptime_seconds`, `process_heap_used_bytes`, `process_heap_total_bytes`, `process_resident_memory_bytes`, and `process_event_loop_lag_ms` (a 20 ms-resolution event-loop delay monitor, read at scrape time as the mean since the previous scrape and then reset — 0 until the first observation, so the exposition never carries a `Nan` value)
+- The HTTP API counts itself: `http_requests_total{path, status}` fires once per completed response on every path — 200s, 4xx/5xx, CORS preflights, and the oversized-request reject — with `path` restricted to the eight known routes and everything else folded into a fixed `"unknown"` bucket, so an untrusted request line can never mint a label value
+
 ## [4.2.1] — Aluminum Falcon (2026-10-12)
 
 - The 4.2.0 `lokiUrl` push actually delivers now: the transport was sending each batch as a bare `{ stream, values }` object, which the Loki push API rejects with a 422 ("at least one valid stream is required for ingestion") — so every batch shipped since 4.2.0 was silently dropped. The payload is now the API's real `{ streams: [{ stream, values }] }` form, and the ISO-8601 entry timestamps are converted to the int64 nanosecond epochs the API requires (sending them raw is a second, 400-class failure); the tests now pin the actual wire contract, which the old mocks had codified incorrectly

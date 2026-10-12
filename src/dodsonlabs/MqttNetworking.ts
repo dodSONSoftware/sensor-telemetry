@@ -559,6 +559,11 @@ export class MqttNetworking implements IMqttNetworking {
                     failedAttempts: this.consecutive_connection_failures,
                 }
             );
+            // The counter carries the ongoing signal (mqtt_reconnects_total);
+            // the log line above is the per-incident marker. The first
+            // connect skips this branch (consecutive_connection_failures is
+            // 0), so a first connect is never counted as a reconnect.
+            this.promWriter.record_mqtt_reconnect();
             this.consecutive_connection_failures = 0;
         } else if (!this.hasConnectedOnce) {
             // FIRST connect since process start — logged at INFO (promoted
@@ -729,6 +734,11 @@ export class MqttNetworking implements IMqttNetworking {
         payload: Buffer,
         _packet: mqtt.IPublishPacket
     ): void {
+        // Every delivery counts as received, before the size guard and
+        // parse: a message dropped below was still received, so
+        // received = accepted + dropped for the pipeline.
+        this.promWriter.record_mqtt_message_received();
+
         // The incoming topic is untrusted MQTT metadata, like every other
         // value in the payload: bound it once for the log channel (message
         // text AND structured metadata) so a protocol-legal oversized topic
@@ -753,6 +763,7 @@ export class MqttNetworking implements IMqttNetworking {
                     maxBytes: MAX_MQTT_PAYLOAD_BYTES,
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("payload_too_large");
             return;
         }
         // Parse phase: JSON.parse is the only thing in this block that can
@@ -775,6 +786,7 @@ export class MqttNetworking implements IMqttNetworking {
                         topic: topicForLog,
                     }
                 );
+                this.promWriter.record_mqtt_message_dropped("not_object");
                 return;
             }
             json_doc = parsed;
@@ -789,6 +801,7 @@ export class MqttNetworking implements IMqttNetworking {
                     error,
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("parse_error");
             return;
         }
 
@@ -868,6 +881,7 @@ export class MqttNetworking implements IMqttNetworking {
                     error,
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("handling_error");
         }
     }
 
@@ -890,9 +904,11 @@ export class MqttNetworking implements IMqttNetworking {
                     error: err,
                 }
             );
+            this.promWriter.record_mqtt_connection_error("client");
             return;
         }
         this.consecutive_connection_failures++;
+        this.promWriter.record_mqtt_connection_error("connection");
         if (this.consecutive_connection_failures === 1) {
             // First failure of the current outage: the full ERROR, with the
             // error object (message and stack) for diagnosis.
@@ -1038,6 +1054,9 @@ export class MqttNetworking implements IMqttNetworking {
                     source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
                 }
             );
+            // Counted per occurrence, not per logged line: the log is
+            // throttled per event, the counter is the ongoing signal.
+            this.promWriter.record_mqtt_message_dropped("missing_message_type");
             return;
         }
 
@@ -1074,6 +1093,11 @@ export class MqttNetworking implements IMqttNetworking {
                     source: debugSource === undefined ? undefined : sysFunc.truncateForLog(debugSource),
                 }
             );
+            // Counted per occurrence, not per logged line: the log is
+            // throttled per event, the counter is the ongoing signal. The
+            // LABEL carries the fixed reason, never the raw (untrusted)
+            // message_type value.
+            this.promWriter.record_mqtt_message_dropped("unknown_message_type");
         }
     }
 
@@ -1376,6 +1400,7 @@ export class MqttNetworking implements IMqttNetworking {
                     device: sysFunc.truncateForLog(device),
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("telemetry_missing_payload");
             return;
         }
         // Non-object payloads read as empty rather than indexing a primitive.
@@ -1398,6 +1423,10 @@ export class MqttNetworking implements IMqttNetworking {
                     device: sysFunc.truncateForLog(device),
                 }
             );
+            // Counted per occurrence (the log is throttled per event); the
+            // label carries the fixed reason, never the raw (untrusted)
+            // device name.
+            this.promWriter.record_mqtt_message_dropped("unknown_device");
             return;
         }
 
@@ -1550,6 +1579,7 @@ export class MqttNetworking implements IMqttNetworking {
                     source: sysFunc.truncateForLog(source),
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("health_missing_payload");
             return;
         }
         // Non-object payloads (a string, number, boolean, or array) are not
@@ -1571,6 +1601,8 @@ export class MqttNetworking implements IMqttNetworking {
                     source: sysFunc.truncateForLog(source),
                 }
             );
+            // Counted per occurrence (the log is throttled per event).
+            this.promWriter.record_mqtt_message_dropped("health_invalid_payload");
             return;
         }
         const payload: JsonObject = rawPayload;
@@ -1731,6 +1763,7 @@ export class MqttNetworking implements IMqttNetworking {
                     ),
                 }
             );
+            this.promWriter.record_mqtt_message_dropped("missing_device");
             return;
         }
         this.handle_v3_device_telemetry(json_doc, device);
@@ -1788,6 +1821,10 @@ export class MqttNetworking implements IMqttNetworking {
                         field: spec.field,
                     }
                 );
+                // Counted per occurrence (the log is throttled per event);
+                // the label carries the fixed reason, not the (untrusted)
+                // field name.
+                this.promWriter.record_mqtt_message_dropped("telemetry_field_missing");
                 return false;
             }
             const checked = spec.convert ? spec.convert(value) : value;
@@ -1814,6 +1851,10 @@ export class MqttNetworking implements IMqttNetworking {
                         ...(spec.max !== undefined ? { maxRange: spec.max } : {}),
                     }
                 );
+                // Counted per occurrence (the log is throttled per event);
+                // the label carries the fixed reason, not the (untrusted)
+                // field name or value.
+                this.promWriter.record_mqtt_message_dropped("telemetry_out_of_range");
                 return false;
             }
         }
