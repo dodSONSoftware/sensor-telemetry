@@ -897,7 +897,10 @@ export class PrometheusWriter {
             // would desynchronize MqttNetworking, which is only updated via
             // the config change callback. Use /reload-config to apply disk
             // contents to the running service.
-            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
+            // Pass the logger so a read/parse failure is reported as a structured
+// winston error (respecting the configured level) instead of falling back
+// to a raw console.error in SystemFunctions — the write path already does.
+const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
                 this.sendJson(res, 200, validatedConfig);
@@ -1105,7 +1108,10 @@ export class PrometheusWriter {
 
     private async handleReloadConfig(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
-            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource);
+            // Pass the logger so a read/parse failure is reported as a structured
+// winston error (respecting the configured level) instead of falling back
+// to a raw console.error in SystemFunctions — the write path already does.
+const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
                 const oldLogLevel = this.config.logLevel;

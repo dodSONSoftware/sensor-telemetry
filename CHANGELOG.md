@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.30] — Zinc Falcon (2026-10-11)
+
+- Config read failures on `/read-config` and `/reload-config` (missing or unparseable `config.yml`) are now reported through the service's structured logger instead of a raw `console.error`: the configured log level and winston transports/formats apply, matching the config write path
+
 ## [4.1.29] — Zinc Falcon (2026-10-11)
 
 - Introduce CHANGELOG.md as the per-version release history: every past release is back-filled from the git history (111 versions, newest first, pre-3.x releases named with the deterministic codename scheme)

@@ -774,6 +774,91 @@ describe("PrometheusWriter", () => {
     });
   });
 
+  describe("config read failure logging (regression P3-1)", () => {
+    // The read path must report read/parse failures through the structured
+    // logger (which honors the configured level) rather than a raw
+    // console.error in SystemFunctions that bypasses winston entirely. The
+    // SystemFunctions mock delegates read_file_yaml to the real
+    // implementation, so pointing configSource at a bad file reproduces the
+    // exact branch where the omitted logger used to fall back to
+    // console.error.
+    let consoleErrorSpy: jest.SpyInstance;
+    const writerConfigSource = () =>
+      writer as unknown as { configSource: string };
+
+    beforeAll(() => {
+      consoleErrorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+    });
+
+    afterAll(() => {
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("reports a missing config file on /read-config via the logger, not console.error", async () => {
+      const original = writerConfigSource().configSource;
+      writerConfigSource().configSource = path.join(
+        configDir,
+        "does-not-exist.yml"
+      );
+      try {
+        logger.write_error.mockClear();
+        const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
+          headers: { Connection: "close" },
+        });
+        expect(res.status).toBe(500);
+        const body = (await res.json()) as {
+          success: boolean;
+          message: string;
+        };
+        expect(body.success).toBe(false);
+        expect(body.message).toContain("could not read");
+        // Structured winston error...
+        expect(
+          logger.write_error.mock.calls.some(
+            (call) => call[2]?.event === "file_read_failed"
+          )
+        ).toBe(true);
+        // ...not the raw console.error fallback.
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+      } finally {
+        writerConfigSource().configSource = original;
+      }
+    });
+
+    it("reports an unparseable config file on /reload-config via the logger, not console.error", async () => {
+      const original = writerConfigSource().configSource;
+      const badPath = path.join(configDir, "broken.yml");
+      fs.writeFileSync(badPath, "mqtt: [unclosed\n  bad: {");
+      writerConfigSource().configSource = badPath;
+      try {
+        logger.write_error.mockClear();
+        configChangeCallback.mockClear();
+        const res = await fetch(`http://127.0.0.1:${port}/reload-config`, {
+          headers: { Connection: "close" },
+        });
+        expect(res.status).toBe(500);
+        const body = (await res.json()) as {
+          success: boolean;
+          message: string;
+        };
+        expect(body.success).toBe(false);
+        expect(body.message).toContain("failed to parse");
+        expect(
+          logger.write_error.mock.calls.some(
+            (call) => call[2]?.event === "yaml_parse_failed"
+          )
+        ).toBe(true);
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+        // A failed reload commits nothing: the runtime callback must not fire.
+        expect(configChangeCallback).not.toHaveBeenCalled();
+      } finally {
+        writerConfigSource().configSource = original;
+      }
+    });
+  });
+
   describe("HTTP method enforcement", () => {
     it("rejects non-GET methods on /read-config with 405 and Allow: GET", async () => {
       for (const method of ["POST", "DELETE", "PATCH"]) {
