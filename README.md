@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Tin Falcon — firmware 4.3.0.
+**Release:** Bronze Falcon — firmware 4.4.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -486,6 +486,8 @@ Metrics are exposed at `http://localhost:32002/metrics`:
 | `process_resident_memory_bytes` | Gauge | — | Process resident set size in bytes |
 | `process_event_loop_lag_ms` | Gauge | — | Mean event-loop delay in milliseconds since the previous scrape |
 | `http_requests_total` | Counter | path, status | HTTP requests served by the API, labeled by route (a fixed set; paths that match no route count as `unknown`) and response status code |
+
+In addition to these service-specific metrics, the endpoint exposes the prom-client standard `process_*` / `nodejs_*` runtime families (heap, GC, CPU, event-loop lag histogram, version info — the exact set the installed prom-client ships) in the same registry, registered exactly once at startup. `process_resident_memory_bytes` in the table is served by the library's collector rather than a hand-rolled gauge, and the hand-rolled `process_event_loop_lag_ms` coexists with the default `nodejs_eventloop_lag_{mean,stddev}_seconds` family.
 
 ## Source Label Sanitization
 

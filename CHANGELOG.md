@@ -4,6 +4,13 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.0] — Bronze Falcon (2026-10-12)
+
+- The `/metrics` endpoint now exposes the prom-client standard `process_*` / `nodejs_*` runtime families (heap, GC, CPU, version info, event-loop lag histogram — the exact set the installed prom-client ships) alongside the service's own metrics: they are registered into the same global registry the endpoint reads, exactly once, by an idempotent initializer, so a re-constructed writer cannot double-register while a genuinely colliding metric name still fails loudly at construction
+- `process_resident_memory_bytes` is now served by the library's standard collector instead of the hand-rolled gauge added in 4.3.0 (same name and unit; a second registration of that name would have thrown), and the hand-rolled `process_event_loop_lag_ms` (milliseconds, mean since the previous scrape) is retained alongside the default `nodejs_eventloop_lag_{mean,stddev}_seconds` family — until the first observation the exposition can carry a `Nan` value for those default gauges, which is prom-client's spelling and is accepted by Prometheus
+- The checked-in `config.yml` now forwards sensor logs at `debug` instead of `info` (`forwardSensorLogsLevel`), so sensor debug lines reach the application log in a fresh checkout
+- A new real-writer test suite pins the single-registry contract: every metric family declared exactly once, no duplicate samples, a syntactically valid exposition with the registry's content type, idempotent default-metrics initialization, a stable family set across scrapes, and duplicate registrations throwing rather than being silently ignored
+
 ## [4.3.0] — Tin Falcon (2026-10-12)
 
 - The service now exposes its own health to Prometheus alongside the sensor metrics it serves: a pull-model `mqtt_client_connected` gauge (1/0 from the live broker connection, 0 while the client is absent), `mqtt_connection_errors_total{kind}` (`client` for errors on a live connection, `connection` for connect failures), and `mqtt_reconnects_total` (counted only for a reconnect after a failure — never the initial connect)

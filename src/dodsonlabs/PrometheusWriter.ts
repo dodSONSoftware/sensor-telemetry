@@ -8,7 +8,7 @@ import type { Socket } from "net";
 import { createHash, timingSafeEqual } from "crypto";
 import { monitorEventLoopDelay } from "perf_hooks";
 import type { IntervalHistogram } from "perf_hooks";
-import { register, Gauge, Counter } from "prom-client";
+import { collectDefaultMetrics, register, Gauge, Counter } from "prom-client";
 import { serviceMetadata } from "../common/global";
 import { isJsonObject } from "./Interfaces";
 import type { ILogger, IMqttNetworking, JsonObject, MqttMessageDropReason } from "./Interfaces";
@@ -25,6 +25,28 @@ import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field
 export const DEFAULT_SOURCE_MAX_LENGTH = 30;
 export const DEFAULT_SOURCE_VALID_CHARS = "a-zA-Z0-9._-";
 export const DEFAULT_SOURCE_CARDINALITY_CAP = 1024;
+
+// The library's standard runtime metrics (the process_* and nodejs_* families)
+// are registered into prom-client's GLOBAL registry exactly once per process.
+// This service's custom metrics already live in that same global registry (the
+// established convention — the real-writer tests construct exactly one writer
+// per module registry because the global registry rejects duplicate family
+// names), and the /metrics endpoint already reads it, so one registry holds
+// both default and custom metrics and the endpoint stays a single source.
+// collectDefaultMetrics() with no argument targets the global registry; a
+// second call would re-register the same family names and throw. The guard
+// makes repeated calls (e.g. a writer re-construction) a safe no-op rather
+// than a duplicate-registration crash, while a genuinely colliding metric
+// family still fails loudly at construction — it is not swallowed here.
+let defaultMetricsInitialized = false;
+
+export function initializeDefaultMetrics(): void {
+    if (defaultMetricsInitialized) {
+        return;
+    }
+    collectDefaultMetrics();
+    defaultMetricsInitialized = true;
+}
 
 export class PrometheusWriter {
     // ******** private properties
@@ -98,7 +120,6 @@ export class PrometheusWriter {
     private prometheus_Gauge_ProcessUptime: Gauge | undefined;
     private prometheus_Gauge_ProcessHeapUsed: Gauge | undefined;
     private prometheus_Gauge_ProcessHeapTotal: Gauge | undefined;
-    private prometheus_Gauge_ProcessResidentMemory: Gauge | undefined;
     private prometheus_Gauge_ProcessEventLoopLag: Gauge | undefined;
     // perf_hooks monitor for event-loop lag, enabled in the constructor and
     // disabled in close(). The collect() callback reads the mean since the
@@ -346,6 +367,12 @@ export class PrometheusWriter {
         // test process must not keep sampling behind its back).
         this.eventLoopLag = monitorEventLoopDelay({ resolution: 20 });
         this.eventLoopLag.enable();
+
+        // Register the library's standard process_*/nodejs_* metrics into the
+        // shared global registry. Idempotent (see initializeDefaultMetrics) and
+        // run here, in the metrics-initialization path — never per request, per
+        // message, or per sensor update.
+        initializeDefaultMetrics();
 
         // create prometheus gauges
         this.create_prometheus_gauges();
@@ -3307,13 +3334,11 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                 this.prometheus_Gauge_ProcessHeapTotal!.set(process.memoryUsage().heapTotal);
             },
         });
-        this.prometheus_Gauge_ProcessResidentMemory = new Gauge({
-            name: "process_resident_memory_bytes",
-            help: "Process resident set size in bytes.",
-            collect: () => {
-                this.prometheus_Gauge_ProcessResidentMemory!.set(process.memoryUsage().rss);
-            },
-        });
+        // process_resident_memory_bytes is deliberately NOT hand-rolled here:
+        // collectDefaultMetrics() (initializeDefaultMetrics) registers the
+        // standard process_resident_memory_bytes family (RSS, in bytes) into
+        // the same global registry, and a second registration of that name
+        // would throw. See initializeDefaultMetrics.
         // Mean event-loop delay in milliseconds since the previous scrape:
         // the collect() callback reads the perf_hooks histogram and resets
         // it, so each reading covers exactly the interval since the last
