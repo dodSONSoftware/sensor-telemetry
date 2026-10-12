@@ -37,7 +37,15 @@ function okResponse() {
   } as unknown as Response;
 }
 
-type PushCall = { url: string; body: { stream: Record<string, string>; values: string[][] } };
+type PushCall = {
+  url: string;
+  body: { streams: Array<{ stream: Record<string, string>; values: string[][] }> };
+};
+
+/** Int64 nanosecond epoch for an entry's ISO timestamp (e.g. 1767225600000000000). */
+function entryNs(index: number): string {
+  return String(1_767_225_600_000_000_000 + (index % 60) * 1_000_000_000);
+}
 
 function pushedBatches(fetchMock: jest.SpyInstance): PushCall[] {
   return fetchMock.mock.calls.map(([url, init]: [string, RequestInit]) => ({
@@ -61,7 +69,7 @@ describe("LokiTransport", () => {
     consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  it("pushes the Loki push format: static stream labels plus [ts, line] values", async () => {
+  it("pushes the Loki push format: streams[] wrapper, static labels, [nsTs, line] values", async () => {
     const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
     try {
       transport.log(makeEntry(0), () => {});
@@ -75,12 +83,18 @@ describe("LokiTransport", () => {
       expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
 
       const parsed = pushedBatches(fetchMock)[0];
-      expect(parsed.body.stream).toEqual(LABELS);
-      expect(parsed.body.values).toHaveLength(2);
-      expect(parsed.body.values[0][0]).toBe("2026-01-01T00:00:00.000Z");
+      // The push API requires the streams[] wrapper — a bare { stream,
+      // values } top level is a 422 on the server.
+      expect(parsed.body.streams).toHaveLength(1);
+      expect(parsed.body.streams[0].stream).toEqual(LABELS);
+      const values = parsed.body.streams[0].values;
+      expect(values).toHaveLength(2);
+      // Timestamps are int64 nanoseconds, not the ISO strings entries carry.
+      expect(values[0][0]).toBe(entryNs(0));
+      expect(values[1][0]).toBe(entryNs(1));
       // The line is the redacted, JSON-serialized record — a parseable object,
       // not the bare message text.
-      expect(JSON.parse(parsed.body.values[0][1])).toEqual(
+      expect(JSON.parse(values[0][1])).toEqual(
         expect.objectContaining({ level: "info", message: "entry 0" })
       );
     } finally {
@@ -98,7 +112,7 @@ describe("LokiTransport", () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(pushedBatches(fetchMock)[0].body.values).toHaveLength(256);
+      expect(pushedBatches(fetchMock)[0].body.streams[0].values).toHaveLength(256);
     } finally {
       await transport.close();
     }
@@ -113,7 +127,7 @@ describe("LokiTransport", () => {
 
       await jest.advanceTimersByTimeAsync(FLUSH_INTERVAL_MS);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(pushedBatches(fetchMock)[0].body.values).toHaveLength(1);
+      expect(pushedBatches(fetchMock)[0].body.streams[0].values).toHaveLength(1);
     } finally {
       // close() settles on real setImmediates; fake timers would hang it.
       jest.useRealTimers();
@@ -129,7 +143,7 @@ describe("LokiTransport", () => {
     await Promise.all([first, second]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(pushedBatches(fetchMock)[0].body.values).toHaveLength(1);
+    expect(pushedBatches(fetchMock)[0].body.streams[0].values).toHaveLength(1);
     // A log after close is dropped, not queued.
     transport.log(makeEntry(1), () => {});
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -24,9 +24,11 @@ export interface LokiTransportOptions {
 /**
  * Ships the winston log stream to a Loki HTTP push endpoint.
  *
- * Entries are accumulated and pushed as `{ stream: labels, values: [[ts, line], ...] }`
- * batches, flushed on whichever limit hits first: the interval, the entry
- * count, or the estimated byte size. A failed push drops its batch and
+ * Entries are accumulated and pushed as
+ * `{ streams: [{ stream: labels, values: [[nsTimestamp, line], ...] }] }`
+ * batches (int64 nanosecond timestamps, per the Loki push API), flushed on
+ * whichever limit hits first: the interval, the entry count, or the
+ * estimated byte size. A failed push drops its batch and
  * reports through a throttled, direct console.error — never through the
  * winston logger (which would re-enter this transport) and never
  * unhandled (index.ts treats unhandledRejection as fatal). A down Loki
@@ -120,7 +122,20 @@ export class LokiTransport extends TransportStream {
     this.entries = [];
     this.byteLength = 0;
     try {
-      const body = JSON.stringify({ stream: this.labels, values: batch });
+      // The push API wants { streams: [{ stream, values }] } — a bare
+      // { stream, values } top level is a 422 ("at least one valid stream is
+      // required") — and int64 nanosecond timestamps: entries arrive as
+      // ISO-8601 strings (the format chain's timestamp or the toISOString
+      // fallback), so both conversions happen here, at flush time.
+      const values = batch.map(([ts, line]) => {
+        const ms = Date.parse(ts);
+        // info.timestamp is always parseable; a failure would mean a
+        // hand-built record, so fall back to now rather than poison the
+        // whole batch.
+        const ns = Number.isFinite(ms) ? Math.floor(ms * 1_000_000) : Date.now() * 1_000_000;
+        return [String(ns), line] as [string, string];
+      });
+      const body = JSON.stringify({ streams: [{ stream: this.labels, values }] });
       const response = await fetch(this.url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

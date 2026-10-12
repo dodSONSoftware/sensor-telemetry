@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.2.1] — Aluminum Falcon (2026-10-12)
+
+- The 4.2.0 `lokiUrl` push actually delivers now: the transport was sending each batch as a bare `{ stream, values }` object, which the Loki push API rejects with a 422 ("at least one valid stream is required for ingestion") — so every batch shipped since 4.2.0 was silently dropped. The payload is now the API's real `{ streams: [{ stream, values }] }` form, and the ISO-8601 entry timestamps are converted to the int64 nanosecond epochs the API requires (sending them raw is a second, 400-class failure); the tests now pin the actual wire contract, which the old mocks had codified incorrectly
+
 ## [4.2.0] — Aluminum Falcon (2026-10-12)
 
 - The service can now ship its own logs to Loki: a new optional `lokiUrl` config key (the instance's base URL, e.g. `http://loki:3100`) makes the Logger batch (5 s interval / 256 entries / 64 KiB, whichever first) and push the same secret-redacted single-line JSON lines it prints to the console to `<lokiUrl>/loki/api/v1/push`, with all lines of one process sharing a single stream labeled `service`, `environment`, `version`; omitting the key keeps logging console-only

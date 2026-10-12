@@ -490,23 +490,27 @@ describe("Logger Loki shipping", () => {
       expect(url).toBe("http://loki:3100/loki/api/v1/push");
 
       const body = JSON.parse(init.body as string) as {
-        stream: Record<string, string>;
-        values: string[][];
+        streams: Array<{ stream: Record<string, string>; values: string[][] }>;
       };
+      // The push API requires the streams[] wrapper; one stream per process.
+      expect(body.streams).toHaveLength(1);
+      const [stream] = body.streams;
       // Static stream labels mirror the record's identity fields exactly.
-      expect(body.stream).toEqual({
+      expect(stream.stream).toEqual({
         service: "sensor-telemetry",
         environment: process.env.NODE_ENV ?? "development",
         version: APP_VERSION,
       });
-      expect(body.values).toHaveLength(1);
+      expect(stream.values).toHaveLength(1);
+      // Timestamps ship as int64 nanosecond epochs, not ISO strings.
+      expect(stream.values[0][0]).toMatch(/^\d{19}$/);
 
-      const line = JSON.parse(body.values[0][1]) as Record<string, unknown>;
+      const line = JSON.parse(stream.values[0][1]) as Record<string, unknown>;
       expect(line.message).toBe("shipped line");
       // Redaction is inherited from the logger-level format chain: the
       // raw secret never reaches the wire.
       expect(line.password).toBe("[REDACTED]");
-      expect(body.values[0][1]).not.toContain("hunter2");
+      expect(stream.values[0][1]).not.toContain("hunter2");
     } finally {
       await logger.close();
     }
