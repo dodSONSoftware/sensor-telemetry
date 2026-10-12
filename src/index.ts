@@ -58,31 +58,21 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     }
   );
 
-  // log it
-  const dude = aboutDude();
-  appLogger.write_info("index.ts/startApplication", `${dude.about.name} v${dude.about.version} starting...`, {
-    event: "application_starting",
-    logType: "service",
-    version: dude.about.version,
-  });
-
-  // wire up config change callback to update networking when config changes
-  const configChangeCallback = (newConfig: z.infer<typeof configSchema>): void => {
-    networking.updateConfig(newConfig);
-  };
-
-  // create networking with callback passed during construction
-  const networking = new MqttNetworking(config, appLogger, configSource, configChangeCallback);
-
-  // get api port (for logging)
-  const apiPort = config.apiPort;
-
   // **** graceful shutdown
-  // Wired up before the Prometheus readiness wait below so a stop signal
-  // arriving during that startup window (up to 5 s) is handled by the
-  // graceful close path instead of the platform's default termination.
-  // appLogger and networking are already constructed at this point, and
-  // networking.close() is safe to call before the HTTP server reports ready.
+  // Wired up BEFORE the networking construction below so a synchronous
+  // throw during construction (e.g. a future mqtt.connect failure mode the
+  // config schema does not validate away) is routed through the structured
+  // fatal path instead of escaping the IIFE as a raw Node
+  // unhandled-rejection crash — the construction is the one startup step
+  // that can throw before index.ts's structured try begins. appLogger is
+  // already constructed; networking is declared nullable until its
+  // construction completes, so shutdown() and the config change callback
+  // tolerate a fatal error landing before the assignment. The handlers are
+  // also registered before the Prometheus readiness wait below, so a stop
+  // signal arriving during that startup window (up to 5 s) is handled by
+  // the graceful close path instead of the platform's default termination,
+  // and networking.close() is safe to call before the HTTP server reports
+  // ready.
 
   const start_time = Date.now();
 
@@ -99,6 +89,10 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
   // to 1 instead of being dropped, so a crash in the close window is never
   // reported as a clean stop.
   let pendingExitCode = 0;
+
+  // Nullable until constructed (see above): a fatal error in the
+  // construction window must not hit a TDZ reference inside shutdown().
+  let networking: MqttNetworking | undefined;
 
   async function shutdown(signal: string, exitCode = 0): Promise<void> {
     if (shuttingDown) {
@@ -135,7 +129,9 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
       // Single 5 s deadline for the entire close path: the Prometheus HTTP
       // drain and the MQTT disconnect share one budget, so the shutdown is
       // bounded even when an in-flight HTTP request holds the drain open.
-      await networking.close(5000);
+      // A fatal error in the construction window leaves networking
+      // undefined: skip the close, the shutdown still owns the exit.
+      await networking?.close(5000);
 
       appLogger.write_info(
         "index.ts/gracefulShutdownComplete",
@@ -195,6 +191,25 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     shutdown("unhandledRejection", 1);
   });
 
+  // log it
+  const dude = aboutDude();
+  appLogger.write_info("index.ts/startApplication", `${dude.about.name} v${dude.about.version} starting...`, {
+    event: "application_starting",
+    logType: "service",
+    version: dude.about.version,
+  });
+
+  // wire up config change callback to update networking when config changes
+  const configChangeCallback = (newConfig: z.infer<typeof configSchema>): void => {
+    networking?.updateConfig(newConfig);
+  };
+
+  // create networking with callback passed during construction
+  networking = new MqttNetworking(config, appLogger, configSource, configChangeCallback);
+
+  // get api port (for logging)
+  const apiPort = config.apiPort;
+
   try {
     // Wait for the Prometheus server to become ready. The wait is both
     // shutdown-aware AND failure-aware (see wait_for_prometheus):
@@ -211,9 +226,11 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     //     slow start ("timeout").
     const maxWaitMs = 5000;
     const waitInterval = 100;
+    // networking is assigned synchronously before this point; the optional
+    // chains only satisfy its nullable type.
     const startupResult = await wait_for_prometheus(
-      () => networking.prometheus_server_ready(),
-      () => networking.prometheus_server_failed(),
+      () => networking?.prometheus_server_ready() === true,
+      () => networking?.prometheus_server_failed() === true,
       () => shuttingDown,
       maxWaitMs,
       waitInterval

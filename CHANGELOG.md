@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.35] — Zinc Falcon (2026-10-11)
+
+- Fatal process handlers (`uncaughtException` / `unhandledRejection`) are now registered before the MQTT networking / Prometheus writer construction, so a synchronous throw during that construction (a failure mode the config schema does not validate away) is routed through the structured fatal path — structured critical log and exit-code ownership — instead of escaping as a raw Node unhandled-rejection crash; `shutdown()` skips an unconstructed networking rather than hitting a TDZ reference, and a source-order regression test pins the invariant
+
 ## [4.1.34] — Zinc Falcon (2026-10-11)
 
 - Log metadata now sources the `version` field from `src/version.ts` — the app version's single source of truth, the same value `/about` reports — instead of a second, runtime-loaded copy of `package.json`, so the two can no longer drift apart
