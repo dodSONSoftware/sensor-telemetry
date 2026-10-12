@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.32] — Zinc Falcon (2026-10-11)
+
+- Consolidate the log-level string-to-enum mapping onto the single `SystemFunctions.convert_from_log_level_string_to_enum` helper and delete the Logger's private duplicate — the two mappings were identical, and one source of truth keeps them from drifting
+
 ## [4.1.31] — Zinc Falcon (2026-10-11)
 
 - `/write-config` and `/reload-config` no longer warn that `sensorSourceMaxLength` / `sensorSourceValidCharsRegex` / `sensorSourceCardinalityCap` "changed but take effect on the next restart" when the written value equals the default the service already runs with (whether the startup config omitted the key or spelled the default out); genuine changes to those keys still warn

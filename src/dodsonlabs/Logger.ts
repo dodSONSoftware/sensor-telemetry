@@ -5,7 +5,7 @@
 
 import winston, { format } from "winston";
 import { createRequire } from "module";
-import { LOG_BOUND_MAX_DEPTH, LOG_BOUND_DEPTH_MARKER } from "./SystemFunctions";
+import { convert_from_log_level_string_to_enum, LOG_BOUND_MAX_DEPTH, LOG_BOUND_DEPTH_MARKER } from "./SystemFunctions";
 import { LogLevel } from "./Interfaces";
 import type {
   ILogger,
@@ -194,7 +194,7 @@ export class Logger implements ILogger {
       this.globalLogLevelName = "info";
     } else {
       this.winstonLevel = validatedLevel.winstonLevel;
-      this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel.name);
+      this.globalLogLevelValue = convert_from_log_level_string_to_enum(validatedLevel.name);
       this.globalLogLevelName = validatedLevel.name;
     }
 
@@ -260,7 +260,7 @@ export class Logger implements ILogger {
 
     const previousLevel = this.globalLogLevelName;
     this.winstonLevel = validatedLevel.winstonLevel;
-    this.globalLogLevelValue = convertFromWinstonLevel(validatedLevel.name);
+    this.globalLogLevelValue = convert_from_log_level_string_to_enum(validatedLevel.name);
     this.globalLogLevelName = validatedLevel.name;
 
     // Update Winston logger level
@@ -364,25 +364,5 @@ export class Logger implements ILogger {
     metadata?: LogMetadata,
   ): void {
     this.write("debug", originator, message, metadata);
-  }
-}
-
-// **** Level Conversion Helper ****
-
-function convertFromWinstonLevel(level: string): LogLevel {
-  switch (level.toLowerCase()) {
-    case "crit":
-    case "critical":
-      return LogLevel.Critical;
-    case "error":
-      return LogLevel.Error;
-    case "warn":
-      return LogLevel.Warn;
-    case "info":
-      return LogLevel.Info;
-    case "debug":
-      return LogLevel.Debug;
-    default:
-      return LogLevel.Info;
   }
 }
