@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.37] — Zinc Falcon (2026-10-11)
+
+- The 8-hex fingerprint-collision fallbacks in source and firmware label disambiguation (an effectively-unreachable SHA-256 collision at the disambiguated-label level, documented as such) are now instrumented instead of silent: a colliding source increments `sensor_sources_rejected_total` once per rejection episode and a colliding firmware version increments `sensor_firmware_versions_rejected_total` per occurrence, so the approximation is observable in Prometheus if it ever fires
+
 ## [4.1.36] — Zinc Falcon (2026-10-11)
 
 - `/read-config` now requires the `x-config-token` header when `SENSOR_TELEMETRY_CONFIG_TOKEN` is set, matching `/write-config` and `/reload-config` — a deployment that locks down config mutation also locks down the config read, so an operator who sets the token is never left with a token-protected write path beside a world-readable one; with the token unset the endpoint remains open as before

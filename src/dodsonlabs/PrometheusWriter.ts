@@ -1558,7 +1558,19 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             // reachable for an 8-hex fingerprint collision at the
             // disambiguated level (effectively unreachable). Merging the
             // two identities would be exactly the defect the ownership map
-            // exists to prevent, so fall back to the reserved label.
+            // exists to prevent, so fall back to the reserved label. Count
+            // it as a rejection, deduped once per label per episode exactly
+            // like the cap branch below (a single health message resolves
+            // the label 17+ times and must not count 17 times), so the
+            // approximation is observable in sensor_sources_rejected_total
+            // if it ever fires instead of being silent.
+            if (!this.rejectedSources.has(label)) {
+                if (this.rejectedSources.size >= this.sourceCardinalityCap * 4) {
+                    this.rejectedSources.clear();
+                }
+                this.rejectedSources.add(label);
+                this.prometheus_counter_sources_rejected?.inc();
+            }
             return "unknown_source";
         }
         if (this.admittedSources.size < this.sourceCardinalityCap) {
@@ -1706,6 +1718,12 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             // disambiguated level (effectively unreachable). Merging the
             // two identities would be exactly the defect the ownership
             // map exists to prevent, so fall back to the reserved label.
+            // Count the occurrence — the firmware counter is per-occurrence
+            // by contract (the cap branch below notes it "stays
+            // per-occurrence, as before") — so the approximation is
+            // observable in sensor_firmware_versions_rejected_total if it
+            // ever fires instead of being silent.
+            this.prometheus_counter_firmware_versions_rejected?.inc();
             return "unknown_firmware";
         }
         if (this.admittedFirmwareVersions.has(label)) {
