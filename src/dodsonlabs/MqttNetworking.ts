@@ -5,7 +5,7 @@
 
 import mqtt from "mqtt";
 import * as sysFunc from "./SystemFunctions";
-import { PrometheusWriter } from "./PrometheusWriter";
+import { DEFAULT_SOURCE_CARDINALITY_CAP, DEFAULT_SOURCE_MAX_LENGTH, DEFAULT_SOURCE_VALID_CHARS, PrometheusWriter } from "./PrometheusWriter";
 import { LogLevel, isJsonObject } from "./Interfaces";
 import type { ILogger, IMqttNetworking, JsonObject } from "./Interfaces";
 import type { configSchema } from "../schemas/config";
@@ -43,6 +43,30 @@ const RESTART_ONLY_KEYS = [
 
 type RestartOnlyKey = (typeof RESTART_ONLY_KEYS)[number];
 
+// The three source-label keys the PrometheusWriter coalesces to a default at
+// construction. The restart-only diff must compare the values the running
+// process actually uses (default-coalesced), not the raw config values: a
+// config that omits a key and one that spells out the default are the same
+// running value, and neither may be reported as a restart-required change.
+// Keys without a default pass through unchanged.
+const RESTART_ONLY_DEFAULTS: Partial<Record<RestartOnlyKey, string | number>> = {
+    sensorSourceMaxLength: DEFAULT_SOURCE_MAX_LENGTH,
+    sensorSourceValidCharsRegex: DEFAULT_SOURCE_VALID_CHARS,
+    sensorSourceCardinalityCap: DEFAULT_SOURCE_CARDINALITY_CAP,
+};
+
+/**
+ * Coalesce a restart-only key's raw config value with the same default the
+ * PrometheusWriter applies at construction, so updateConfig compares effective
+ * running values rather than raw config values.
+ */
+function effectiveRestartOnlyValue(
+    key: RestartOnlyKey,
+    raw: string | number | undefined
+): string | number | undefined {
+    return raw ?? RESTART_ONLY_DEFAULTS[key];
+}
+
 /**
  * Spec for one V3 telemetry field. `field` is the canonical name
  * used in warnings; `aliases` are additional accepted field names (the
@@ -78,11 +102,12 @@ export class MqttNetworking implements IMqttNetworking {
         configSource: string = "/app/configs/config.yml",
         configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void
     ) {
-        // Snapshot the restart-only values once at startup. These are the
-        // values the RUNNING process actually uses (captured before any
-        // /write-config or /reload-config can persist a different value),
-        // and they stay fixed for the process lifetime — see
-        // startupRestartOnlyConfig.
+        // Snapshot the raw restart-only config values once at startup (captured
+        // before any /write-config or /reload-config can persist a different
+        // value); they stay fixed for the process lifetime — see
+        // startupRestartOnlyConfig. updateConfig compares them default-coalesced
+        // (effectiveRestartOnlyValue), since that is what the running process
+        // actually uses.
         this.startupRestartOnlyConfig = {
             mqttBrokerIpAddress: config.mqttBrokerIpAddress,
             mqttTopicTelemetry: config.mqttTopicTelemetry,
@@ -435,9 +460,16 @@ export class MqttNetworking implements IMqttNetworking {
         // baseline, not the latest desired config: diffing against desired
         // would report no change when an unapplied restart-only value is
         // written twice (the running process still holds the original
-        // startup value, which is what the operator needs to be told).
+        // startup value, which is what the operator needs to be told). Both
+        // sides are default-coalesced (effectiveRestartOnlyValue) to match
+        // what the running process actually uses: an omitted key and an
+        // explicit default are the same running value, so writing one for the
+        // other is not a restart-required change.
         const restartOnlyChanged = RESTART_ONLY_KEYS.filter(
-            (key) => !Object.is(this.startupRestartOnlyConfig[key], newConfig[key])
+            (key) => !Object.is(
+                effectiveRestartOnlyValue(key, this.startupRestartOnlyConfig[key]),
+                effectiveRestartOnlyValue(key, newConfig[key])
+            )
         );
 
         // Update forward_sensor_logs settings

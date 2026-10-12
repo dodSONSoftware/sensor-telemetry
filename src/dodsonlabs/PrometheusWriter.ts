@@ -14,6 +14,15 @@ import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
 import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
 
+// Defaults the writer coalesces the optional source-label config keys to at
+// construction. Exported so MqttNetworking's restart-only diff can compare
+// the values the running process actually uses rather than the raw config
+// values: an omitted key and an explicit default are the same running value
+// and must not be reported as a restart-required change.
+export const DEFAULT_SOURCE_MAX_LENGTH = 30;
+export const DEFAULT_SOURCE_VALID_CHARS = "a-zA-Z0-9._-";
+export const DEFAULT_SOURCE_CARDINALITY_CAP = 1024;
+
 export class PrometheusWriter {
     // ******** private properties
 
@@ -242,14 +251,14 @@ export class PrometheusWriter {
     ) {
         // read configuration items
         this.prometheus_port = config.apiPort;
-        this.MAX_SOURCE_LENGTH = config.sensorSourceMaxLength ?? 30;
-        const validChars = config.sensorSourceValidCharsRegex ?? "a-zA-Z0-9._-";
+        this.MAX_SOURCE_LENGTH = config.sensorSourceMaxLength ?? DEFAULT_SOURCE_MAX_LENGTH;
+        const validChars = config.sensorSourceValidCharsRegex ?? DEFAULT_SOURCE_VALID_CHARS;
         // Shared with the schema's constructibility check: a value the
         // schema admitted cannot throw here, and the escape rule lives in
         // exactly one place (SystemFunctions.buildSourceValidCharsRegex).
         // Global flag: replaces ALL invalid characters, not just the first.
         this.VALID_CHARS = buildSourceValidCharsRegex(validChars);
-        this.sourceCardinalityCap = config.sensorSourceCardinalityCap ?? 1024;
+        this.sourceCardinalityCap = config.sensorSourceCardinalityCap ?? DEFAULT_SOURCE_CARDINALITY_CAP;
 
         // save config and source for endpoint access
         this.config = { ...config };

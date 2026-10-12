@@ -234,6 +234,74 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
     expect(warns).toHaveLength(1);
     expect(warns[0][2]).toMatchObject({ keys: ["apiPort"] });
   });
+
+  // A startup config that omits all three writer-defaulted source-label keys
+  // (the running writer coalesces them to 30 / "a-zA-Z0-9._-" / 1024).
+  const omittedDefaultsConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 32002,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+  };
+
+  it("does not warn when writer-defaulted keys are written explicitly at their defaults after an omitted startup", () => {
+    // Regression: the diff used to compare raw config values, so spelling out
+    // a value the writer already defaults to read as a change even though the
+    // effective running value is identical (undefined vs 30 / 1024 / "a-z...").
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(omittedDefaultsConfig, logger);
+
+    networking.updateConfig({
+      ...omittedDefaultsConfig,
+      sensorSourceMaxLength: 30,
+      sensorSourceValidCharsRegex: "a-zA-Z0-9._-",
+      sensorSourceCardinalityCap: 1024,
+    });
+
+    expect(findRestartOnlyWarn(logger)).toBeUndefined();
+  });
+
+  it("does not warn when writer-defaulted keys are omitted after an explicit startup at their defaults", () => {
+    // The mirror direction of the same regression: baseConfig spells out
+    // 30 / "a-zA-Z0-9._-" explicitly, and a config that drops those keys back
+    // to the defaults changes nothing about the running process.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+
+    networking.updateConfig(omittedDefaultsConfig);
+
+    expect(findRestartOnlyWarn(logger)).toBeUndefined();
+  });
+
+  it("still warns when a defaulted key moves from its default to a real value", () => {
+    // Effective 30 at startup (omitted → default), 40 written: a genuine
+    // restart-required change that default coalescing must not hide.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(omittedDefaultsConfig, logger);
+
+    networking.updateConfig({
+      ...omittedDefaultsConfig,
+      sensorSourceMaxLength: 40,
+    });
+
+    const warnCall = findRestartOnlyWarn(logger);
+    expect(warnCall?.[2]).toMatchObject({ keys: ["sensorSourceMaxLength"] });
+  });
+
+  it("still warns when an explicitly non-default startup value is dropped back to the default", () => {
+    // The running process uses 40 (spelled out at startup); a config that
+    // omits the key would run at 30 after restart, so this is a real change.
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(
+      { ...baseConfig, sensorSourceMaxLength: 40 },
+      logger,
+    );
+
+    networking.updateConfig(omittedDefaultsConfig);
+
+    const warnCall = findRestartOnlyWarn(logger);
+    expect(warnCall?.[2]).toMatchObject({ keys: ["sensorSourceMaxLength"] });
+  });
 });
 
 describe("MqttNetworking.close() shutdown ordering", () => {
