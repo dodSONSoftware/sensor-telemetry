@@ -19,6 +19,7 @@ A Node.js service that listens on MQTT channels for sensor telemetry data and pu
 ### Entry Point
 
 - **index.ts** (`src/index.ts`) — Main entry point with config loading, shutdown handling, and signal trapping
+- **version.ts** (`src/version.ts`) — `APP_VERSION`, the app version's source of truth (imported into `serviceMetadata` by `src/common/global.ts` and reported by `/about`; `package.json` must stay in sync with it — the `/git-commit` workflow keeps them in lockstep and a regression test pins the sync), and `APP_NAME`, the release codename (a deterministic function of the version per the codename scheme in `.claude/commands/git-commit.md`). Per-version release history lives in `CHANGELOG.md` (newest first)
 
 ### V3 Message Format (per-device telemetry)
 
@@ -179,8 +180,9 @@ src/
 │   ├── MqttNetworking.ts  # MQTT + Prometheus integration
 │   ├── PrometheusWriter.ts # Prometheus metric management
 │   └── SystemFunctions.ts # Utilities
-└── schemas/
-    └── config.ts          # Zod config validation
+├── schemas/
+│   └── config.ts          # Zod config validation
+└── version.ts             # APP_VERSION (app version source of truth) and APP_NAME (release codename)
 
 tests/
 └── __tests__/             # Jest suites (ts-jest, CommonJS via tsconfig.jest.json)

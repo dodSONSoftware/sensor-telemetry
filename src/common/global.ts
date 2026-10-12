@@ -3,27 +3,22 @@
  * SPDX-License-Identifier: MIT
  */
 
-import path from "path";
 import type { IAbout } from "../dodsonlabs/Interfaces";
 import { Logger } from "../dodsonlabs/Logger";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
-// Load version from package.json at module load time
-import { createRequire } from "module";
-const pkgRequire = createRequire(__filename);
-// Resolve path relative to __dirname for reliability across environments
-// __dirname is /app/dist/common when loaded from dist, so go up two levels
-const packageJsonPath = path.join(__dirname, "../..", "package.json");
-const { version } = pkgRequire(packageJsonPath) as { version: string };
+// The app version comes from src/version.ts — the version's source of truth
+// (reported by /about). package.json is kept in sync with it by the
+// /git-commit workflow, so no module-load lookup is needed.
+import { APP_VERSION } from "../version";
 
 // Single source of truth for the service's common identity and legal
-// metadata, shared by aboutDude() and the /about endpoint. version comes
-// from package.json (loaded above), never a hardcoded duplicate. Each
+// metadata, shared by aboutDude() and the /about endpoint. Each
 // consumer keeps its own description text; only the common fields live here.
 export const serviceMetadata = {
     name: "Sensor Telemetry Services",
-    version,
+    version: APP_VERSION,
     author: "Randel Dodson",
     copyright: "Copyright © 2026 dodson Software ( dodson labs )",
     license: "MIT",

@@ -6,9 +6,10 @@
 import fs from "fs";
 import path from "path";
 import { aboutDude, serviceMetadata } from "../../../src/common/global";
+import { APP_VERSION } from "../../../src/version";
 
-// The authoritative application version (package.json), which
-// serviceMetadata.version must reflect — never a hardcoded duplicate.
+// src/version.ts is the authoritative application version, which
+// serviceMetadata.version must report — package.json must stay in sync.
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(__dirname, "../../..", "package.json"), "utf8")
 ) as { version: string };
@@ -23,8 +24,10 @@ describe("serviceMetadata (shared service identity)", () => {
     expect(serviceMetadata.license).toBe("MIT");
   });
 
-  it("reports the authoritative application version from package.json", () => {
-    expect(serviceMetadata.version).toBe(packageJson.version);
+  it("reports the authoritative application version from src/version.ts", () => {
+    expect(serviceMetadata.version).toBe(APP_VERSION);
+    // package.json must stay in sync with src/version.ts
+    expect(packageJson.version).toBe(APP_VERSION);
   });
 });
 
