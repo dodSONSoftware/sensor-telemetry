@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { createHash } from "crypto";
 import fs from "fs";
 import net from "net";
 import os from "os";
@@ -1984,6 +1985,38 @@ describe("PrometheusWriter", () => {
       const metrics = await getMetrics();
       expect(metrics).toContain(`air_temperature{source="unknown"}`);
       expect(metrics).not.toContain(`air_temperature{source=""}`);
+    });
+
+    it("disambiguates a real source literally named 'unknown' instead of merging it into the blank fallback", async () => {
+      // The one case resolveSourceLabel re-checks the sanitization core for:
+      // a REAL source whose sanitized form equals the reserved "unknown"
+      // fallback must be treated as a distinct identity (disambiguated label),
+      // NOT merged onto the blank-source fallback that all-invalid sources
+      // share. If the blank check were applied to every source, this real
+      // source would be silently indistinguishable from a blank one.
+      const expectedSuffix = createHash("sha256")
+        .update("unknown", "utf8")
+        .digest("hex")
+        .slice(0, 8);
+      const expectedLabel = `unknown-${expectedSuffix}`;
+
+      // air_temperature is stored in Fahrenheit: 15 C -> 59 F.
+      const expectedF = 59;
+      writer.publish_air(
+        { air: { temperature_c: 15, humidity_percent: 50, pressure_pa: 100000, altitude_m: 5 } },
+        "unknown",
+        "1.0.0"
+      );
+
+      const metrics = await getMetrics();
+      const lineFor = (label: string) =>
+        metrics
+          .split("\n")
+          .find((l) => l.startsWith(`air_temperature{source="${label}"}`));
+      // The real source lands on its own deterministic disambiguated label...
+      expect(lineFor(expectedLabel)).toBe(`air_temperature{source="${expectedLabel}"} ${expectedF}`);
+      // ...and does NOT ride the shared blank-source fallback.
+      expect(lineFor("unknown")?.endsWith(` ${expectedF}`)).toBe(false);
     });
 
     it("warns only once across repeated setter calls and messages for a blank source", async () => {

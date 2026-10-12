@@ -1441,7 +1441,14 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
      */
     private resolveSourceLabel(source: string): string {
         const sanitized = this.sanitizeSource(source);
-        if (this.sanitizeSourceCore(source) === "") {
+        // sanitizeSource already ran the core once; re-run it here only in the
+        // one case where its output is ambiguous. A blank (all-invalid) source
+        // sanitizes to "unknown" via the fallback branch, but so does a REAL
+        // source literally named "unknown" — and those must be treated
+        // differently (shared fallback vs. disambiguated identity). Checking
+        // the core for every source would double the sanitization work on the
+        // common path where sanitized !== "unknown".
+        if (sanitized === "unknown" && this.sanitizeSourceCore(source) === "") {
             // Blank source: every source that sanitizes to nothing shares
             // the "unknown" fallback. It is never claimed as an identity
             // (see admitSource), so a second distinct blank source reuses

@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.33] — Zinc Falcon (2026-10-11)
+
+- Remove a redundant second sanitization pass from per-message source-label resolution: the blank-source check now re-checks the sanitization core only when the sanitized form is ambiguous (equals the reserved `unknown` fallback), so a real source literally named `unknown` is still disambiguated rather than merged onto the blank-source fallback
+
 ## [4.1.32] — Zinc Falcon (2026-10-11)
 
 - Consolidate the log-level string-to-enum mapping onto the single `SystemFunctions.convert_from_log_level_string_to_enum` helper and delete the Logger's private duplicate — the two mappings were identical, and one source of truth keeps them from drifting
