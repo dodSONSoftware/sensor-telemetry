@@ -143,6 +143,17 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
           exitCode: pendingExitCode,
         }
       );
+
+      // Last, flush any pending Loki batch. The ordering is load-bearing:
+      // MqttNetworking/PrometheusWriter log through this Logger during their
+      // own close, so the flush must run AFTER networking.close() and after
+      // the "shutdown complete" line above, or those close-path lines are
+      // dropped. Bounded (~2 s worst case) and never throws, so it cannot
+      // extend the 5 s close deadline meaningfully or mask the exit. When
+      // lokiUrl is unset this resolves immediately. Fatal paths
+      // (uncaughtException / unhandledRejection) route through this same
+      // shutdown, so their critical line gets the flush too.
+      await appLogger.close();
     } catch (err) {
       appLogger.write_error(
         "index.ts/shutdownError",

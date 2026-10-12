@@ -5,6 +5,7 @@
 
 import winston, { format } from "winston";
 import { convert_from_log_level_string_to_enum, LOG_BOUND_MAX_DEPTH, LOG_BOUND_DEPTH_MARKER } from "./SystemFunctions";
+import { LokiTransport } from "./LokiTransport";
 import { APP_VERSION } from "../version";
 import { LogLevel } from "./Interfaces";
 import type {
@@ -173,6 +174,7 @@ function validateLogLevel(level: string): ResolvedLogLevel | null {
 
 export class Logger implements ILogger {
   private readonly logger: winston.Logger;
+  private lokiTransport: LokiTransport | undefined;
   private globalLogLevelValue: LogLevel;
   private globalLogLevelName: string;
   private winstonLevel: SupportedLogLevel;
@@ -192,17 +194,51 @@ export class Logger implements ILogger {
       this.globalLogLevelName = validatedLevel.name;
     }
 
+    // Hoisted so the Loki transport's stream labels use exactly the same
+    // identity fields the console lines carry — the two cannot drift.
+    const defaultMeta = {
+      service: "sensor-telemetry",
+      environment: process.env.NODE_ENV ?? "development",
+      // From src/version.ts — the app version's single source of truth
+      // (same value /about reports), rather than a second, runtime-loaded
+      // copy of package.json.
+      version: APP_VERSION,
+    };
+
+    const transports: winston.transport[] = [];
+    if (config.lokiUrl !== undefined) {
+      // lokiUrl is the instance's base URL; the service appends the push
+      // path (URL resolution also normalizes a trailing slash). The
+      // transport inherits the logger-level format chain, so every line
+      // shipped is the same redacted, timestamped JSON the console prints.
+      //
+      // Restart-only: built once from the startup config. A /write-config
+      // change to lokiUrl is reported via the restart-only warning, not
+      // applied here (the transport is not rebuilt at runtime).
+      this.lokiTransport = new LokiTransport({
+        url: new URL("/loki/api/v1/push", config.lokiUrl).href,
+        // Static, low-cardinality stream labels: one stream for the whole
+        // process. Per-record fields (level, module, source, event) ride
+        // in the line body, which Loki indexes — using them as labels
+        // would fan the stream count out by source.
+        labels: { ...defaultMeta },
+      });
+      transports.push(this.lokiTransport);
+    }
+    transports.push(
+      // Deliberately no `handleExceptions: true` here: that would make
+      // winston install its own global uncaughtException handler, producing
+      // a second, non-app-formatted crash line and leaking a global listener
+      // per Logger. Crash logging is owned intentionally by the process-level
+      // handlers in index.ts (uncaughtException / unhandledRejection), which
+      // log via this Logger and own the exit code.
+      new winston.transports.Console(),
+    );
+
     // Create Winston logger with JSON format
     this.logger = winston.createLogger({
       level: this.winstonLevel,
-      defaultMeta: {
-        service: "sensor-telemetry",
-        environment: process.env.NODE_ENV ?? "development",
-        // From src/version.ts — the app version's single source of truth
-        // (same value /about reports), rather than a second, runtime-loaded
-        // copy of package.json.
-        version: APP_VERSION,
-      },
+      defaultMeta,
       // No winston errors() formatter: every log call passes a string message
       // (errors ride in metadata as error: <Error>), so errors() — which only
       // restructures an info.message that IS an Error — would never fire.
@@ -213,17 +249,22 @@ export class Logger implements ILogger {
         timestamp({ format: "YYYY-MM-DDTHH:mm:ss.SSSZ" }),
         json(),
       ),
-      transports: [
-        // Deliberately no `handleExceptions: true` here: that would make
-        // winston install its own global uncaughtException handler, producing
-        // a second, non-app-formatted crash line and leaking a global listener
-        // per Logger. Crash logging is owned intentionally by the process-level
-        // handlers in index.ts (uncaughtException / unhandledRejection), which
-        // log via this Logger and own the exit code.
-        new winston.transports.Console(),
-      ],
+      transports,
       exitOnError: false,
     });
+  }
+
+  /**
+   * Flush any pending Loki batch and stop shipping. Bounded (~2 s) and never
+   * throws: index.ts awaits it last on shutdown, after the networking close
+   * (which logs through this Logger) so no close-path line is lost.
+   * Resolves immediately when Loki is not configured.
+   */
+  public async close(): Promise<void> {
+    if (this.lokiTransport === undefined) {
+      return;
+    }
+    await this.lokiTransport.close();
   }
 
   public global_log_level(): LogLevel {

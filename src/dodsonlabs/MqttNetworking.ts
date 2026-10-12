@@ -39,6 +39,9 @@ const RESTART_ONLY_KEYS = [
     "sensorSourceMaxLength",
     "sensorSourceValidCharsRegex",
     "sensorSourceCardinalityCap",
+    // The Loki transport is built once in the Logger constructor from the
+    // startup config; a changed lokiUrl is not applied until the next start.
+    "lokiUrl",
 ] as const;
 
 type RestartOnlyKey = (typeof RESTART_ONLY_KEYS)[number];
@@ -117,6 +120,7 @@ export class MqttNetworking implements IMqttNetworking {
             sensorSourceMaxLength: config.sensorSourceMaxLength,
             sensorSourceValidCharsRegex: config.sensorSourceValidCharsRegex,
             sensorSourceCardinalityCap: config.sensorSourceCardinalityCap,
+            lokiUrl: config.lokiUrl,
         };
         this.mqtt_server_ip_address = config.mqttBrokerIpAddress;
         this.mqtt_topic_telemetry = config.mqttTopicTelemetry;
@@ -480,8 +484,9 @@ export class MqttNetworking implements IMqttNetworking {
      * logLevel, the forward_sensor_logs settings, and staleSourceRemovalSecs
      * take effect at runtime (the latter is applied by the PrometheusWriter's
      * own config commit paths before this callback runs); the MQTT connection
-     * (broker, topics), the HTTP port, and the PrometheusWriter's
-     * source-label sanitization constants (captured in its constructor)
+     * (broker, topics), the HTTP port, the PrometheusWriter's
+     * source-label sanitization constants (captured in its constructor), and
+     * lokiUrl (the Logger's Loki transport is built once in its constructor)
      * require a restart.
      * @param newConfig - New configuration object
      */

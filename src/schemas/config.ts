@@ -102,6 +102,17 @@ export const configSchema = z.object({
     forwardSensorLogsLevel: z.enum(["error", "warn", "info", "debug", "critical"], {
         error: "forwardSensorLogsLevel must be one of: error, warn, info, debug, critical",
     }).optional(),
+    lokiUrl: z.string({
+        error: "lokiUrl must be a string",
+    }).min(1, "lokiUrl must not be empty")
+        // The value is the Loki instance's base URL; the service appends
+        // /loki/api/v1/push when building the push endpoint. Rejecting
+        // non-http(s) or unparsable values here makes a mistyped endpoint
+        // fail as a clean config error instead of a runtime fetch loop.
+        .refine(
+            isLokiUrl,
+            "lokiUrl must be an absolute http(s) base URL of the Loki instance — e.g. 'http://loki:3100' or 'https://loki.example.com/loki'; the service appends /loki/api/v1/push"
+        ).optional(),
 }).strict().superRefine((config, ctx) => {
     // MqttNetworking.on_message routes by lowercasing both the received
     // topic and the configured topics, with log winning over health and
@@ -201,6 +212,23 @@ export function isMqttBrokerAddress(value: string): boolean {
         return false;
     }
     return hostChars.test(value.slice(0, colon)) && isValidPort(port);
+}
+
+/**
+ * lokiUrl is the absolute http(s) base URL of the Loki instance; the
+ * service resolves /loki/api/v1/push against it when constructing the
+ * transport, so a trailing slash in the config is harmless. Anything that
+ * `new URL` cannot parse (a bare host, no scheme, an empty string past the
+ * min check) or a non-http(s) scheme is rejected at validation time.
+ */
+export function isLokiUrl(value: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    return url.protocol === "http:" || url.protocol === "https:";
 }
 
 /**

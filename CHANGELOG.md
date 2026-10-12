@@ -4,6 +4,13 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.2.0] — Aluminum Falcon (2026-10-12)
+
+- The service can now ship its own logs to Loki: a new optional `lokiUrl` config key (the instance's base URL, e.g. `http://loki:3100`) makes the Logger batch (5 s interval / 256 entries / 64 KiB, whichever first) and push the same secret-redacted single-line JSON lines it prints to the console to `<lokiUrl>/loki/api/v1/push`, with all lines of one process sharing a single stream labeled `service`, `environment`, `version`; omitting the key keeps logging console-only
+- Loki shipping is best-effort: a failed push drops its batch and logs a warning directly to the console, throttled (first failure logged, repeats suppressed for 60 s, the re-warn carries the suppressed count) — a down Loki degrades to console-only logging and never crashes the process, retries unboundedly, or grows memory
+- On shutdown the pending Loki batch is flushed (bounded, ~2 s) after the networking close, so the shutdown log lines are not lost; `lokiUrl` is restart-required — `/write-config` and `/reload-config` persist it and warn that it takes effect on the next restart
+- The repository now ships the MIT LICENSE file
+
 ## [4.1.39] — Zinc Falcon (2026-10-12)
 
 - The config endpoints are now fully auditable at the HTTP layer: successful `/write-config` and `/reload-config` commits log `config_write_committed` / `config_reload_completed` (info) with the directly observed `remoteAddress`, the commit `path`, and the changed keys — key names only, never values, so the broker address cannot become a second read channel through the log and a key written at its running default reports no change; the previously-silent validation rejections log `config_write_rejected` (400) and `config_reload_failed` / `config_read_failed` (500) with a bounded error message; and a successful `/read-config` logs `config_read_completed` (info, `remoteAddress` only) — closing the gap where every config rejection was audited but successful operations left no trace (the `configuration_updated` event only fires when networking is constructed and carries none of these fields)

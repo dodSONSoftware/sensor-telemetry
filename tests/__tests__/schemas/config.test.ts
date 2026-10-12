@@ -28,6 +28,7 @@ describe("validateConfig", () => {
       staleSourceRemovalSecs: 3600,
       forwardSensorLogs: true,
       forwardSensorLogsLevel: "debug",
+      lokiUrl: "http://loki:3100",
     };
     expect(validateConfig(full)).toEqual(full);
   });
@@ -131,6 +132,29 @@ describe("validateConfig", () => {
     expect(() =>
       validateConfig({ ...validConfig, forwardSensorLogsLevel: "loud" })
     ).toThrow(/forwardSensorLogsLevel/);
+  });
+
+  describe("lokiUrl", () => {
+    it("accepts absolute http and https base URLs", () => {
+      for (const value of [
+        "http://loki:3100",
+        "http://loki:3100/",
+        "https://loki.example.com",
+        "https://loki.example.com/loki",
+      ]) {
+        expect(() => validateConfig({ ...validConfig, lokiUrl: value })).not.toThrow();
+      }
+    });
+
+    it("accepts a config without lokiUrl (Loki disabled)", () => {
+      expect(validateConfig(validConfig)).toEqual(validConfig);
+    });
+
+    it("rejects non-http(s) schemes and unparsable values", () => {
+      for (const value of ["", "ftp://loki:3100", "not a url", "loki:3100", "http://"]) {
+        expect(() => validateConfig({ ...validConfig, lokiUrl: value })).toThrow(/lokiUrl/);
+      }
+    });
   });
 
   it("rejects unknown configuration keys", () => {

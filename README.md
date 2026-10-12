@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.39.
+**Release:** Aluminum Falcon — firmware 4.2.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -43,6 +43,12 @@ Supported configurable log levels:
 Log level can be configured via `config.logLevel` and changed at runtime using `setLogLevel()`.
 
 `error` and `critical` filter at the same Winston `error` threshold, so both display every error-level entry. What separates a critical entry from a standard one is its `severity` field (`"critical"` vs `"standard"`), not the configured log level — see [Error Severity](#error-severity).
+
+### Shipping Logs to Loki
+
+With `lokiUrl` set (see [Configuration Options](#configuration-options)), every log line — the same secret-redacted, single-line JSON printed to the console — is also pushed to the Loki instance's `/loki/api/v1/push` endpoint. Lines are batched and flushed on whichever limit hits first: a 5-second interval, 256 entries, or ~64 KiB. All lines from one process share a single stream labeled with `service`, `environment`, and `version`; per-record fields (`level`, `module`, `source`, `event`, ...) ride in the line body, which Loki indexes.
+
+Pushing is best-effort: a failed push drops its batch and logs a warning directly to the console, throttled (first failure logged, repeats suppressed for 60 s, the re-warn carries the suppressed count). Loki being down therefore degrades to console-only logging — it never retries unboundedly, grows memory, or crashes the process. On shutdown the pending batch is flushed (bounded, ~2 s) after the rest of the close path, so shutdown logs are not lost. `lokiUrl` is restart-required: changing it via `/write-config` or `/reload-config` persists the value and warns that it takes effect on the next restart.
 
 ### Log Types
 
@@ -154,6 +160,7 @@ forwardSensorLogsLevel: debug
 | `staleSourceRemovalSecs` | Inactivity threshold (integer seconds, 0 = disabled, max 31536000): when set, a sweep timer removes all of a source's per-source series (readings + `sensor_health_*` + `sensor_last_seen_timestamp_seconds{source}`) once it has sent no accepted telemetry/health for longer. Eviction also frees the source's cardinality-cap slot. Runtime-updatable via `/write-config` / `/reload-config` (omitting the key re-disables). Sweep interval is threshold/2 clamped to 10-60s, so removal lags the threshold by up to one interval — set the threshold well above the longest expected reporting interval | disabled (0/absent) |
 | `forwardSensorLogs` | Forward sensor log messages | true |
 | `forwardSensorLogsLevel` | Minimum log level to forward | debug |
+| `lokiUrl` | Base URL (absolute `http(s)`) of a Loki instance. When set, the same redacted JSON lines printed to the console are batched (5 s interval / 256 entries / 64 KiB, whichever first) and pushed to `<lokiUrl>/loki/api/v1/push` in addition to the console, with stream labels `service`, `environment`, `version`. Push failures drop the batch with a throttled console warning — they never crash the process or grow memory unboundedly. Restart-required | - (unset = console-only) |
 
 ### Runtime vs Restart-Required Configuration
 
@@ -176,6 +183,7 @@ forwardSensorLogsLevel: debug
 - `sensorSourceMaxLength`
 - `sensorSourceValidCharsRegex`
 - `sensorSourceCardinalityCap`
+- `lokiUrl`
 
 When a restart-required key changes, the service logs a `configuration_restart_only_keys` warning naming the changed keys; until the restart, the running service keeps their previous values. `/endpoints` reports the same split in each configuration endpoint's description.
 

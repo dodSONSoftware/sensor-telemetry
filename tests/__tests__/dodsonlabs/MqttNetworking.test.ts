@@ -235,6 +235,34 @@ describe("MqttNetworking.updateConfig restart-only key warning", () => {
     expect(warns[0][2]).toMatchObject({ keys: ["apiPort"] });
   });
 
+  it("warns when lokiUrl is added, changed, or removed against the startup baseline", () => {
+    // lokiUrl has no default, so undefined vs present is compared directly:
+    // adding a base URL to a startup config without one, changing it, or
+    // removing it back to the startup baseline each report (and only the
+    // last two warn, in order).
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(baseConfig, logger);
+
+    networking.updateConfig({ ...baseConfig, lokiUrl: "http://loki:3100" });
+    expect(findRestartOnlyWarn(logger)?.[2]).toMatchObject({ keys: ["lokiUrl"] });
+
+    // A second write of the same unapplied value warns again (startup
+    // baseline diff).
+    networking.updateConfig({ ...baseConfig, lokiUrl: "http://loki:3100" });
+    let warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "configuration_restart_only_keys",
+    );
+    expect(warns).toHaveLength(2);
+
+    // Removing the key reverts to the startup baseline (undefined): no
+    // further warning.
+    networking.updateConfig({ ...baseConfig });
+    warns = logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "configuration_restart_only_keys",
+    );
+    expect(warns).toHaveLength(2);
+  });
+
   // A startup config that omits all three writer-defaulted source-label keys
   // (the running writer coalesces them to 30 / "a-zA-Z0-9._-" / 1024).
   const omittedDefaultsConfig: z.infer<typeof configSchema> = {

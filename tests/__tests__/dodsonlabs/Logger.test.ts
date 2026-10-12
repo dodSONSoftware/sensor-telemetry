@@ -8,6 +8,7 @@ import {
   LOG_BOUND_MAX_DEPTH,
   LOG_BOUND_DEPTH_MARKER,
 } from "../../../src/dodsonlabs/SystemFunctions";
+import { APP_VERSION } from "../../../src/version";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
@@ -445,5 +446,101 @@ describe("Logger deep untrusted metadata (regression P2-1)", () => {
     const error = record.error as { message?: string; stack?: string };
     expect(error.message).toBe("boom");
     expect(error.stack).toContain("boom");
+  });
+});
+
+describe("Logger Loki shipping", () => {
+  const baseConfig: z.infer<typeof configSchema> = {
+    logLevel: "info",
+    apiPort: 32002,
+    mqttBrokerIpAddress: "10.0.0.1",
+    mqttTopicTelemetry: "iot/v3/telemetry",
+    lokiUrl: "http://loki:3100",
+  };
+
+  let fetchMock: jest.SpyInstance;
+
+  beforeEach(() => {
+    fetchMock = jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue({
+        ok: true,
+        status: 204,
+        body: { cancel: () => Promise.resolve() },
+      } as unknown as Response);
+  });
+
+  afterEach(() => {
+    fetchMock.mockRestore();
+  });
+
+  it("ships the redacted console line to the resolved push endpoint", async () => {
+    const logger = new Logger(baseConfig);
+    try {
+      logger.write_info("test/lokiShipping", "shipped line", {
+        event: "loki_shipping",
+        logType: "service",
+        password: "hunter2",
+      });
+      await logger.close();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      // The configured base URL gets the push path resolved against it.
+      expect(url).toBe("http://loki:3100/loki/api/v1/push");
+
+      const body = JSON.parse(init.body as string) as {
+        stream: Record<string, string>;
+        values: string[][];
+      };
+      // Static stream labels mirror the record's identity fields exactly.
+      expect(body.stream).toEqual({
+        service: "sensor-telemetry",
+        environment: process.env.NODE_ENV ?? "development",
+        version: APP_VERSION,
+      });
+      expect(body.values).toHaveLength(1);
+
+      const line = JSON.parse(body.values[0][1]) as Record<string, unknown>;
+      expect(line.message).toBe("shipped line");
+      // Redaction is inherited from the logger-level format chain: the
+      // raw secret never reaches the wire.
+      expect(line.password).toBe("[REDACTED]");
+      expect(body.values[0][1]).not.toContain("hunter2");
+    } finally {
+      await logger.close();
+    }
+  });
+
+  it("normalizes a trailing slash in the configured base URL", async () => {
+    const logger = new Logger({ ...baseConfig, lokiUrl: "http://loki:3100/" });
+    try {
+      logger.write_info("test/lokiTrailingSlash", "shipped line", {
+        event: "loki_trailing_slash",
+        logType: "service",
+      });
+      await logger.close();
+
+      const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://loki:3100/loki/api/v1/push");
+    } finally {
+      await logger.close();
+    }
+  });
+
+  it("close() without lokiUrl resolves without any fetch", async () => {
+    const noLoki: z.infer<typeof configSchema> = {
+      logLevel: "info",
+      apiPort: 32002,
+      mqttBrokerIpAddress: "10.0.0.1",
+      mqttTopicTelemetry: "iot/v3/telemetry",
+    };
+    const logger = new Logger(noLoki);
+    logger.write_info("test/noLoki", "console only", {
+      event: "no_loki",
+      logType: "service",
+    });
+    await logger.close();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

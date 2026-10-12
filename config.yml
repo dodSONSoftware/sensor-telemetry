@@ -29,3 +29,9 @@ staleSourceRemovalSecs: 120
 # Forward sensor logs to application logger
 forwardSensorLogs: true
 forwardSensorLogsLevel: info
+
+# Optional: ship application logs to a Loki instance. The base URL of the instance
+# (http or https); the service appends /loki/api/v1/push and pushes the same redacted
+# JSON lines it prints to the console, batched. Takes effect on the next restart.
+# Omit (or leave commented out) for console-only logging.
+lokiUrl: http://10.10.10.60:3100
