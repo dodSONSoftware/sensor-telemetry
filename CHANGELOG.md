@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.34] — Zinc Falcon (2026-10-11)
+
+- Log metadata now sources the `version` field from `src/version.ts` — the app version's single source of truth, the same value `/about` reports — instead of a second, runtime-loaded copy of `package.json`, so the two can no longer drift apart
+
 ## [4.1.33] — Zinc Falcon (2026-10-11)
 
 - Remove a redundant second sanitization pass from per-message source-label resolution: the blank-source check now re-checks the sanitization core only when the sanitized form is ambiguous (equals the reserved `unknown` fallback), so a real source literally named `unknown` is still disambiguated rather than merged onto the blank-source fallback

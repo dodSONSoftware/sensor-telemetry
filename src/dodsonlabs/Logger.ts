@@ -4,8 +4,8 @@
  */
 
 import winston, { format } from "winston";
-import { createRequire } from "module";
 import { convert_from_log_level_string_to_enum, LOG_BOUND_MAX_DEPTH, LOG_BOUND_DEPTH_MARKER } from "./SystemFunctions";
+import { APP_VERSION } from "../version";
 import { LogLevel } from "./Interfaces";
 import type {
   ILogger,
@@ -16,12 +16,6 @@ import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
 const { combine, timestamp, json } = format;
-
-// Load version from package.json at module load time
-const pkgRequire = createRequire(__filename);
-const packageJsonPath = pkgRequire.resolve("../..//package.json");
-const { version } = pkgRequire(packageJsonPath) as { version: string };
-
 
 // **** Secret Redaction Helpers ****
 
@@ -204,7 +198,10 @@ export class Logger implements ILogger {
       defaultMeta: {
         service: "sensor-telemetry",
         environment: process.env.NODE_ENV ?? "development",
-        version: version ?? "unknown",
+        // From src/version.ts — the app version's single source of truth
+        // (same value /about reports), rather than a second, runtime-loaded
+        // copy of package.json.
+        version: APP_VERSION,
       },
       // No winston errors() formatter: every log call passes a string message
       // (errors ride in metadata as error: <Error>), so errors() — which only
