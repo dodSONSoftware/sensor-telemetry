@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Zinc Falcon — firmware 4.1.35.
+**Release:** Zinc Falcon — firmware 4.1.36.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -188,15 +188,15 @@ The configuration schema is strict: unknown keys fail validation with an `Unreco
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SENSOR_TELEMETRY_CORS_ORIGINS` | Comma-separated list of browser origins permitted to call the HTTP API cross-origin. Origins must match exactly, including scheme and port. When unset or set to `*`, all browser origins are allowed for backward compatibility. Example: `http://10.10.10.50:3000,https://sensors.home.lab` | unset (all origins allowed) |
-| `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/write-config` and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
+| `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/read-config`, `/write-config`, and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
 
 CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
 
 ## Configuration API Security Model
 
-The HTTP configuration API (`/write-config` and `/reload-config`) is intended for deployment on a trusted private network.
+The HTTP configuration API (`/read-config`, `/write-config`, and `/reload-config`) is intended for deployment on a trusted private network.
 
-`/read-config` is intentionally readable without the configuration token: the current strict configuration schema carries no secret-bearing fields, so there is nothing to protect. If secret-bearing configuration fields are introduced in the future, `/read-config` must redact them or become authenticated.
+`/read-config` is token-protected in the same way as the write and reload paths: when `SENSOR_TELEMETRY_CONFIG_TOKEN` is set, a read requires the same `x-config-token` header. The current strict configuration schema carries no secret-bearing fields, so the token's primary job is still guarding mutation — but a deployment that locks down config mutation should not silently leave the config itself readable by any LAN client, and an operator who sets the token should not be surprised to find the read path still open.
 
 When `SENSOR_TELEMETRY_CONFIG_TOKEN` is not configured, those endpoints do not require authentication. This is an intentional trust decision, not a defect: the service is deployed on a private LAN with no external exposure.
 
@@ -218,7 +218,7 @@ Authenticated clients must then send:
 x-config-token: <token>
 ```
 
-on `/write-config` and `/reload-config` requests. Mismatched or missing headers are rejected with `401`.
+on `/read-config`, `/write-config`, and `/reload-config` requests. Mismatched or missing headers are rejected with `401`.
 
 The token must be treated as a secret and should not be committed to source control.
 

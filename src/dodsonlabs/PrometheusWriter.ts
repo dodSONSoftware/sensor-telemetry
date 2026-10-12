@@ -98,10 +98,11 @@ export class PrometheusWriter {
     private mqttNetworking?: IMqttNetworking;
     // ---- optional callback for config changes
     private configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void;
-    // ---- optional shared secret protecting /write-config and /reload-config.
-    // Read from the environment (not config.yml, which /read-config would
-    // expose) at construction. When unset, the endpoints remain open for
-    // trusted-LAN deployments and a warning is logged at startup.
+    // ---- optional shared secret protecting /read-config, /write-config,
+    // and /reload-config. Read from the environment (not config.yml, which
+    // /read-config would expose) at construction. When unset, the endpoints
+    // remain open for trusted-LAN deployments and a warning is logged at
+    // startup.
     private readonly configToken: string | undefined;
     // ---- browser CORS policy, parsed once at construction from
     // SENSOR_TELEMETRY_CORS_ORIGINS (see parseCorsOrigins). Unset, empty, or
@@ -276,7 +277,7 @@ export class PrometheusWriter {
         if (this.configToken === undefined) {
             logger.write_warn(
                 "prometheus/constructor",
-                "SENSOR_TELEMETRY_CONFIG_TOKEN is not set — /write-config and /reload-config are unauthenticated",
+                "SENSOR_TELEMETRY_CONFIG_TOKEN is not set — /read-config, /write-config, and /reload-config are unauthenticated",
                 {
                     event: "config_token_not_set",
                     logType: "service",
@@ -455,6 +456,9 @@ export class PrometheusWriter {
                 if (!this.requireMethod(req, res, "GET")) {
                     return;
                 }
+                if (!this.verifyConfigToken(req, res)) {
+                    return;
+                }
                 await this.handleReadConfig(req, res);
             } else if (path === "/write-config") {
                 if (!this.requireMethod(req, res, "POST")) {
@@ -599,10 +603,11 @@ export class PrometheusWriter {
     }
 
     /**
-     * Verify the shared secret protecting /write-config and /reload-config.
-     * Returns true (no-op) when no token is configured; otherwise the
-     * request must carry a matching x-config-token header, compared in
-     * constant time. Responds with 401 and returns false on failure.
+     * Verify the shared secret protecting /read-config, /write-config, and
+     * /reload-config. Returns true (no-op) when no token is configured;
+     * otherwise the request must carry a matching x-config-token header,
+     * compared in constant time. Responds with 401 and returns false on
+     * failure.
      */
     private verifyConfigToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
         if (this.configToken === undefined) {
@@ -874,7 +879,7 @@ export class PrometheusWriter {
                 name: "Read Config",
                 route: "/read-config",
                 verb: "GET",
-                requestBody: "None",
+                requestBody: "None. Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
                 responseBody: "Current YAML configuration loaded from disk",
                 description: "Reads the current configuration."
             },

@@ -253,6 +253,54 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
     });
   });
 
+  describe("verifyConfigToken on /read-config (GET)", () => {
+    // /read-config is token-protected exactly like /write-config and
+    // /reload-config: the config file is the state the token guards, and
+    // reading it is half of the same operation.
+    it("allows the request and returns the config with a correct x-config-token", async () => {
+      logger.write_warn.mockClear();
+
+      const { status, body } = await get("/read-config", {
+        "x-config-token": TOKEN,
+      });
+
+      expect(status).toBe(200);
+      expect(body).toEqual(
+        expect.objectContaining({
+          mqttBrokerIpAddress: "10.0.0.1",
+          mqttTopicTelemetry: "iot/v3/telemetry",
+        })
+      );
+      expect(tokenRejectedWarns(logger)).toBe(false);
+    });
+
+    it("returns 401 with an audit warning when the token header is missing", async () => {
+      logger.write_warn.mockClear();
+
+      const { status, body } = await get("/read-config");
+
+      expect(status).toBe(401);
+      expect(body).toEqual({
+        success: false,
+        message: "missing or invalid x-config-token",
+      });
+      expect(tokenRejectedWarns(logger)).toBe(true);
+    });
+
+    it("returns 401 when the token header has the wrong value", async () => {
+      // Same length as TOKEN so the comparison reaches timingSafeEqual.
+      const { status, body } = await get("/read-config", {
+        "x-config-token": "wrong-token-999999",
+      });
+
+      expect(status).toBe(401);
+      expect(body).toEqual({
+        success: false,
+        message: "missing or invalid x-config-token",
+      });
+    });
+  });
+
   describe("verifyConfigToken on /write-config (POST)", () => {
     it("accepts a valid config POST with a correct token", async () => {
       const { status, body } = await post(
@@ -306,6 +354,14 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
 
     it("returns 405, not 401, for POST /reload-config without a token", async () => {
       const { status, allow, body } = await post("/reload-config", {});
+
+      expect(status).toBe(405);
+      expect(allow).toBe("GET");
+      expect(body.success).toBe(false);
+    });
+
+    it("returns 405, not 401, for POST /read-config without a token", async () => {
+      const { status, allow, body } = await post("/read-config", {});
 
       expect(status).toBe(405);
       expect(allow).toBe("GET");

@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.1.36] — Zinc Falcon (2026-10-11)
+
+- `/read-config` now requires the `x-config-token` header when `SENSOR_TELEMETRY_CONFIG_TOKEN` is set, matching `/write-config` and `/reload-config` — a deployment that locks down config mutation also locks down the config read, so an operator who sets the token is never left with a token-protected write path beside a world-readable one; with the token unset the endpoint remains open as before
+
 ## [4.1.35] — Zinc Falcon (2026-10-11)
 
 - Fatal process handlers (`uncaughtException` / `unhandledRejection`) are now registered before the MQTT networking / Prometheus writer construction, so a synchronous throw during that construction (a failure mode the config schema does not validate away) is routed through the structured fatal path — structured critical log and exit-code ownership — instead of escaping as a raw Node unhandled-rejection crash; `shutdown()` skips an unconstructed networking rather than hitting a TDZ reference, and a source-order regression test pins the invariant
