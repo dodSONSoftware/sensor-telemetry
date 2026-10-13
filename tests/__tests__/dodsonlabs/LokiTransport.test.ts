@@ -171,6 +171,62 @@ describe("LokiTransport", () => {
     }
   });
 
+  it("bounds each push: an unresponsive endpoint is aborted and its batch reported dropped", async () => {
+    // Regression for P3-2: undici has no app-level timeout by default, so a
+    // black-holed endpoint (SYN-accepted, never answered) held the in-flight
+    // push for undici's implicit ~300 s headersTimeout — and close() could
+    // spend its entire shutdown budget waiting on it. The mock hangs until
+    // the signal it was given aborts, then rejects the way undici does on
+    // abort (it also rejects loudly if no signal arrives at all — the
+    // wiring itself is under test). The real 5 s PUSH_TIMEOUT_MS elapses,
+    // hence the extended test timeout.
+    const rejectionProbe = jest.fn();
+    process.on("unhandledRejection", rejectionProbe);
+    fetchMock.mockImplementation(
+      (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal ?? undefined;
+          if (!signal) {
+            reject(new Error("push was invoked without an abort signal"));
+            return;
+          }
+          // Plain Error (not DOMException): Node's DOMException is not
+          // instanceof Error, so ensureError would render it as "{}" in the
+          // report — the assertion below targets the report's message text.
+          const onAbort = () =>
+            reject(new Error("The operation was aborted. (AbortError)"));
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+        })
+    );
+
+    const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+    try {
+      // 256 entries hit the size limit, so the flush is enqueued
+      // immediately (not on the 5 s interval tick) and the abort signal —
+      // created at flush time — starts at t≈0.
+      for (let i = 0; i < 256; i++) {
+        transport.log(makeEntry(i), () => {});
+      }
+      // Wait out PUSH_TIMEOUT_MS (5 s) plus slack for the abort to surface
+      // through performFlush's catch into reportFailure.
+      await new Promise((resolve) => setTimeout(resolve, 5_500));
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy.mock.calls[0][0]).toMatch(/aborted/i);
+      expect(consoleErrorSpy.mock.calls[0][0]).toMatch(/dropped 256/);
+      expect(rejectionProbe).not.toHaveBeenCalled();
+    } finally {
+      process.removeListener("unhandledRejection", rejectionProbe);
+      jest.useRealTimers();
+      await transport.close();
+    }
+  }, 15_000);
+
   it("throttles repeated push failures: suppress in-window, re-warn with the count", async () => {
     jest.useFakeTimers();
     fetchMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.1:3100"));

@@ -38,6 +38,14 @@ export class LokiTransport extends TransportStream {
   private static readonly FLUSH_INTERVAL_MS = 5_000;
   private static readonly MAX_BATCH_ENTRIES = 256;
   private static readonly MAX_BATCH_BYTES = 64 * 1024;
+  // Per-push bound. Node's fetch (undici) has no app-level timeout by
+  // default — a black-holed Loki endpoint (SYN-accepted, never answered)
+  // would otherwise hold the in-flight push for undici's implicit ~300 s
+  // headersTimeout, and close() could spend its entire shutdown budget
+  // waiting on it. 5 s is long for a healthy LAN endpoint, short for a
+  // failure: an aborted push takes the same reportFailure path as any
+  // other (throttled warn, batch dropped, no retry loop).
+  private static readonly PUSH_TIMEOUT_MS = 5_000;
   // Re-warn cadence for push failures (the MqttNetworking.logThrottledRejection
   // pattern): first failure logged, repeats suppressed in the window, the
   // window's next log carries suppressedCount. Time-based so the warn rate
@@ -140,6 +148,7 @@ export class LokiTransport extends TransportStream {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
+        signal: AbortSignal.timeout(LokiTransport.PUSH_TIMEOUT_MS),
       });
       if (!response.ok) {
         throw new Error(`Loki push rejected with HTTP ${response.status}`);

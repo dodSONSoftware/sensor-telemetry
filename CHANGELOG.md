@@ -4,6 +4,11 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.2] — Bronze Falcon (2026-10-12)
+
+- The Loki log push is now bounded by a 5 s per-request timeout (`AbortSignal.timeout` on the push fetch): Node's fetch has no app-level timeout by default, so a black-holed Loki endpoint (SYN-accepted, never answered) previously held the in-flight push for undici's implicit ~300 s headersTimeout and could spend `close()`'s entire shutdown budget waiting on it. An aborted push takes the existing failure path — throttled warn, batch dropped, no retry loop, never unhandled
+- A transport regression test hangs a fetch until its passed signal aborts (and fails loudly if no signal is passed at all) and pins the bound: the push aborts at the timeout, the batch is reported dropped, and nothing rejects unhandled
+
 ## [4.4.1] — Bronze Falcon (2026-10-12)
 
 - V3 telemetry device routing now resolves the category with an own-property check instead of indexing the category table directly with the untrusted `device` value: a `device: "__proto__"` (or `"constructor"`) payload previously resolved to an inherited `Object.prototype` property instead of `undefined`, slipped past the unknown-device guard, and reached the category switch with a value matching no case — a silent drop that was neither logged nor counted in `mqtt_messages_dropped_total`. Such payloads now take the same path as any other unrecognized device: a throttled warning, a counted drop (`unknown_device`), and no publish
