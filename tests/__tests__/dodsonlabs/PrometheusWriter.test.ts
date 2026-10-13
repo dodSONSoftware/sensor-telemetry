@@ -252,6 +252,24 @@ describe("PrometheusWriter", () => {
     await until(() => writer.is_ready());
   });
 
+  // The HTTP audit throttle (60 s window in production) suppresses
+  // same-event repeats across this file's single shared writer, which the
+  // per-occurrence assertions below predate. Collapse the window for every
+  // test so each occurrence logs — the throttle itself is covered by the
+  // dedicated tests below, which set the window explicitly.
+  const HTTP_AUDIT_REWARN_INTERVAL_DEFAULT = 60_000;
+  const setHttpAuditInterval = (ms: number) => {
+    (
+      PrometheusWriter as unknown as { HTTP_AUDIT_REWARN_INTERVAL_MS: number }
+    ).HTTP_AUDIT_REWARN_INTERVAL_MS = ms;
+  };
+  beforeEach(() => {
+    setHttpAuditInterval(0);
+  });
+  afterEach(() => {
+    setHttpAuditInterval(HTTP_AUDIT_REWARN_INTERVAL_DEFAULT);
+  });
+
   afterAll(async () => {
     // close() resolves only once the server's close callback has fired, so
     // awaiting it guarantees the log line is already written — no polling.
@@ -1025,8 +1043,10 @@ describe("PrometheusWriter", () => {
 
   describe("query-string routing", () => {
     // req.url includes the query string, so matching routes against it
-    // 404s well-formed requests like /health?probe=20260929 and emits a
-    // route_not_found warn per hit.
+    // 404s well-formed requests like /health?probe=20260929. (A 404 emits a
+    // route_not_found warn, throttled per event — see the throttle test in
+    // this suite; the file-level hooks collapse the window so the
+    // per-occurrence assertions below keep their pre-throttle shape.)
     it("routes /health?x=1 to the health handler instead of 404", async () => {
       logger.write_warn.mockClear();
 
@@ -1195,6 +1215,59 @@ describe("PrometheusWriter", () => {
       expect(call).toBeDefined();
       expect(typeof call![2].requestId).toBe("string");
       expect(call![2].requestId).toBe("req-1, req-2");
+    });
+
+    it("throttles repeated 404 audit warns: first logged, repeats suppressed, re-warn carries the count", async () => {
+      // 404s are reachable unauthenticated, so one client can flood the
+      // route_not_found warn at request rate: the log channel applies the
+      // same first-occurrence / 60 s re-warn / suppressedCount throttle as
+      // the MQTT rejection path (the per-request truth stays in
+      // http_requests_total).
+      setHttpAuditInterval(HTTP_AUDIT_REWARN_INTERVAL_DEFAULT);
+      // Start from a clean throttle state: the shared writer has logged
+      // 404s in earlier tests, and its live-clock window would otherwise
+      // suppress this test's first hit.
+      (
+        writer as unknown as { httpAuditThrottle: Map<string, unknown> }
+      ).httpAuditThrottle.clear();
+      logger.write_warn.mockClear();
+      const baseNow = Date.now();
+      const dateNow = jest.spyOn(Date, "now").mockReturnValue(baseNow);
+      try {
+        const hit = () =>
+          fetch(`http://127.0.0.1:${port}/no-such-route`, {
+            headers: { Connection: "close" },
+          });
+        const warns = () =>
+          logger.write_warn.mock.calls.filter(
+            (c) => c[2]?.event === "route_not_found"
+          );
+
+        await hit();
+        expect(warns()).toHaveLength(1);
+        // First-occurrence shape is the pre-throttle shape: no
+        // suppressedCount.
+        expect((warns()[0][2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+
+        await hit();
+        await hit();
+        // Repeats within the window are suppressed.
+        expect(warns()).toHaveLength(1);
+
+        dateNow.mockReturnValue(baseNow + 61_000);
+        await hit();
+        // The window's re-warn fires with the count of suppressed repeats.
+        expect(warns()).toHaveLength(2);
+        expect((warns()[1][2] as Record<string, unknown>).suppressedCount).toBe(2);
+      } finally {
+        dateNow.mockRestore();
+        // The re-warn phase ran on a mocked clock 61 s in the future, so
+        // the state's lastWarnMs would outrun the real clock for the rest
+        // of the file's tests — clear it so later tests start fresh.
+        (
+          writer as unknown as { httpAuditThrottle: Map<string, unknown> }
+        ).httpAuditThrottle.clear();
+      }
     });
   });
 

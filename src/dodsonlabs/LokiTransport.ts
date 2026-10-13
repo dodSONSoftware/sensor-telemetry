@@ -64,6 +64,20 @@ export class LokiTransport extends TransportStream {
   private isClosed = false;
   private closePromise: Promise<void> | undefined;
   private failureState = { lastWarnMs: 0, suppressedCount: 0 };
+  // Any failed push (reported or suppressed) arms this; the next successful
+  // push reports the recovery once and disarms it, so "the failure warnings
+  // stopped" is distinguishable from "Loki is back".
+  private hasPushFailed = false;
+  // One-shot reports: a stuck endpoint must not re-log the same notice per
+  // batch or per dropped entry.
+  private closeTimeoutReported = false;
+  private droppedAfterCloseReported = false;
+  // Set when the close() drain settles on its own; the timeout race consults
+  // it to distinguish "flushed" from "gave up waiting".
+  private closeDrained = false;
+  // Entries claimed by an in-flight push: gone from `entries` but not yet
+  // delivered, so the close-timeout report counts them too.
+  private inFlightEntries = 0;
 
   constructor(options: LokiTransportOptions) {
     super();
@@ -79,6 +93,14 @@ export class LokiTransport extends TransportStream {
   public log(info: Record<PropertyKey, unknown>, callback: () => void): void {
     try {
       if (this.isClosed) {
+        // The Console transport still gets the line; only the Loki copy is
+        // gone. Report the asymmetry once, not per entry.
+        if (!this.droppedAfterCloseReported) {
+          this.droppedAfterCloseReported = true;
+          console.warn(
+            "[loki] transport is closed; this and any subsequent entries will only reach the console"
+          );
+        }
         return;
       }
       const line =
@@ -94,9 +116,13 @@ export class LokiTransport extends TransportStream {
       ) {
         this.enqueueFlush();
       }
-    } catch {
+    } catch (err) {
       // Never throw into the winston stream: a transport exception would
-      // surface as an uncaught exception in the logger's write path.
+      // surface as an uncaught exception in the logger's write path — but a
+      // silent drop leaves no trace anywhere either, so route it through the
+      // same throttled direct-console report as a push failure (never the
+      // winston logger: recursion).
+      this.reportFailure(err, 0, "failed to buffer a log entry");
     } finally {
       // Synchronous callback — no backpressure; the bounded batch IS the
       // flow control.
@@ -129,6 +155,7 @@ export class LokiTransport extends TransportStream {
     const batch = this.entries;
     this.entries = [];
     this.byteLength = 0;
+    this.inFlightEntries = batch.length;
     try {
       // The push API wants { streams: [{ stream, values }] } — a bare
       // { stream, values } top level is a 422 ("at least one valid stream is
@@ -155,20 +182,30 @@ export class LokiTransport extends TransportStream {
       }
       // The response carries no data we need; release the socket.
       await response.body?.cancel().catch(() => undefined);
+      // First success after any failure is the recovery point: report it
+      // once, so operators can tell "Loki is back" from "nothing to push".
+      if (this.hasPushFailed) {
+        this.hasPushFailed = false;
+        console.info("[loki] push to this endpoint succeeded after earlier failure(s)");
+      }
     } catch (err) {
       this.reportFailure(err, batch.length);
+    } finally {
+      this.inFlightEntries = 0;
     }
   }
 
   /**
    * Flush any pending batch and stop the interval. Bounded (resolves within
-   * ~timeoutMs even if the push hangs), idempotent (a second close races the
+   * ~timeoutMs even if the push hangs — when the drain outlives the budget
+   * the unflushed remainder is reported through a one-shot console.error
+   * instead of being silently lost), idempotent (a second close races the
    * same cached promise), and never rejects: index.ts awaits it last on
    * shutdown and a throwing close would mask the real shutdown error.
    */
   public close(timeoutMs: number = 2_000): Promise<void> {
     if (this.closePromise) {
-      return Promise.race([this.closePromise, this.closeTimeout(timeoutMs)]);
+      return this.withCloseTimeout(this.closePromise, timeoutMs);
     }
     this.isClosed = true;
     if (this.flushTimer !== undefined) {
@@ -188,8 +225,37 @@ export class LokiTransport extends TransportStream {
         this.enqueueFlush();
         await this.flushChain;
       }
+      // The drain settled on its own: the timeout race below can then tell
+      // "flushed" from "gave up waiting".
+      this.closeDrained = true;
     })();
-    return Promise.race([this.closePromise, this.closeTimeout(timeoutMs)]);
+    return this.withCloseTimeout(this.closePromise, timeoutMs);
+  }
+
+  /**
+   * Bound the close wait. If the drain does not settle within timeoutMs the
+   * race resolves anyway (close() must stay bounded), but the loss must not
+   * be silent: whatever is still queued — plus a possibly in-flight batch —
+   * may never reach Loki, and shutdown is exactly when the interesting
+   * lines are. One report per transport: a second close() racing the same
+   * drain must not re-report, and a late drain settling after the report
+   * must not retract it.
+   */
+  private withCloseTimeout(drain: Promise<void>, timeoutMs: number): Promise<void> {
+    return Promise.race([drain, this.closeTimeout(timeoutMs)]).then(() => {
+      if (this.closeDrained || this.closeTimeoutReported) {
+        return;
+      }
+      this.closeTimeoutReported = true;
+      const queued = this.entries.length;
+      const inFlight = this.inFlightEntries;
+      const total = queued + inFlight;
+      console.error(
+        `[loki] close timed out after ${timeoutMs}ms with ${total} entr${
+          total === 1 ? "y" : "ies"
+        } undelivered (${queued} queued, ${inFlight} in flight) — they may not have reached Loki`
+      );
+    });
   }
 
   private closeTimeout(timeoutMs: number): Promise<void> {
@@ -209,7 +275,13 @@ export class LokiTransport extends TransportStream {
    * the window is logged with its dropped-entry count; repeats are
    * suppressed and the window's next log carries suppressedCount.
    */
-  private reportFailure(err: unknown, droppedEntries: number): void {
+  private reportFailure(
+    err: unknown,
+    droppedEntries: number,
+    context: string = "push to this endpoint failed"
+  ): void {
+    // Every failure arms the recovery signal, reported or suppressed.
+    this.hasPushFailed = true;
     const now = Date.now();
     const state = this.failureState;
     if (now - state.lastWarnMs >= LokiTransport.FAILURE_REWARN_INTERVAL_MS) {
@@ -220,7 +292,7 @@ export class LokiTransport extends TransportStream {
       const dropped = droppedEntries > 0 ? `; dropped ${droppedEntries} entrie(s)` : "";
       const suppressedNote =
         suppressed > 0 ? ` (${suppressed} earlier failure(s) suppressed)` : "";
-      console.error(`[loki] push to this endpoint failed: ${detail}${dropped}${suppressedNote}`);
+      console.error(`[loki] ${context}: ${detail}${dropped}${suppressedNote}`);
     } else {
       state.suppressedCount++;
     }

@@ -189,6 +189,19 @@ describe("PrometheusWriter fingerprint-collision fallbacks (stubbed hash)", () =
     );
     // ...and count once for the episode, not once per message.
     expect(counterValue("sensor_sources_rejected_total", metrics)).toBe(1);
+
+    // ...and log an ERROR once for the episode (two messages, one line):
+    // if this branch ever fires, two real sources are being merged into
+    // one identity — operator-visible in the log, not just a counter.
+    const fingerprintErrors = logger.write_error.mock.calls
+      .map((call) => call[2] as Record<string, unknown> | undefined)
+      .filter((meta) => meta?.event === "sensor_source_fingerprint_collision");
+    expect(fingerprintErrors).toHaveLength(1);
+    expect(fingerprintErrors[0]).toMatchObject({
+      logType: "sensor",
+      originalSource: "a#b",
+      finalLabel: "unknown_source",
+    });
   });
 
   it("maps a disambiguated-level firmware collision to the fallback and counts every occurrence", async () => {
@@ -206,5 +219,17 @@ describe("PrometheusWriter fingerprint-collision fallbacks (stubbed hash)", () =
     expect(writer.admitFirmwareVersion("fw1.0#")).toBe("unknown_firmware");
     metrics = await getMetrics();
     expect(counterValue("sensor_firmware_versions_rejected_total", metrics)).toBe(2);
+
+    // The error line is not per-occurrence (the counter is): once per
+    // process is enough for an effectively unreachable branch.
+    const fingerprintErrors = logger.write_error.mock.calls
+      .map((call) => call[2] as Record<string, unknown> | undefined)
+      .filter((meta) => meta?.event === "sensor_firmware_fingerprint_collision");
+    expect(fingerprintErrors).toHaveLength(1);
+    expect(fingerprintErrors[0]).toMatchObject({
+      logType: "sensor",
+      originalFirmware: "fw1.0#",
+      finalLabel: "unknown_firmware",
+    });
   });
 });

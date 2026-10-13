@@ -274,4 +274,6 @@ export type MqttMessageDropReason =
   | "health_invalid_payload"
   | "telemetry_field_missing"
   | "telemetry_out_of_range"
-  | "handling_error";
+  | "handling_error"
+  | "forwarded_log_disabled"
+  | "forwarded_log_below_threshold";

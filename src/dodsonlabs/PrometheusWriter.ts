@@ -11,7 +11,13 @@ import type { IntervalHistogram } from "perf_hooks";
 import { collectDefaultMetrics, register, Gauge, Counter } from "prom-client";
 import { serviceMetadata } from "../common/global";
 import { isJsonObject } from "./Interfaces";
-import type { ILogger, IMqttNetworking, JsonObject, MqttMessageDropReason } from "./Interfaces";
+import type {
+    ILogger,
+    IMqttNetworking,
+    JsonObject,
+    LogMetadata,
+    MqttMessageDropReason,
+} from "./Interfaces";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
@@ -230,6 +236,19 @@ export class PrometheusWriter {
     // single warn line (the counters carry the ongoing signal).
     private sourceCapExceededWarned = false;
     private firmwareCapExceededWarned = false;
+    // The fingerprint-collision fallbacks (effectively unreachable 8-hex
+    // SHA-256 collisions at the disambiguated-label level) are counted by
+    // contract; this flag additionally logs the firmware occurrence once
+    // per process. The source branch rides the rejection-episode dedupe
+    // instead (see admitSource).
+    private firmwareFingerprintCollisionLogged = false;
+    // Per-event throttle state for the per-request HTTP audit warns (see
+    // logThrottledHttpWarning): one client can reach those routes
+    // unauthenticated, so warn-per-request would let a single client own
+    // the log channel. Mutable (not readonly) by convention so the test
+    // suites can collapse the window; production code never reassigns it.
+    private static HTTP_AUDIT_REWARN_INTERVAL_MS = 60_000;
+    private readonly httpAuditThrottle = new Map<string, { lastWarnMs: number; suppressedCount: number }>();
     // The blank/all-invalid-source warning is resolved independently by
     // every metric setter (one health message calls admitSource 17+ times),
     // so without a latch a single sustained condition would flood the WARN
@@ -601,7 +620,8 @@ export class PrometheusWriter {
                 const requestIdForLog = requestId === undefined
                     ? undefined
                     : truncateForLog(requestId);
-                this.logger.write_warn(
+                this.logThrottledHttpWarning(
+                    "route_not_found",
                     "prometheus/routeNotFound",
                     "HTTP route not found",
                     {
@@ -667,7 +687,8 @@ export class PrometheusWriter {
             } catch {
                 try { socket.destroy(); } catch { /* nothing left to do */ }
             }
-            this.logger.write_warn(
+            this.logThrottledHttpWarning(
+                "http_client_error",
                 "prometheus/clientError",
                 `HTTP protocol error before request parsing: ${truncateForLog(err.message)}`,
                 {
@@ -764,7 +785,8 @@ export class PrometheusWriter {
         const expected = Buffer.from(this.configToken, "utf8");
         const actual = Buffer.from(provided, "utf8");
         if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-            this.logger.write_warn(
+            this.logThrottledHttpWarning(
+                "config_token_rejected",
                 "prometheus/configTokenRejected",
                 "Rejected config request with missing or invalid x-config-token",
                 {
@@ -940,7 +962,8 @@ export class PrometheusWriter {
     private logCorsOriginRejected(req: http.IncomingMessage): void {
         const rawOrigin = req.headers.origin;
         const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
-        this.logger.write_warn(
+        this.logThrottledHttpWarning(
+            "cors_origin_rejected",
             "prometheus/corsOriginRejected",
             "Rejected browser request from an origin not on the CORS allowlist",
             {
@@ -956,6 +979,50 @@ export class PrometheusWriter {
                 remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
                 statusCode: 403,
             }
+        );
+    }
+
+    /**
+     * Throttled variant for per-request HTTP audit warns: the same
+     * first-occurrence / re-warn / suppressedCount semantics as
+     * MqttNetworking.logThrottledRejection, keyed by the fixed event name.
+     * The MQTT side needed it so a hostile publisher cannot flood the log
+     * channel; the HTTP audit routes (404 probes, bad tokens, disallowed
+     * origins, malformed requests) are reachable UNAUTHENTICATED, so the
+     * same client-flood vector applies there. The per-request truth stays
+     * in http_requests_total; the first logged line carries the full
+     * per-occurrence detail, and the window's re-warn proves the rate with
+     * suppressedCount and the most recent occurrence's metadata.
+     */
+    private logThrottledHttpWarning(
+        event: string,
+        originator: string,
+        message: string,
+        metadata: LogMetadata
+    ): void {
+        const now = Date.now();
+        const state = this.httpAuditThrottle.get(event);
+        if (state === undefined) {
+            this.httpAuditThrottle.set(event, { lastWarnMs: now, suppressedCount: 0 });
+            this.logger.write_warn(originator, message, metadata);
+            return;
+        }
+        if (now - state.lastWarnMs < PrometheusWriter.HTTP_AUDIT_REWARN_INTERVAL_MS) {
+            // Within the cadence: suppressed — count it for the re-warn.
+            state.suppressedCount++;
+            return;
+        }
+        // The interval elapsed. The re-warned occurrence is logged, not
+        // suppressed, so only the counted suppressions ride along (and only
+        // when there were any — the plain shape is otherwise kept so
+        // existing queries and alerting keep working).
+        state.lastWarnMs = now;
+        const suppressed = state.suppressedCount;
+        state.suppressedCount = 0;
+        this.logger.write_warn(
+            originator,
+            message,
+            suppressed > 0 ? { ...metadata, suppressedCount: suppressed } : metadata
         );
     }
 
@@ -976,14 +1043,14 @@ export class PrometheusWriter {
                 bootdate: this.startDate
             },
             routes: [
-                { route: "/about", description: "Returns service information and available commands." },
+                { route: "/about", description: "Returns service information and the list of available API endpoints." },
                 { route: "/endpoints", description: "Returns detailed information about each API endpoint." },
                 { route: "/health", description: "Liveness check endpoint (always 200 while the process is responsive)." },
                 { route: "/ready", description: "Readiness check endpoint (503 when the MQTT client is not connected or a subscription is not active)." },
                 { route: "/metrics", description: "Prometheus metrics endpoint." },
                 { route: "/read-config", description: "Reads the current configuration." },
                 { route: "/write-config", description: "Validates and persists the configuration; runtime-effective settings are applied immediately, restart-only settings take effect on the next restart." },
-                { route: "/reload-config", description: "Reloads the configuration from disk without changing the payload." }
+                { route: "/reload-config", description: "Reloads the configuration from disk and applies the runtime-effective settings; the file on disk is not modified." }
             ]
         };
         this.sendJson(res, 200, aboutInfo);
@@ -1029,7 +1096,7 @@ export class PrometheusWriter {
                 verb: "GET",
                 requestBody: "None",
                 responseBody: "Prometheus metrics in text format",
-                description: "Returns Prometheus metrics for scraped devices."
+                description: "Returns all metrics exposed by this service (sensor telemetry, sensor health, MQTT status, and service-level metrics) in Prometheus text format for scraping."
             },
             {
                 name: "Read Config",
@@ -1551,7 +1618,24 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             return;
         }
         const intervalMs = Math.min(60_000, Math.max(10_000, (newThreshold / 2) * 1000));
-        this.staleSweepTimer = setInterval(() => this.sweepStaleSources(), intervalMs);
+        this.staleSweepTimer = setInterval(() => {
+            // The sweep runs unattended on a timer: a throw would otherwise
+            // escape to uncaughtException and take the whole service down
+            // over a maintenance pass. Log and keep sweeping.
+            try {
+                this.sweepStaleSources();
+            } catch (error) {
+                this.logger.write_error(
+                    "prometheus/staleSourceSweep",
+                    `Stale-source sweep pass failed: ${ensureError(error).message}`,
+                    {
+                        event: "stale_source_sweep_error",
+                        logType: "audit",
+                        error,
+                    }
+                );
+            }
+        }, intervalMs);
         this.logger.write_info(
             "prometheus/staleSourceRemoval",
             `Stale source removal enabled — sources idle for more than ${newThreshold}s have their data gauges removed`,
@@ -1895,6 +1979,22 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                 }
                 this.rejectedSources.add(label);
                 this.prometheus_counter_sources_rejected?.inc();
+                // The counter makes the fallback observable in Prometheus;
+                // the error line makes it visible in the log on the first
+                // occurrence of each rejection episode (episode-deduped
+                // like the count above). If this ever fires, the 8-hex
+                // disambiguation space is exhausted and two real sources
+                // are being merged into one identity.
+                this.logger.write_error(
+                    "prometheus/sourceFingerprintCollision",
+                    `Source '${truncateForLog(source)}' collides at the fingerprint level with the label '${label}' owned by another source — using the 'unknown_source' fallback`,
+                    {
+                        event: "sensor_source_fingerprint_collision",
+                        logType: "sensor",
+                        originalSource: truncateForLog(source),
+                        finalLabel: "unknown_source",
+                    }
+                );
             }
             return "unknown_source";
         }
@@ -2049,6 +2149,23 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             // observable in sensor_firmware_versions_rejected_total if it
             // ever fires instead of being silent.
             this.prometheus_counter_firmware_versions_rejected?.inc();
+            // The counter is per-occurrence by contract; the error line is
+            // not — once per process is enough for an effectively
+            // unreachable branch (this branch has no rejection-episode
+            // structure to ride for dedupe, unlike the source twin).
+            if (!this.firmwareFingerprintCollisionLogged) {
+                this.firmwareFingerprintCollisionLogged = true;
+                this.logger.write_error(
+                    "prometheus/firmwareFingerprintCollision",
+                    `Firmware version '${truncateForLog(firmwareVersion)}' collides at the fingerprint level with the label '${label}' owned by another version — using the 'unknown_firmware' fallback`,
+                    {
+                        event: "sensor_firmware_fingerprint_collision",
+                        logType: "sensor",
+                        originalFirmware: truncateForLog(firmwareVersion),
+                        finalLabel: "unknown_firmware",
+                    }
+                );
+            }
             return "unknown_firmware";
         }
         if (this.admittedFirmwareVersions.has(label)) {

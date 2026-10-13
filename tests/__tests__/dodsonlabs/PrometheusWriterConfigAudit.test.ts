@@ -121,6 +121,24 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     await until(() => writer.is_ready());
   });
 
+  // The HTTP audit throttle (60 s window in production) would suppress the
+  // second same-event occurrence on this file's shared writer, which the
+  // per-occurrence assertions below predate. Collapse the window for every
+  // test; the throttle semantics themselves are covered in
+  // PrometheusWriter.test.ts / PrometheusWriterConfigToken.test.ts.
+  const HTTP_AUDIT_REWARN_INTERVAL_DEFAULT = 60_000;
+  const setHttpAuditInterval = (ms: number) => {
+    (
+      PrometheusWriter as unknown as { HTTP_AUDIT_REWARN_INTERVAL_MS: number }
+    ).HTTP_AUDIT_REWARN_INTERVAL_MS = ms;
+  };
+  beforeEach(() => {
+    setHttpAuditInterval(0);
+  });
+  afterEach(() => {
+    setHttpAuditInterval(HTTP_AUDIT_REWARN_INTERVAL_DEFAULT);
+  });
+
   afterAll(async () => {
     writer.close();
     await until(() =>

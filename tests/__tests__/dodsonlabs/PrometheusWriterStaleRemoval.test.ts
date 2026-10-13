@@ -462,6 +462,49 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     expect(await seriesValue("sensor_last_seen_timestamp_seconds", "unknown_source")).toBeDefined();
   });
 
+  it("logs and survives a sweep pass that throws (guard: no uncaughtException)", async () => {
+    // The sweep runs unattended on a timer: without the try/catch guard a
+    // throw escapes to uncaughtException, which index.ts treats as fatal —
+    // the whole telemetry service would go down over a maintenance pass.
+    // Force the failure by making the first data gauge's remove() throw,
+    // then verify the error is logged (with the pass's error) and the next
+    // pass after recovery still evicts.
+    commitConfig({ staleSourceRemovalSecs: 3600 });
+    const internals = writer as unknown as {
+      prometheus_SourceDataGauges: Array<{
+        remove: (labels: Record<string, string>) => void;
+      }>;
+    };
+    const originalRemove = internals.prometheus_SourceDataGauges[0].remove;
+    internals.prometheus_SourceDataGauges[0].remove = () => {
+      throw new Error("simulated gauge failure");
+    };
+
+    writer.mark_source_seen("sweep-err");
+    writer.set_cpu_temp("sweep-err", 22);
+
+    // The first pass strictly past the threshold evicts sweep-err and
+    // throws mid-eviction (the map update never runs, so the source is
+    // still tracked and the failure retries next pass).
+    jest.advanceTimersByTime(3_660_000);
+
+    const sweepErrors = logger.write_error.mock.calls
+      .map((call) => call[2] as Record<string, unknown> | undefined)
+      .filter((meta) => meta?.event === "stale_source_sweep_error");
+    expect(sweepErrors).toHaveLength(1);
+    expect(sweepErrors[0]).toMatchObject({ logType: "audit" });
+    expect((sweepErrors[0]!.error as Error).message).toBe("simulated gauge failure");
+    // The in-flight series are untouched by the failed pass.
+    expect(await seriesValue("sensor_health_cpu_temperature_c", "sweep-err")).toBe(22);
+
+    // Recovery: with remove() restored, the next pass finishes the
+    // eviction — the sweep kept running.
+    internals.prometheus_SourceDataGauges[0].remove = originalRemove;
+    jest.advanceTimersByTime(60_000);
+    expect(await seriesValue("sensor_last_seen_timestamp_seconds", "sweep-err")).toBeUndefined();
+    expect(evictionWarnings().at(-1)).toMatchObject({ source: "sweep-err" });
+  });
+
   it("clears the sweep timer on close() and never fires again", async () => {
     // Last test in the file: close() consumes the shared writer (prom-client's
     // global registry forbids a second writer per process).

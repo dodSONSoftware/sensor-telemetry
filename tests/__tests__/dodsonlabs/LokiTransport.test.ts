@@ -136,18 +136,25 @@ describe("LokiTransport", () => {
   });
 
   it("close() flushes a pending batch and is idempotent", async () => {
-    const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
-    transport.log(makeEntry(0), () => {});
-    const first = transport.close();
-    const second = transport.close();
-    await Promise.all([first, second]);
+    // A post-close log triggers the one-shot console-only notice (covered
+    // by its own test below); spy so it does not pollute this output.
+    const consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+      transport.log(makeEntry(0), () => {});
+      const first = transport.close();
+      const second = transport.close();
+      await Promise.all([first, second]);
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(pushedBatches(fetchMock)[0].body.streams[0].values).toHaveLength(1);
-    // A log after close is dropped, not queued.
-    transport.log(makeEntry(1), () => {});
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(pushedBatches(fetchMock)[0].body.streams[0].values).toHaveLength(1);
+      // A log after close is dropped, not queued.
+      transport.log(makeEntry(1), () => {});
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleWarnSpy.mockRestore();
+    }
   });
 
   it("a failed push drops the batch, warns once, and never rejects unhandled", async () => {
@@ -282,6 +289,114 @@ describe("LokiTransport", () => {
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     } finally {
       await transport.close();
+    }
+  });
+
+  it("close() reports (one-shot) when the drain outlives the budget", async () => {
+    // A black-holed endpoint: the in-flight push never settles within the
+    // close budget, so the timeout race wins — and the loss of the pending
+    // batch must be reported instead of silent (shutdown is exactly when
+    // the interesting lines are).
+    const neverSettles = new Promise<Response>(() => {
+      /* the push never resolves */
+    });
+    fetchMock.mockReturnValue(neverSettles);
+
+    const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+    transport.log(makeEntry(0), () => {});
+    transport.log(makeEntry(1), () => {});
+
+    await transport.close(50); // resolves via the timeout race, not the drain
+
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const line = consoleErrorSpy.mock.calls[0][0] as string;
+    expect(line).toContain("[loki] close timed out after 50ms");
+    expect(line).toContain("2 entries undelivered");
+    expect(line).toContain("(0 queued, 2 in flight)");
+    expect(line).toContain("may not have reached Loki");
+
+    // A second close racing the same drain must not re-report.
+    await transport.close(50);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports recovery once: the first success after earlier failures", async () => {
+    const consoleInfoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+    // First push fails, the rest succeed.
+    fetchMock
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED 10.0.0.1:3100"))
+      .mockResolvedValue(okResponse());
+
+    const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+    try {
+      // Flush #1 (256 entries trips the size limit): fails.
+      for (let i = 0; i < 256; i++) transport.log(makeEntry(i), () => {});
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      expect(consoleInfoSpy).not.toHaveBeenCalled();
+
+      // Flush #2: succeeds — the recovery line fires exactly once.
+      for (let i = 0; i < 256; i++) transport.log(makeEntry(i + 256), () => {});
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
+      expect(consoleInfoSpy.mock.calls[0][0] as string).toContain(
+        "[loki] push to this endpoint succeeded after earlier failure(s)"
+      );
+
+      // Flush #3: a plain success must not repeat the recovery line.
+      for (let i = 0; i < 256; i++) transport.log(makeEntry(i + 512), () => {});
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleInfoSpy.mockRestore();
+      await transport.close();
+    }
+  });
+
+  it("reports a throwing log() through the throttled failure path, not silently", () => {
+    // log() cannot throw into the winston stream, but a silent drop leaves
+    // no trace anywhere: the catch must reuse the direct-console report
+    // (a hostile record with a throwing getter reaches it via
+    // JSON.stringify).
+    const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+    const hostile: Record<PropertyKey, unknown> = { level: "info" };
+    Object.defineProperty(hostile, "boom", {
+      enumerable: true,
+      get: () => {
+        throw new Error("hostile serialization");
+      },
+    });
+
+    transport.log(hostile, () => {});
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const line = consoleErrorSpy.mock.calls[0][0] as string;
+    expect(line).toContain("[loki] failed to buffer a log entry");
+    expect(line).toContain("hostile serialization");
+
+    // Same 60 s failure throttle as push failures: a second throw in the
+    // window is counted, not logged.
+    transport.log(hostile, () => {});
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+
+    return transport.close();
+  });
+
+  it("warns once when entries arrive after close() (console-only tail)", async () => {
+    const consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const transport = new LokiTransport({ url: PUSH_URL, labels: LABELS });
+      await transport.close();
+
+      // The Console transport still gets these lines; only the Loki copy
+      // is gone. The asymmetry is reported once, not per entry.
+      transport.log(makeEntry(0), () => {});
+      transport.log(makeEntry(1), () => {});
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      const line = consoleWarnSpy.mock.calls[0][0] as string;
+      expect(line).toContain("[loki] transport is closed");
+      expect(line).toContain("will only reach the console");
+    } finally {
+      consoleWarnSpy.mockRestore();
     }
   });
 });

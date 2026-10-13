@@ -106,6 +106,24 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
     await until(() => writer.is_ready());
   });
 
+  // The HTTP audit throttle (60 s window in production) would suppress the
+  // later same-event occurrences on this file's shared writer, which the
+  // per-occurrence assertions below predate. Collapse the window for every
+  // test; the throttle semantics themselves are covered by the dedicated
+  // test in the /reload-config suite.
+  const HTTP_AUDIT_REWARN_INTERVAL_DEFAULT = 60_000;
+  const setHttpAuditInterval = (ms: number) => {
+    (
+      PrometheusWriter as unknown as { HTTP_AUDIT_REWARN_INTERVAL_MS: number }
+    ).HTTP_AUDIT_REWARN_INTERVAL_MS = ms;
+  };
+  beforeEach(() => {
+    setHttpAuditInterval(0);
+  });
+  afterEach(() => {
+    setHttpAuditInterval(HTTP_AUDIT_REWARN_INTERVAL_DEFAULT);
+  });
+
   afterAll(async () => {
     writer.close();
     await until(() =>
@@ -250,6 +268,52 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
         success: false,
         message: "missing or invalid x-config-token",
       });
+    });
+
+    it("throttles repeated token-rejection warns: first logged, repeats suppressed, re-warn carries the count", async () => {
+      // A bad token is reachable unauthenticated at request rate: the
+      // config_token_rejected audit applies the same first-occurrence /
+      // 60 s re-warn / suppressedCount throttle as the other per-request
+      // HTTP audit warns (the per-request truth stays in
+      // http_requests_total).
+      setHttpAuditInterval(HTTP_AUDIT_REWARN_INTERVAL_DEFAULT);
+      // Start from a clean throttle state: the shared writer has logged
+      // token rejections in earlier tests, and its live-clock window would
+      // otherwise suppress this test's first hit.
+      (
+        writer as unknown as { httpAuditThrottle: Map<string, unknown> }
+      ).httpAuditThrottle.clear();
+      logger.write_warn.mockClear();
+      const baseNow = Date.now();
+      const dateNow = jest.spyOn(Date, "now").mockReturnValue(baseNow);
+      try {
+        const hit = () => get("/reload-config");
+        const rejects = () =>
+          logger.write_warn.mock.calls.filter(
+            (c) => c[2]?.event === "config_token_rejected"
+          );
+
+        await hit();
+        expect(rejects()).toHaveLength(1);
+        expect((rejects()[0][2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+
+        await hit();
+        // Repeats within the window are suppressed.
+        expect(rejects()).toHaveLength(1);
+
+        dateNow.mockReturnValue(baseNow + 61_000);
+        await hit();
+        expect(rejects()).toHaveLength(2);
+        expect((rejects()[1][2] as Record<string, unknown>).suppressedCount).toBe(1);
+      } finally {
+        dateNow.mockRestore();
+        // The re-warn phase ran on a mocked clock 61 s in the future, so
+        // the state's lastWarnMs would outrun the real clock for the rest
+        // of the file's tests — clear it so later tests start fresh.
+        (
+          writer as unknown as { httpAuditThrottle: Map<string, unknown> }
+        ).httpAuditThrottle.clear();
+      }
     });
   });
 

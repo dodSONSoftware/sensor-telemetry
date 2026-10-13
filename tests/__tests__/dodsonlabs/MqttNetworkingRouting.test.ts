@@ -3032,3 +3032,141 @@ describe("mqtt pipeline application metrics (received/dropped/reconnect/errors)"
     expect(prom.record_mqtt_reconnect).not.toHaveBeenCalled();
   });
 });
+
+describe("suppressed forwarded-log drops are counted and logged (throttled, debug)", () => {
+  // forwardSensorLogs=false (either gate) or a forwardSensorLogsLevel above
+  // the sensor's level used to be a pure dead zone: the message was
+  // received, counted in nothing, and logged nowhere — "my sensor logs
+  // never show up" was undiagnosable from the service. Both gates now
+  // count the drop with a fixed reason and log at debug through the
+  // per-event throttle (first occurrence always, re-warn with
+  // suppressedCount) — a configuration outcome, not a fault, hence debug.
+
+  const LOG_DOC = { message_type: "log", source: "src-1", level: "debug", message: "m" };
+
+  function build(
+    config: Partial<z.infer<typeof configSchema>>
+  ): {
+    logger: MockLogger & ILogger;
+    prom: MockProm;
+    send: (topic: string, doc: Record<string, unknown>) => void;
+  } {
+    const logger = createMockLogger();
+    const networking = new MqttNetworking(
+      { ...baseConfig, ...config } as z.infer<typeof configSchema>,
+      logger
+    );
+    const onMock = (
+      networking as unknown as { mqtt_client: { on: jest.Mock } }
+    ).mqtt_client.on;
+    const messageCall = onMock.mock.calls
+      .filter((call) => call[0] === "message")
+      .at(-1);
+    if (!messageCall) {
+      throw new Error("MqttNetworking did not register a 'message' handler");
+    }
+    const handler = messageCall[1] as (
+      topic: string,
+      payload: Buffer,
+      packet: unknown
+    ) => void;
+    return {
+      logger,
+      prom: (networking as unknown as { promWriter: MockProm }).promWriter,
+      send: (topic: string, doc: Record<string, unknown>) =>
+        handler(topic, Buffer.from(JSON.stringify(doc)), {}),
+    };
+  }
+
+  it("counts and logs (debug) a log message dropped while forwardSensorLogs is disabled", () => {
+    // Legacy path: message_type "log" on the telemetry topic.
+    const { prom, logger, send } = build({ forwardSensorLogs: false });
+    send(baseConfig.mqttTopicTelemetry, LOG_DOC);
+
+    expect(prom.record_mqtt_message_dropped).toHaveBeenCalledWith(
+      "forwarded_log_disabled"
+    );
+    const debug = logger.write_debug.mock.calls.find(
+      (c) => c[2]?.event === "forwarded_log_disabled"
+    );
+    expect(debug).toBeDefined();
+    expect(debug?.[2]).toMatchObject({ logType: "sensor", source: "src-1" });
+    // First-occurrence shape: no suppressedCount.
+    expect((debug?.[2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+    // The message is not forwarded.
+    expect(
+      logger.write_info.mock.calls.filter((c) => c[0] === "networking/logInfo")
+    ).toHaveLength(0);
+  });
+
+  it("counts and logs (debug) a V3 log-topic message dropped while forwarding is disabled", () => {
+    // V3 path: a log message on the dedicated log topic.
+    const { prom, logger, send } = build({
+      forwardSensorLogs: false,
+      mqttTopicLog: "iot/v3/log",
+    });
+    send("iot/v3/log", { source: "src-v3", level: "info", message: "m" });
+
+    expect(prom.record_mqtt_message_dropped).toHaveBeenCalledWith(
+      "forwarded_log_disabled"
+    );
+    const debug = logger.write_debug.mock.calls.find(
+      (c) => c[2]?.event === "forwarded_log_disabled"
+    );
+    expect(debug).toBeDefined();
+    expect(
+      logger.write_info.mock.calls.filter((c) => c[0] === "networking/logInfo")
+    ).toHaveLength(0);
+  });
+
+  it("counts and logs (debug) a log message below the forwardSensorLogsLevel threshold", () => {
+    const { prom, logger, send } = build({ forwardSensorLogsLevel: "warn" });
+    send(baseConfig.mqttTopicTelemetry, LOG_DOC);
+
+    expect(prom.record_mqtt_message_dropped).toHaveBeenCalledWith(
+      "forwarded_log_below_threshold"
+    );
+    const debug = logger.write_debug.mock.calls.find(
+      (c) => c[2]?.event === "forwarded_log_below_threshold"
+    );
+    expect(debug).toBeDefined();
+    expect(debug?.[2]).toMatchObject({
+      logType: "sensor",
+      source: "src-1",
+      sensorLevel: "debug",
+    });
+    expect(
+      logger.write_info.mock.calls.filter((c) => c[0] === "networking/logInfo")
+    ).toHaveLength(0);
+  });
+
+  it("throttles the suppression diagnostics per event, like the rejection warns", () => {
+    // One instance, several messages: the per-event throttle state is
+    // shared, so repeats within the 60 s window are counted, not logged.
+    const { logger, send } = build({ forwardSensorLogs: false });
+    const sendLog = () => send(baseConfig.mqttTopicTelemetry, LOG_DOC);
+    const debugs = () =>
+      logger.write_debug.mock.calls.filter(
+        (c) => c[2]?.event === "forwarded_log_disabled"
+      );
+
+    const dateNow = jest.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      sendLog();
+      expect(debugs()).toHaveLength(1);
+
+      sendLog();
+      sendLog();
+      // Repeats within the window are suppressed.
+      expect(debugs()).toHaveLength(1);
+
+      dateNow.mockReturnValue(1_000_000 + 61_000);
+      sendLog();
+      // The window's re-warn fires with the count of suppressed repeats.
+      expect(debugs()).toHaveLength(2);
+      expect((debugs()[1][2] as Record<string, unknown>).suppressedCount).toBe(2);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+});

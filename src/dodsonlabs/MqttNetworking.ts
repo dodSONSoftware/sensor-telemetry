@@ -888,6 +888,24 @@ export class MqttNetworking implements IMqttNetworking {
                 );
                 if (this.forward_sensor_logs) {
                     this.handle_mqtt_message_log(json_doc);
+                } else {
+                    // The message arrived on a subscribed topic but the
+                    // config says not to forward it: count it as a drop and
+                    // make the suppression visible (throttled per event, at
+                    // debug) — a disabled forwarder must not be an
+                    // undiagnosable dead zone.
+                    this.promWriter.record_mqtt_message_dropped("forwarded_log_disabled");
+                    this.logThrottledRejection(
+                        "debug",
+                        "networking/onMessage",
+                        "forwarded_log_disabled",
+                        "Sensor log message received while forwardSensorLogs is disabled, dropping",
+                        {
+                            event: "forwarded_log_disabled",
+                            logType: "sensor",
+                            topic: topicForLog,
+                        }
+                    );
                 }
             } else if (this.mqtt_topic_health && topicLower === healthTopicLower) {
                 // Message from health topic (V3) - publish health metrics
@@ -985,7 +1003,9 @@ export class MqttNetworking implements IMqttNetworking {
     // ******** PROCESSING MQTT MESSAGES
 
     /**
-     * Log a per-message rejection warning, throttled per EVENT (see the
+     * Log a per-message rejection warning — or, at debug level, a
+     * suppressed-forwarded-log diagnostic (forwarded_log_disabled /
+     * forwarded_log_below_threshold) — throttled per EVENT (see the
      * rejectionWarnThrottle field for the state-bounding rationale):
      * - the FIRST occurrence since process start is always logged —
      *   operators must see a new problem immediately — with exactly the
@@ -1009,7 +1029,7 @@ export class MqttNetworking implements IMqttNetworking {
      * ongoing and how large it is.
      */
     private logThrottledRejection(
-        level: "warn" | "error",
+        level: "debug" | "warn" | "error",
         originator: string,
         event: string,
         message: string,
@@ -1044,19 +1064,22 @@ export class MqttNetworking implements IMqttNetworking {
 
     /**
      * Level dispatch for logThrottledRejection: keeps the throttle logic
-     * level-agnostic — mqtt_message_missing_type stays an ERROR, the
-     * other throttled rejections warn.
+     * level-agnostic — mqtt_message_missing_type stays an ERROR, the other
+     * throttled rejections warn, and the suppressed-forwarded-log
+     * diagnostics debug (they are a configuration outcome, not a fault).
      */
     private emitRejection(
-        level: "warn" | "error",
+        level: "debug" | "warn" | "error",
         originator: string,
         message: string,
         metadata: LogMetadata
     ): void {
         if (level === "error") {
             this.logger.write_error(originator, message, metadata);
-        } else {
+        } else if (level === "warn") {
             this.logger.write_warn(originator, message, metadata);
+        } else {
+            this.logger.write_debug(originator, message, metadata);
         }
     }
 
@@ -1105,6 +1128,27 @@ export class MqttNetworking implements IMqttNetworking {
         case "log":
             if (this.forward_sensor_logs) {
                 this.handle_mqtt_message_log(json_doc);
+            } else {
+                // Same observability as the V3 log-topic gate (onMessage):
+                // a disabled forwarder must not be an undiagnosable dead
+                // zone. Shares the forwarded_log_disabled throttle key, so
+                // a flood over either path stays bounded.
+                const disabledLogSource = sysFunc.getStringOrFiniteNumberField(json_doc, "source");
+                this.promWriter.record_mqtt_message_dropped("forwarded_log_disabled");
+                this.logThrottledRejection(
+                    "debug",
+                    "networking/handleMessage",
+                    "forwarded_log_disabled",
+                    "Sensor log message received while forwardSensorLogs is disabled, dropping",
+                    {
+                        event: "forwarded_log_disabled",
+                        logType: "sensor",
+                        source:
+                            disabledLogSource === undefined
+                                ? undefined
+                                : sysFunc.truncateForLog(disabledLogSource),
+                    }
+                );
             }
             break;
 
@@ -1228,9 +1272,26 @@ export class MqttNetworking implements IMqttNetworking {
         const level = sysFunc.getStringField(logData, "level", "log_level") ?? "info";
         const message = this.getField(logData, "message", "msg") ?? logData;
 
-        // Gate: only forward if the sensor's log level meets the configured threshold
+        // Gate: only forward if the sensor's log level meets the configured
+        // threshold. A suppressed message is still a drop: count it and make
+        // the suppression visible (throttled per event, at debug) —
+        // otherwise raising the threshold looks identical to a silent
+        // sensor.
         const sensor_level = this.sensor_log_level_to_enum(level.toLowerCase());
         if (sensor_level < this.forward_sensor_logs_level) {
+            this.promWriter.record_mqtt_message_dropped("forwarded_log_below_threshold");
+            this.logThrottledRejection(
+                "debug",
+                "networking/handleLog",
+                "forwarded_log_below_threshold",
+                `Sensor log level '${sysFunc.truncateForLog(level)}' is below the forwardSensorLogsLevel threshold, dropping`,
+                {
+                    event: "forwarded_log_below_threshold",
+                    logType: "sensor",
+                    source: sysFunc.truncateForLog(source),
+                    sensorLevel: sysFunc.truncateForLog(level.toLowerCase()),
+                }
+            );
             return;
         }
 
