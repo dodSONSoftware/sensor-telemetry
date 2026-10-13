@@ -1,14 +1,25 @@
+# Explicit project name: the compose file lives in code/, so the default
+# (directory-based) project name would be "code" — a name shared by every
+# repo in this workspace that uses a code/ layout, which cross-mixes orphan
+# containers and makes `docker compose down` stop matching this service's
+# containers from other directories.
+name: sensor-telemetry
+
 services:
   sensor-telemetry:
     build:
       context: .
       dockerfile: Dockerfile
+    # Stable image name: without it, compose derives <project>-<service>,
+    # which changes whenever the project name does (the manual build in the
+    # README tags the image sensor-telemetry).
+    image: sensor-telemetry
     container_name: sensor-telemetry
     # Internal API port — must match config.yml's `apiPort` (the app's source
     # of truth) and the Dockerfile EXPOSE/HEALTHCHECK. Change all three
     # together, or the host port stops reaching the service and the
-    # healthcheck fails. Intentional, documented constraint (see CLAUDE.md,
-    # "Configuration Options"), not a bug.
+    # healthcheck fails. Intentional, documented constraint (see the repo's
+    # docs/CONFIGURATION.md), not a bug.
     ports:
       - "32002:32002"
     volumes:
