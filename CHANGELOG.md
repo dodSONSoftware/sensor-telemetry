@@ -4,6 +4,11 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.1] — Bronze Falcon (2026-10-12)
+
+- V3 telemetry device routing now resolves the category with an own-property check instead of indexing the category table directly with the untrusted `device` value: a `device: "__proto__"` (or `"constructor"`) payload previously resolved to an inherited `Object.prototype` property instead of `undefined`, slipped past the unknown-device guard, and reached the category switch with a value matching no case — a silent drop that was neither logged nor counted in `mqtt_messages_dropped_total`. Such payloads now take the same path as any other unrecognized device: a throttled warning, a counted drop (`unknown_device`), and no publish
+- A routing regression test drives a `__proto__` device message and pins that path (warning event, counted drop, no publish, no source-freshness stamp); it fails against the pre-fix lookup
+
 ## [4.4.0] — Bronze Falcon (2026-10-12)
 
 - The `/metrics` endpoint now exposes the prom-client standard `process_*` / `nodejs_*` runtime families (heap, GC, CPU, version info, event-loop lag histogram — the exact set the installed prom-client ships) alongside the service's own metrics: they are registered into the same global registry the endpoint reads, exactly once, by an idempotent initializer, so a re-constructed writer cannot double-register while a genuinely colliding metric name still fails loudly at construction

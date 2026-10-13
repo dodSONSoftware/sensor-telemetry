@@ -1406,7 +1406,16 @@ export class MqttNetworking implements IMqttNetworking {
         // Non-object payloads read as empty rather than indexing a primitive.
         const devicePayload: JsonObject = isJsonObject(rawDevicePayload) ? rawDevicePayload : {};
 
-        const category = MqttNetworking.V3_DEVICE_CATEGORIES[device];
+        // Own-property check, not a plain index: V3_DEVICE_CATEGORIES is a
+        // plain object and `device` is untrusted, so a "__proto__" (or
+        // "constructor") payload key would resolve to an inherited
+        // Object.prototype property instead of undefined — bypassing the
+        // unknown-device drop and reaching the switch below with a
+        // non-category value. hasOwnProperty.call is the hasOwn spelling
+        // (Object.hasOwn needs lib es2022; this project targets es2016).
+        const category = Object.prototype.hasOwnProperty.call(MqttNetworking.V3_DEVICE_CATEGORIES, device)
+            ? MqttNetworking.V3_DEVICE_CATEGORIES[device]
+            : undefined;
         if (category === undefined) {
             // Throttled per event — see logThrottledRejection: first
             // occurrence always logged, repeats re-warned at most every

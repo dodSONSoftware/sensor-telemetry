@@ -389,6 +389,37 @@ describe("MqttNetworking V3 per-device telemetry routing", () => {
     expect(prom.publish_soil).not.toHaveBeenCalled();
   });
 
+  it("drops Object.prototype-shadowing device keys (__proto__) through the unknown-device path", () => {
+    // Regression for P3-1: the category lookup indexed the plain
+    // V3_DEVICE_CATEGORIES object with an untrusted key. "__proto__"
+    // resolves to Object.prototype itself (truthy), so the message slipped
+    // past the unknown-device guard and reached the category switch with a
+    // value matching no case — a silent, uncounted drop (no warning, no
+    // mqtt_messages_dropped_total). It must take the exact unknown-device
+    // path: warn, count the drop, publish nothing.
+    const { prom, logger } = driveMessage({
+      message_type: "telemetry",
+      device: "__proto__",
+      source: "v3-src",
+      firmware_version: fw,
+      payload: { temperature_c: 25 },
+    });
+
+    expect(
+      logger.write_warn.mock.calls.some(
+        (call) =>
+          call[2]?.event === "mqtt_unknown_v3_device" &&
+          call[2]?.device === "__proto__"
+      )
+    ).toBe(true);
+    expect(prom.record_mqtt_message_dropped).toHaveBeenCalledWith("unknown_device");
+    expect(prom.mark_source_seen).not.toHaveBeenCalled();
+    expect(prom.publish_air).not.toHaveBeenCalled();
+    expect(prom.publish_water).not.toHaveBeenCalled();
+    expect(prom.publish_light).not.toHaveBeenCalled();
+    expect(prom.publish_soil).not.toHaveBeenCalled();
+  });
+
   it("errors and publishes nothing when a V3 device message has no payload", () => {
     const { prom, logger } = driveMessage({
       message_type: "telemetry",
