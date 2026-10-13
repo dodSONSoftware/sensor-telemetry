@@ -1352,16 +1352,20 @@ export class MqttNetworking implements IMqttNetworking {
         const deviceSource = sysFunc.getStringField(logData, "device_source", "deviceSource");
         if (deviceSource !== undefined) metadata.deviceSource = sysFunc.truncateForLog(deviceSource);
 
+        // Every forwarded sensor-log line overrides the logger's defaultMeta
+        // version (the entry is the device's, not this service's), so the
+        // shared base carries that override once; only critical/error add
+        // per-severity fields on top.
+        const base: LogMetadata = { ...metadata, version: undefined };
         switch (sensor_level) {
         case LogLevel.Critical:
             this.logger.write_critical(
                 "networking/logCritical",
                 logMessage,
                 {
-                    ...metadata,
+                    ...base,
                     severity: "critical",
                     fatal: false,
-                    version: undefined,  // Override defaultMeta version
                 }
             );
             break;
@@ -1370,41 +1374,19 @@ export class MqttNetworking implements IMqttNetworking {
                 "networking/logError",
                 logMessage,
                 {
-                    ...metadata,
+                    ...base,
                     severity: "standard",
-                    version: undefined,  // Override defaultMeta version
                 }
             );
             break;
         case LogLevel.Warn:
-            this.logger.write_warn(
-                "networking/logWarn",
-                logMessage,
-                {
-                    ...metadata,
-                    version: undefined,  // Override defaultMeta version
-                }
-            );
+            this.logger.write_warn("networking/logWarn", logMessage, base);
             break;
         case LogLevel.Debug:
-            this.logger.write_debug(
-                "networking/logDebug",
-                logMessage,
-                {
-                    ...metadata,
-                    version: undefined,  // Override defaultMeta version
-                }
-            );
+            this.logger.write_debug("networking/logDebug", logMessage, base);
             break;
         default:
-            this.logger.write_info(
-                "networking/logInfo",
-                logMessage,
-                {
-                    ...metadata,
-                    version: undefined,  // Override defaultMeta version
-                }
-            );
+            this.logger.write_info("networking/logInfo", logMessage, base);
         }
     }
 

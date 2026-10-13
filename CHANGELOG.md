@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.11] — Bronze Falcon (2026-10-13)
+
+- The sensor-log level dispatch that forwards a device's log line no longer repeats its shared metadata in five branches — the base object (including the `version: undefined` override that suppresses the service's version on a device's forwarded line) is hoisted, with only the critical and error branches adding their per-severity fields. Behavior unchanged — the metadata objects are value-identical
+
 ## [4.4.10] — Bronze Falcon (2026-10-13)
 
 - The `logLevel` row of the README's Configuration Options table now lists `critical` alongside (error, warn, info, debug) — the config schema and the README's own Log Levels section both accept and document `critical`, but the table did not
