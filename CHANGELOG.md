@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.9] — Bronze Falcon (2026-10-13)
+
+- Internal cleanup of the config-reload log-level path: a dead guard (a truthiness check on `setLogLevel`, a required logger member that can never be absent in typed code) is dropped, keeping the live no-op (old === new) check; the unused `LogLevel.None` member is removed and the level scale renumbers from Debug. No persisted state is affected — config carries strings and the enum values are compile-time inlined comparisons only
+
 ## [4.4.8] — Bronze Falcon (2026-10-13)
 
 - The running MQTT topic fields on the networking client are now `private readonly` — no code outside the class read them, so this only removes accidental API surface; subscriptions, case-insensitive routing, and the restart-only topic snapshot are unchanged

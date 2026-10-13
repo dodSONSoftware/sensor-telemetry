@@ -1556,7 +1556,9 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
      * honor logLevel's documented runtime effectiveness.
      */
     private applyLogLevelChange(oldLogLevel: string, newLogLevel: string): void {
-        if (oldLogLevel === newLogLevel || !this.logger.setLogLevel) {
+        // setLogLevel is a required ILogger member (every implementor has
+        // it), so only the no-op check is needed here.
+        if (oldLogLevel === newLogLevel) {
             return;
         }
         this.logger.write_info(

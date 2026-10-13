@@ -40,7 +40,6 @@ export interface IAbout {
  * Supported log levels for the application.
  */
 export const enum LogLevel {
-  None = 0,
   Debug,
   Info,
   Warn,
