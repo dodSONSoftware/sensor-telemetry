@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.10] — Bronze Falcon (2026-10-13)
+
+- The `logLevel` row of the README's Configuration Options table now lists `critical` alongside (error, warn, info, debug) — the config schema and the README's own Log Levels section both accept and document `critical`, but the table did not
+
 ## [4.4.9] — Bronze Falcon (2026-10-13)
 
 - Internal cleanup of the config-reload log-level path: a dead guard (a truthiness check on `setLogLevel`, a required logger member that can never be absent in typed code) is dropped, keeping the live no-op (old === new) check; the unused `LogLevel.None` member is removed and the level scale renumbers from Debug. No persisted state is affected — config carries strings and the enum values are compile-time inlined comparisons only

@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Bronze Falcon — firmware 4.4.9.
+**Release:** Bronze Falcon — firmware 4.4.10.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -148,7 +148,7 @@ forwardSensorLogsLevel: debug
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `logLevel` | Logging verbosity (error, warn, info, debug) | info |
+| `logLevel` | Logging verbosity (error, warn, info, debug, critical) | info |
 | `apiPort` | Port for Prometheus metrics endpoint. The supplied Docker deployment hardcodes 32002 (image healthcheck probes `localhost:32002`, compose maps `32002:32002`), so changing this value in Docker also requires updating those deployment files. This is an intentional, documented constraint, not a defect — a true single source of truth would require the app to take an env override of this value, deliberately declined | required |
 | `mqttBrokerIpAddress` | MQTT broker address — host, IP, or bracketed IPv6 literal, with an optional `:port` (1-65535); no scheme — validated at config load so an unparseable value fails as a clean config error instead of a synchronous throw from `mqtt.connect` | required |
 | `mqttTopicTelemetry` | MQTT topic for telemetry messages | required |
