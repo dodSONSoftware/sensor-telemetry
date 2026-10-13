@@ -169,9 +169,12 @@ export class MqttNetworking implements IMqttNetworking {
     private promWriter: PrometheusWriter;
     // ----
     private readonly mqtt_server_ip_address: string;
-    public readonly mqtt_topic_telemetry: string;
-    public readonly mqtt_topic_log: string;
-    public readonly mqtt_topic_health: string;
+    // The running topics: subscription + message routing read them.
+    // Private: no reader outside the class (verified by grep across
+    // src/ and tests/), so they are not API surface.
+    private readonly mqtt_topic_telemetry: string;
+    private readonly mqtt_topic_log: string;
+    private readonly mqtt_topic_health: string;
     // ----
     private readonly originator: string;
     // ----

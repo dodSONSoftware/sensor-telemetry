@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.8] — Bronze Falcon (2026-10-13)
+
+- The running MQTT topic fields on the networking client are now `private readonly` — no code outside the class read them, so this only removes accidental API surface; subscriptions, case-insensitive routing, and the restart-only topic snapshot are unchanged
+
 ## [4.4.7] — Bronze Falcon (2026-10-13)
 
 - The physical bounds for air/water temperature, humidity, pressure, altitude, lux/uv, and soil readings are no longer hardcoded independently in the MQTT routing layer and the Prometheus publishers — both now read one shared `TELEMETRY_FIELD_RANGES` table through `withinTelemetryRange`, so a one-sided range edit can no longer make the layers silently disagree (a message counted accepted and stamped fresh, then skipped by the publisher). All range values are unchanged; each layer keeps its own enforcement (routing rejects the message, the publisher skips the gauge), and new unit tests pin the table's values and the inclusive/open-bound semantics
