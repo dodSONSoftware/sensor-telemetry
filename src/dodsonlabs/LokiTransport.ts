@@ -4,7 +4,8 @@
  */
 
 import TransportStream from "winston-transport";
-import { ensureError } from "./SystemFunctions";
+import { ensureError, stepThrottle } from "./SystemFunctions";
+import type { ThrottleState } from "./SystemFunctions";
 
 // The triple-beam MESSAGE symbol. Under the logger-level format chain
 // (redaction → timestamp → json()), winston hands each transport an info
@@ -63,7 +64,9 @@ export class LokiTransport extends TransportStream {
   private flushChain: Promise<void> = Promise.resolve();
   private isClosed = false;
   private closePromise: Promise<void> | undefined;
-  private failureState = { lastWarnMs: 0, suppressedCount: 0 };
+  // stepThrottle state for the push-failure reports (lastWarnMs 0 is the
+  // fresh-state sentinel, so the first failure always fires).
+  private failureState: ThrottleState = { lastWarnMs: 0, suppressedCount: 0 };
   // Any failed push (reported or suppressed) arms this; the next successful
   // push reports the recovery once and disarms it, so "the failure warnings
   // stopped" is distinguishable from "Loki is back".
@@ -271,9 +274,9 @@ export class LokiTransport extends TransportStream {
    * Throttled, direct-to-console push-failure reporting. Deliberately NOT
    * routed through the winston logger: logging here would re-enter THIS
    * transport (recursion and unbounded queue growth against a down Loki),
-   * and at shutdown the pipeline may already be closing. First failure in
-   * the window is logged with its dropped-entry count; repeats are
-   * suppressed and the window's next log carries suppressedCount.
+   * and at shutdown the pipeline may already be closing. First-occurrence
+   * / re-warn / suppressedCount semantics come from stepThrottle
+   * (SystemFunctions); the recovery latch is the extra arm on top.
    */
   private reportFailure(
     err: unknown,
@@ -282,19 +285,14 @@ export class LokiTransport extends TransportStream {
   ): void {
     // Every failure arms the recovery signal, reported or suppressed.
     this.hasPushFailed = true;
-    const now = Date.now();
-    const state = this.failureState;
-    if (now - state.lastWarnMs >= LokiTransport.FAILURE_REWARN_INTERVAL_MS) {
-      state.lastWarnMs = now;
-      const suppressed = state.suppressedCount;
-      state.suppressedCount = 0;
-      const detail = ensureError(err).message;
-      const dropped = droppedEntries > 0 ? `; dropped ${droppedEntries} entrie(s)` : "";
-      const suppressedNote =
-        suppressed > 0 ? ` (${suppressed} earlier failure(s) suppressed)` : "";
-      console.error(`[loki] ${context}: ${detail}${dropped}${suppressedNote}`);
-    } else {
-      state.suppressedCount++;
+    const step = stepThrottle(this.failureState, Date.now(), LokiTransport.FAILURE_REWARN_INTERVAL_MS);
+    if (!step.fire) {
+      return;
     }
+    const detail = ensureError(err).message;
+    const dropped = droppedEntries > 0 ? `; dropped ${droppedEntries} entrie(s)` : "";
+    const suppressedNote =
+      step.suppressedCount > 0 ? ` (${step.suppressedCount} earlier failure(s) suppressed)` : "";
+    console.error(`[loki] ${context}: ${detail}${dropped}${suppressedNote}`);
   }
 }

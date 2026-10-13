@@ -18,10 +18,12 @@ import {
   get_timestamp_iso,
   LOG_VALUE_MAX_LENGTH,
   read_file_yaml_first,
+  stepThrottle,
   truncateForLog,
   truncateForLogList,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
+import type { ThrottleState } from "../../../src/dodsonlabs/SystemFunctions";
 
 const VALID_CONFIG_YAML = [
   "logLevel: info",
@@ -778,5 +780,69 @@ describe("boundForLog", () => {
     expect(boundForLog(true)).toBe(true);
     expect(boundForLog(false)).toBe(false);
     expect(boundForLog(null)).toBe(null);
+  });
+});
+
+describe("stepThrottle", () => {
+  const INTERVAL = 60_000;
+  const fresh = (): ThrottleState => ({ lastWarnMs: 0, suppressedCount: 0 });
+
+  it("fires the first occurrence of a fresh state with no suppressedCount", () => {
+    const state = fresh();
+    const step = stepThrottle(state, 1_000, INTERVAL);
+    expect(step).toEqual({ fire: true, suppressedCount: 0 });
+    // The window restarts at the first occurrence.
+    expect(state).toEqual({ lastWarnMs: 1_000, suppressedCount: 0 });
+  });
+
+  it("suppresses and counts repeats within the window", () => {
+    const state = fresh();
+    expect(stepThrottle(state, 1_000, INTERVAL)).toEqual({ fire: true, suppressedCount: 0 });
+    expect(stepThrottle(state, 1_000 + INTERVAL - 1, INTERVAL)).toEqual({
+      fire: false,
+      suppressedCount: 0,
+    });
+    expect(stepThrottle(state, 1_000 + INTERVAL - 1, INTERVAL)).toEqual({
+      fire: false,
+      suppressedCount: 0,
+    });
+    expect(state.suppressedCount).toBe(2);
+    // Suppressed steps do not move the window.
+    expect(state.lastWarnMs).toBe(1_000);
+  });
+
+  it("re-warns when the interval elapses, carrying the suppressed count", () => {
+    const state = fresh();
+    expect(stepThrottle(state, 1_000, INTERVAL)).toEqual({ fire: true, suppressedCount: 0 });
+    stepThrottle(state, 2_000, INTERVAL);
+    stepThrottle(state, 3_000, INTERVAL);
+    stepThrottle(state, 4_000, INTERVAL);
+    const step = stepThrottle(state, 1_000 + INTERVAL, INTERVAL);
+    // Exactly at the interval the window has elapsed: it fires.
+    expect(step).toEqual({ fire: true, suppressedCount: 3 });
+    // The window restarts and the count drains with the re-warn.
+    expect(state).toEqual({ lastWarnMs: 1_000 + INTERVAL, suppressedCount: 0 });
+  });
+
+  it("fires with suppressedCount 0 when nothing was suppressed in between", () => {
+    const state = fresh();
+    expect(stepThrottle(state, 1_000, INTERVAL)).toEqual({ fire: true, suppressedCount: 0 });
+    const step = stepThrottle(state, 1_000 + INTERVAL + 1, INTERVAL);
+    expect(step).toEqual({ fire: true, suppressedCount: 0 });
+  });
+
+  it("keeps counting after a re-warn", () => {
+    const state = fresh();
+    stepThrottle(state, 0, INTERVAL);
+    stepThrottle(state, 1_000, INTERVAL);
+    stepThrottle(state, 1_000 + INTERVAL, INTERVAL); // re-warn with 1 suppressed
+    expect(stepThrottle(state, 1_000 + INTERVAL + 1, INTERVAL)).toEqual({
+      fire: false,
+      suppressedCount: 0,
+    });
+    expect(stepThrottle(state, 1_000 + 2 * INTERVAL, INTERVAL)).toEqual({
+      fire: true,
+      suppressedCount: 1,
+    });
   });
 });

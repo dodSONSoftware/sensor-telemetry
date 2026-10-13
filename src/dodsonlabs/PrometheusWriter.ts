@@ -21,7 +21,8 @@ import type {
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, truncateForLog, write_file_yaml } from "./SystemFunctions";
+import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, stepThrottle, truncateForLog, write_file_yaml } from "./SystemFunctions";
+import type { ThrottleState } from "./SystemFunctions";
 
 // Defaults the writer coalesces the optional source-label config keys to at
 // construction. Exported so MqttNetworking's restart-only diff can compare
@@ -248,7 +249,7 @@ export class PrometheusWriter {
     // the log channel. Mutable (not readonly) by convention so the test
     // suites can collapse the window; production code never reassigns it.
     private static HTTP_AUDIT_REWARN_INTERVAL_MS = 60_000;
-    private readonly httpAuditThrottle = new Map<string, { lastWarnMs: number; suppressedCount: number }>();
+    private readonly httpAuditThrottle = new Map<string, ThrottleState>();
     // The blank/all-invalid-source warning is resolved independently by
     // every metric setter (one health message calls admitSource 17+ times),
     // so without a latch a single sustained condition would flood the WARN
@@ -983,10 +984,10 @@ export class PrometheusWriter {
     }
 
     /**
-     * Throttled variant for per-request HTTP audit warns: the same
-     * first-occurrence / re-warn / suppressedCount semantics as
-     * MqttNetworking.logThrottledRejection, keyed by the fixed event name.
-     * The MQTT side needed it so a hostile publisher cannot flood the log
+     * Throttled variant for per-request HTTP audit warns: first-occurrence
+     * / re-warn / suppressedCount semantics from stepThrottle
+     * (SystemFunctions), keyed by the fixed event name. The MQTT side
+     * needed the throttle so a hostile publisher cannot flood the log
      * channel; the HTTP audit routes (404 probes, bad tokens, disallowed
      * origins, malformed requests) are reachable UNAUTHENTICATED, so the
      * same client-flood vector applies there. The per-request truth stays
@@ -1000,29 +1001,22 @@ export class PrometheusWriter {
         message: string,
         metadata: LogMetadata
     ): void {
-        const now = Date.now();
-        const state = this.httpAuditThrottle.get(event);
+        // The throttle state lives in the httpAuditThrottle map, keyed by
+        // event; the fresh-state sentinel (lastWarnMs 0) makes the first
+        // occurrence fire.
+        let state = this.httpAuditThrottle.get(event);
         if (state === undefined) {
-            this.httpAuditThrottle.set(event, { lastWarnMs: now, suppressedCount: 0 });
-            this.logger.write_warn(originator, message, metadata);
+            state = { lastWarnMs: 0, suppressedCount: 0 };
+            this.httpAuditThrottle.set(event, state);
+        }
+        const step = stepThrottle(state, Date.now(), PrometheusWriter.HTTP_AUDIT_REWARN_INTERVAL_MS);
+        if (!step.fire) {
             return;
         }
-        if (now - state.lastWarnMs < PrometheusWriter.HTTP_AUDIT_REWARN_INTERVAL_MS) {
-            // Within the cadence: suppressed — count it for the re-warn.
-            state.suppressedCount++;
-            return;
-        }
-        // The interval elapsed. The re-warned occurrence is logged, not
-        // suppressed, so only the counted suppressions ride along (and only
-        // when there were any — the plain shape is otherwise kept so
-        // existing queries and alerting keep working).
-        state.lastWarnMs = now;
-        const suppressed = state.suppressedCount;
-        state.suppressedCount = 0;
         this.logger.write_warn(
             originator,
             message,
-            suppressed > 0 ? { ...metadata, suppressedCount: suppressed } : metadata
+            step.suppressedCount > 0 ? { ...metadata, suppressedCount: step.suppressedCount } : metadata
         );
     }
 

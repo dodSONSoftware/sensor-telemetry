@@ -631,3 +631,72 @@ export async function wait_for_prometheus(
   }
   return hasFailed() ? "failed" : isReady() ? "ready" : "timeout";
 }
+
+// **** warn throttling
+
+/**
+ * Per-event state for stepThrottle. `lastWarnMs: 0` is the fresh sentinel
+ * (the window has never fired), so the first step of a fresh state always
+ * fires regardless of `now`.
+ */
+export interface ThrottleState {
+  lastWarnMs: number;
+  suppressedCount: number;
+}
+
+/**
+ * One step of the per-event warn throttle shared by the MQTT rejection
+ * warns (MqttNetworking.logThrottledRejection), the unauthenticated HTTP
+ * audit warns (PrometheusWriter.logThrottledHttpWarning), and the Loki
+ * push-failure reports (LokiTransport.reportFailure). Semantics:
+ * - the FIRST occurrence (a fresh state) is always logged — operators must
+ *   see a new problem immediately — with exactly the metadata the call
+ *   site built (suppressedCount 0, so no suppressedCount field rides along
+ *   and the first line is byte-identical to the unthrottled shape),
+ * - repeats within intervalMs are suppressed and counted (fire: false),
+ * - when the interval elapses, one re-warn fires carrying suppressedCount
+ *   (occurrences suppressed since the last logged one — the re-warned
+ *   occurrence itself is not counted, it was logged, so the field only
+ *   ever carries values >= 1) and the window restarts; the caller logs
+ *   the most recent occurrence's message/metadata. An occurrence landing
+ *   past the interval with nothing suppressed in between fires with
+ *   suppressedCount 0, so the caller keeps the plain (first-occurrence)
+ *   metadata rather than emitting a zero suppressedCount.
+ *
+ * The step is pure over its inputs: it mutates `state` and reports the
+ * outcome. Time is passed in (not read internally) so the contract is
+ * unit-testable without real waiting; dispatch (level, logger vs direct
+ * console, extra latches) stays at the call site.
+ */
+export interface ThrottleStep {
+  /** True when this occurrence should be logged. */
+  fire: boolean;
+  /**
+   * Occurrences suppressed since the last logged one. 0 when the caller
+   * should log with its plain metadata (no suppressedCount field).
+   */
+  suppressedCount: number;
+}
+
+export function stepThrottle(
+  state: ThrottleState,
+  now: number,
+  intervalMs: number
+): ThrottleStep {
+  if (state.lastWarnMs === 0) {
+    // Fresh state: the first occurrence is always logged.
+    state.lastWarnMs = now;
+    return { fire: true, suppressedCount: 0 };
+  }
+  if (now - state.lastWarnMs < intervalMs) {
+    // Within the cadence: suppressed — count it for the next re-warn.
+    state.suppressedCount++;
+    return { fire: false, suppressedCount: 0 };
+  }
+  // The interval elapsed. The re-warned occurrence is logged, not
+  // suppressed, so only the counted suppressions ride along.
+  state.lastWarnMs = now;
+  const suppressed = state.suppressedCount;
+  state.suppressedCount = 0;
+  return { fire: true, suppressedCount: suppressed };
+}

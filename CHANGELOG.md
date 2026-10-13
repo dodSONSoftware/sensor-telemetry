@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.6] — Bronze Falcon (2026-10-13)
+
+- The first-occurrence / re-warn / `suppressedCount` warn-throttle state machine that was implemented three times (the MQTT rejection warns, the HTTP audit warns, and the Loki push-failure reports, with cross-file comments as the only consistency mechanism) is now a single shared `stepThrottle` helper in SystemFunctions; each site keeps its own dispatch (level, logger vs direct console, Loki's recovery latch) and its per-instance state. No behavior change — event names, levels, messages, and metadata shapes are unchanged, the three existing throttle suites pass unmodified, and new unit tests pin the four `stepThrottle` outcomes (first-fire, in-window suppression, re-warn carrying the suppressed count, re-warn with nothing suppressed)
+
 ## [4.4.5] — Bronze Falcon (2026-10-12)
 
 - Sensor log messages suppressed by the `forwardSensorLogs` gate (on either the V3 log topic or the `type: "log"` dispatch) or below the `forwardSensorLogsLevel` threshold are no longer an undiagnosable dead zone: each is now counted as a pipeline drop (`mqtt_messages_dropped_total{reason="forwarded_log_disabled"}` / `{reason="forwarded_log_below_threshold"}` — two new `MqttMessageDropReason` values) and logged once per event through the existing per-event throttling, at **debug** level since suppression is a configuration outcome, not a fault. Previously, disabling forwarding or raising the threshold was indistinguishable from a silent sensor

@@ -255,7 +255,7 @@ export class MqttNetworking implements IMqttNetworking {
     // mqtt_unknown_v3_device, mqtt_health_invalid_payload,
     // telemetry_field_missing, telemetry_out_of_range), so the map holds at
     // most 6 entries for the process lifetime and never needs cleanup.
-    private readonly rejectionWarnThrottle = new Map<string, { lastWarnMs: number; suppressedCount: number }>();
+    private readonly rejectionWarnThrottle = new Map<string, sysFunc.ThrottleState>();
 
     // ********
     // ******** PRIVATE FUNCTIONS
@@ -1006,27 +1006,15 @@ export class MqttNetworking implements IMqttNetworking {
      * Log a per-message rejection warning — or, at debug level, a
      * suppressed-forwarded-log diagnostic (forwarded_log_disabled /
      * forwarded_log_below_threshold) — throttled per EVENT (see the
-     * rejectionWarnThrottle field for the state-bounding rationale):
-     * - the FIRST occurrence since process start is always logged —
-     *   operators must see a new problem immediately — with exactly the
-     *   metadata the call site built (no suppressedCount field, so the
-     *   first line is byte-identical to the pre-throttle shape),
-     * - repeats within REJECTION_REWARN_INTERVAL_MS are suppressed and
-     *   counted,
-     * - when the interval elapses, one re-warn fires carrying
-     *   `suppressedCount` (occurrences suppressed since the last logged
-     *   one — the re-warned occurrence itself is not counted, it was
-     *   logged, so the field only ever carries values >= 1) and the
-     *   window restarts; the message text is the most recent
-     *   occurrence's. An occurrence landing past the interval with
-     *   nothing suppressed in between is logged with the plain
-     *   (first-occurrence) metadata rather than a zero suppressedCount.
-     * Event name, level, and base metadata are unchanged from the
-     * unthrottled call, so existing queries and alerting keep working.
-     * There is deliberately no per-source granularity in the re-warn:
-     * the first occurrence (the line operators act on) carries the full
-     * source/field detail; the periodic re-warns prove the condition is
-     * ongoing and how large it is.
+     * rejectionWarnThrottle field for the state-bounding rationale).
+     * First-occurrence / re-warn / suppressedCount semantics come from
+     * stepThrottle (SystemFunctions). Event name, level, and base
+     * metadata are unchanged from the unthrottled call, so existing
+     * queries and alerting keep working. There is deliberately no
+     * per-source granularity in the re-warn: the first occurrence (the
+     * line operators act on) carries the full source/field detail; the
+     * periodic re-warns prove the condition is ongoing and how large it
+     * is.
      */
     private logThrottledRejection(
         level: "debug" | "warn" | "error",
@@ -1035,30 +1023,30 @@ export class MqttNetworking implements IMqttNetworking {
         message: string,
         metadata: LogMetadata
     ): void {
-        const now = Date.now();
-        const state = this.rejectionWarnThrottle.get(event);
+        // The throttle state lives in the rejectionWarnThrottle map, keyed
+        // by event (see the field for the state-bounding rationale); the
+        // fresh-state sentinel (lastWarnMs 0) makes the first occurrence
+        // fire.
+        let state = this.rejectionWarnThrottle.get(event);
         if (state === undefined) {
-            this.rejectionWarnThrottle.set(event, { lastWarnMs: now, suppressedCount: 0 });
-            this.emitRejection(level, originator, message, metadata);
+            state = { lastWarnMs: 0, suppressedCount: 0 };
+            this.rejectionWarnThrottle.set(event, state);
+        }
+        const step = sysFunc.stepThrottle(
+            state,
+            Date.now(),
+            MqttNetworking.REJECTION_REWARN_INTERVAL_MS
+        );
+        if (!step.fire) {
             return;
         }
-        if (now - state.lastWarnMs < MqttNetworking.REJECTION_REWARN_INTERVAL_MS) {
-            // Within the cadence: this occurrence is suppressed — count
-            // it for the next re-warn and stay quiet.
-            state.suppressedCount++;
-            return;
-        }
-        // The interval elapsed. The re-warned occurrence is logged, not
-        // suppressed, so only the counted suppressions ride along (and
-        // only when there were any — see the doc above).
-        state.lastWarnMs = now;
-        const suppressed = state.suppressedCount;
-        state.suppressedCount = 0;
         this.emitRejection(
             level,
             originator,
             message,
-            suppressed > 0 ? { ...metadata, suppressedCount: suppressed } : metadata
+            step.suppressedCount > 0
+                ? { ...metadata, suppressedCount: step.suppressedCount }
+                : metadata
         );
     }
 
