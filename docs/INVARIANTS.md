@@ -1,0 +1,21 @@
+# Sensor Telemetry Services — System Invariants
+
+This document defines the behavioral guarantees, constraints, and conditions that must remain true throughout the Sensor Telemetry Services.
+These invariants must be preserved during development, refactoring, maintenance, and architectural changes.
+
+---
+
+1. **Untrusted MQTT input:** Reject payloads over 64 KiB before parse; root must be a plain JSON object, and values must pass typed field helpers. Do not apply blanket `String()` to arbitrary nested input. Log untrusted values through size/depth bounded helpers.
+2. **Topic routing:** Configured topics are exact (no MQTT filter wildcards), unique ignoring case, and routed using case-folded equality; log precedes health, then telemetry fallback.
+3. **Device handling:** Only explicitly supported V3 device types publish category-specific gauges; unknown devices and non-finite/out-of-range physical readings must not populate gauges. Use `TELEMETRY_FIELD_RANGES` as the shared source of physical limits; numeric milliseconds are explicitly truncated only where an integer is required.
+4. **Rejection accounting:** Each dropped/rejected occurrence increments the appropriate fixed-reason counter regardless of whether its warning was throttle-suppressed. Shared throttles emit first event, suppress repeats during their window, and later rewarn with suppression count; never use arbitrary untrusted text as metric labels.
+5. **Cardinality and label identity:** Bound source and firmware label identities; prevent lossy-sanitization collisions from silently conflating distinct raw inputs. Hash suffix is eight hex characters and source maximum length must accommodate it. Fallback/collision paths must account for rejected identities.
+6. **Stale-source removal:** When enabled, remove all idle source-specific series including `sensor_last_seen_timestamp_seconds` and release source-cap slots; never evict reserved fallback series. Disabled eviction means indefinite persistence within the running process.
+7. **Metric registry:** Standard `collectDefaultMetrics()` registration is idempotent and shares `/metrics` registry. No duplicate family names, including `process_resident_memory_bytes`. Normalize HTTP path labels to known routes or `unknown`.
+8. **HTTP semantics:** `/health` is liveness only. `/ready` succeeds only with MQTT connected and all required SUBACKs active. GET-only read endpoints reject unsupported methods; preflight `OPTIONS` is handled before route dispatch.
+9. **Config safety:** Strict schema applies identically on startup, write and reload; config write must be atomic. Restart-only values never silently mutate constructed transports. Existing invalid config must fail rather than silently falling through to an alternate file.
+10. **Secrets and audit:** Redact secret-like log metadata keys recursively; do not log config token/header/body values. `x-config-token` is checked in constant time when enabled. An allowed CORS origin does not bypass the token.
+11. **Loki isolation:** Transport errors cannot recurse into Winston or become unhandled rejections; failed batches remain bounded and observable. Shutdown flushes Loki **after** networking/HTTP close logs.
+12. **Termination:** Register fatal/signal handlers before networking construction; shutdown remains idempotent and bounded; fatal errors must not be downgraded to a successful exit.
+
+Tests pin many of these contracts; see [TESTING.md](TESTING.md) and `tests/__tests__/`.

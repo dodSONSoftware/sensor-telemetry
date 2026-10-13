@@ -34,7 +34,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # persists via temp file + rename, which needs write access to this directory. The
 # host-side bind mount must be owned by uid/gid 1000:1000 for the same reason —
 # see the preflight in docker-refresh.sh and "Docker config folder requirement"
-# in CLAUDE.md.
+# in docs/CONFIGURATION.md.
 RUN mkdir -p /app/configs && chown -R node:node /app/configs
 
 # Run as the node image's unprivileged node user (uid 1000, gid 1000)
@@ -44,7 +44,7 @@ USER node
 # application's source of truth. config.yml is a mounted file the baked image
 # cannot read at build time, so there is no single source of truth across the
 # file and the image — three places hardcode it (an intentional, documented
-# constraint, not a bug; see CLAUDE.md, "Configuration Options"):
+# constraint, not a bug; see docs/CONFIGURATION.md):
 #   EXPOSE (below)         informational only
 #   HEALTHCHECK (below)    probes localhost:32002/health
 #   compose "32002:32002"    host -> container mapping (docker-compose.yml)

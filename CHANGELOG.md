@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.12] — Bronze Falcon (2026-10-13)
+
+- Project documentation is reorganized from a single dense CLAUDE.md into a topic-specific `docs/` set — Architecture, Configuration, Invariants, Engineering Decisions, Testing, and Known Issues — that CLAUDE.md now indexes as a documentation map; the Dockerfile's config-folder and port-hardcoding comments point to `docs/CONFIGURATION.md` instead of CLAUDE.md. Documentation-only restructure, no behavior change
+
 ## [4.4.11] — Bronze Falcon (2026-10-13)
 
 - The sensor-log level dispatch that forwards a device's log line no longer repeats its shared metadata in five branches — the base object (including the `version: undefined` override that suppresses the service's version on a device's forwarded line) is hoisted, with only the critical and error branches adding their per-severity fields. Behavior unchanged — the metadata objects are value-identical
