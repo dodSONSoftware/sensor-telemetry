@@ -1632,6 +1632,51 @@ describe("subscription SUBACK handling (regression P2-3)", () => {
       { topic: baseConfig.mqttTopicTelemetry, active: true },
     ]);
   });
+
+  it("tiers repeated SUBACK denials: first ERROR, repeats WARN with the attempt count, a grant resets the tier", () => {
+    // on_connect re-subscribes on EVERY (re)connect, so a persistently
+    // denying broker re-denies the same topics on each reconnect (every 5 s
+    // during a reconnect storm). Only the first denial may be a full ERROR;
+    // repeats must be WARN with the attempt count (the on_error tiering),
+    // and a granted subscription must reset the tier so the next denial
+    // starts fresh at its full ERROR.
+    const { networking, logger, subscribe } = driveConnect();
+    const deny = subscribe.mock.calls[0][1] as (
+      err: Error | undefined,
+      granted?: unknown
+    ) => void;
+    const errFailures = () =>
+      logger.write_error.mock.calls.filter((call) => call[2]?.event === "mqtt_subscription_failed");
+    const warnFailures = () =>
+      logger.write_warn.mock.calls.filter((call) => call[2]?.event === "mqtt_subscription_failed");
+
+    // Denial 1: full ERROR with the error object for diagnosis.
+    deny(new Error("not authorized"));
+    expect(errFailures()).toHaveLength(1);
+    expect(errFailures()[0][2]).toMatchObject({
+      mqttTopic: baseConfig.mqttTopicTelemetry,
+      attempt: 1,
+    });
+    expect((errFailures()[0][2] as Record<string, unknown>).error).toBeInstanceOf(Error);
+    expect(networking.subscriptions_active()).toBe(false);
+
+    // Denials 2 and 3 (re-fired as on_connect re-subscribes on reconnect):
+    // WARN with the attempt count — the error channel is not flooded.
+    deny(new Error("not authorized"));
+    deny(new Error("not authorized"));
+    expect(errFailures()).toHaveLength(1);
+    expect(warnFailures().map((call) => (call[2] as Record<string, unknown>).attempt)).toEqual([2, 3]);
+    expect(networking.subscriptions_active()).toBe(false);
+
+    // A granted subscription resets the tier: the next denial is a full
+    // ERROR again (attempt 1), not an attempt-N WARN.
+    deny(undefined, [{ topic: baseConfig.mqttTopicTelemetry, qos: 0, isValid: true }]);
+    expect(networking.subscriptions_active()).toBe(true);
+    deny(new Error("not authorized"));
+    expect(errFailures()).toHaveLength(2);
+    expect((errFailures()[1][2] as Record<string, unknown>).attempt).toBe(1);
+    expect(warnFailures()).toHaveLength(2);
+  });
 });
 
 describe("MQTT 'close' invalidates subscription state (regression P2-2)", () => {

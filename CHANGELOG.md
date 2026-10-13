@@ -4,6 +4,11 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.3] — Bronze Falcon (2026-10-12)
+
+- Repeated SUBACK denials are now tiered like connection failures: because the service re-subscribes on every (re)connect, a persistently denying broker previously re-logged a full `mqtt_subscription_failed` ERROR for every topic on every reconnect (every 5 s during a reconnect storm). Only the first denial of the current denial state is now a full ERROR (with the error object); repeats are a WARN carrying the attempt count, and any granted subscription resets the tier so the next denial starts fresh at its full ERROR. The `mqtt_subscription_failed` event name and the `subscription_active` / `mqtt_subscription_active` reporting are unchanged
+- A SUBACK regression test drives repeated denials and a grant, pinning the tier (ERROR at attempt 1, WARN at attempts 2–3, reset to a fresh ERROR after a grant); it fails against the pre-tiering handler
+
 ## [4.4.2] — Bronze Falcon (2026-10-12)
 
 - The Loki log push is now bounded by a 5 s per-request timeout (`AbortSignal.timeout` on the push fetch): Node's fetch has no app-level timeout by default, so a black-holed Loki endpoint (SYN-accepted, never answered) previously held the in-flight push for undici's implicit ~300 s headersTimeout and could spend `close()`'s entire shutdown budget waiting on it. An aborted push takes the existing failure path — throttled warn, batch dropped, no retry loop, never unhandled

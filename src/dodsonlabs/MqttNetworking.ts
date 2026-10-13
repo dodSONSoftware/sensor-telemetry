@@ -216,6 +216,16 @@ export class MqttNetworking implements IMqttNetworking {
     // they are not connection failures and must not consume the
     // first-failure ERROR slot of the next real outage.
     private consecutive_connection_failures = 0;
+    // Consecutive SUBACK failures (denials) since the last granted
+    // subscription. on_connect() re-subscribes on EVERY (re)connect, so a
+    // persistently denying broker re-denies the same topics on every
+    // reconnect — a full ERROR per topic per retry would flood the error
+    // channel during a reconnect storm. The counter lets on_subscribe_result
+    // tier the noise exactly like on_error() does for connection failures
+    // (first denial = ERROR, repeats = WARN with the attempt count); a
+    // granted subscription resets it, so the next denial starts fresh at
+    // its full ERROR.
+    private consecutive_subscription_failures = 0;
     // True after the first successful 'connect' event. Gates the
     // mqtt_connected INFO (see on_connect): the failure counter alone
     // cannot tell a first connect from a reconnect with no preceding
@@ -670,18 +680,44 @@ export class MqttNetworking implements IMqttNetworking {
     ): void {
         if (error) {
             this.subscription_active.set(topic, false);
-            this.logger.write_error(
-                "networking/subscribe",
-                `Failed to subscribe to topic: ${topic} — ${(error as Error).message}`,
-                {
-                    event: "mqtt_subscription_failed",
-                    logType: "service",
-                    mqttTopic: topic,
-                    error,
-                }
-            );
+            this.consecutive_subscription_failures++;
+            if (this.consecutive_subscription_failures === 1) {
+                // First denial: the full ERROR, with the error object
+                // (message and stack) for diagnosis — the same tiering as
+                // on_error's first connection failure.
+                this.logger.write_error(
+                    "networking/subscribe",
+                    `Failed to subscribe to topic: ${topic} — ${(error as Error).message}`,
+                    {
+                        event: "mqtt_subscription_failed",
+                        logType: "service",
+                        mqttTopic: topic,
+                        attempt: this.consecutive_subscription_failures,
+                        error,
+                    }
+                );
+            } else {
+                // Every re-subscribe (on_connect re-subscribes on each
+                // reconnect) repeats the same denial: WARN with the attempt
+                // count keeps it visible without flooding the error channel
+                // with duplicate stacks every 5 s.
+                this.logger.write_warn(
+                    "networking/subscribe",
+                    `Subscribe attempt ${this.consecutive_subscription_failures} to topic ${topic} failed again: ${(error as Error).message}`,
+                    {
+                        event: "mqtt_subscription_failed",
+                        logType: "service",
+                        mqttTopic: topic,
+                        attempt: this.consecutive_subscription_failures,
+                        error: (error as Error).message,
+                    }
+                );
+            }
             return;
         }
+        // A granted subscription ends the denial state (the broker is
+        // granting again) — the next denial starts fresh at its full ERROR.
+        this.consecutive_subscription_failures = 0;
         this.subscription_active.set(topic, true);
         this.logger.write_debug(
             "networking/subscribe",
