@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.7] — Bronze Falcon (2026-10-13)
+
+- The physical bounds for air/water temperature, humidity, pressure, altitude, lux/uv, and soil readings are no longer hardcoded independently in the MQTT routing layer and the Prometheus publishers — both now read one shared `TELEMETRY_FIELD_RANGES` table through `withinTelemetryRange`, so a one-sided range edit can no longer make the layers silently disagree (a message counted accepted and stamped fresh, then skipped by the publisher). All range values are unchanged; each layer keeps its own enforcement (routing rejects the message, the publisher skips the gauge), and new unit tests pin the table's values and the inclusive/open-bound semantics
+
 ## [4.4.6] — Bronze Falcon (2026-10-13)
 
 - The first-occurrence / re-warn / `suppressedCount` warn-throttle state machine that was implemented three times (the MQTT rejection warns, the HTTP audit warns, and the Loki push-failure reports, with cross-file comments as the only consistency mechanism) is now a single shared `stepThrottle` helper in SystemFunctions; each site keeps its own dispatch (level, logger vs direct console, Loki's recovery latch) and its per-instance state. No behavior change — event names, levels, messages, and metadata shapes are unchanged, the three existing throttle suites pass unmodified, and new unit tests pin the four `stepThrottle` outcomes (first-fire, in-window suppression, re-warn carrying the suppressed count, re-warn with nothing suppressed)

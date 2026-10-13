@@ -1554,14 +1554,18 @@ export class MqttNetworking implements IMqttNetworking {
         // physical range the publisher enforces): only then does the source
         // count as "seen" for the freshness gauge — a dropped reading is
         // not sensor activity, and (see the note above) only then is the
-        // firmware_version admitted. The physical-range checks mirror the
-        // publisher's, so the normal path never publishes (or stamps
+        // firmware_version admitted. The physical-range checks read the
+        // same TELEMETRY_FIELD_RANGES table the publisher's per-gauge
+        // checks read, so the normal path never publishes (or stamps
         // freshness for) a message the publisher would reject — a source
         // reporting an out-of-range required reading is handled exactly
         // like one that dropped the field.
         let accepted = false;
-        // Payloads carry temperatures in Celsius; the supported ranges below
-        // are the Fahrenheit ranges the publishers enforce, so the convert
+        // The specs' min/max come from TELEMETRY_FIELD_RANGES (SystemFunctions)
+        // — the same table the publishers' per-gauge checks read, so the
+        // routing and publisher layers cannot disagree on a field's bounds.
+        // Payloads carry temperatures in Celsius; the supported ranges are
+        // the Fahrenheit ranges the publishers enforce, so the convert
         // mirrors the publisher's c * 9/5 + 32 before the range check.
         const celsiusToFahrenheit = (c: number): number => (c * 9) / 5 + 32;
         switch (category) {
@@ -1570,23 +1574,21 @@ export class MqttNetworking implements IMqttNetworking {
             // sensor, so pressure is only required for devices that carry it.
             const pressureRequired = device === "bme280";
             const specs: TelemetryFieldSpec[] = [
-                { field: "temperature_c", convert: celsiusToFahrenheit, min: -100, max: 200 },
-                { field: "humidity_percent", min: 0, max: 100 },
+                { field: "temperature_c", convert: celsiusToFahrenheit, ...sysFunc.TELEMETRY_FIELD_RANGES.airTemperatureF },
+                { field: "humidity_percent", ...sysFunc.TELEMETRY_FIELD_RANGES.airHumidityPercent },
             ];
             if (pressureRequired) {
-                // Pressure must exist under one of the supported aliases, be
-                // finite, and be physically non-negative. There is
-                // deliberately no upper bound — a general atmospheric
-                // "max" is not a defensible range without a deployment
-                // contract.
-                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0 });
+                // Pressure must exist under one of the supported aliases and
+                // be finite (the range policy in TELEMETRY_FIELD_RANGES:
+                // physically non-negative, no upper bound).
+                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], ...sysFunc.TELEMETRY_FIELD_RANGES.pressurePa });
             } else {
                 // The publisher reads pressure generically whenever it is
                 // present (not just for bme280), so a malformed non-bme280
                 // payload carrying a finite pressure would otherwise reach
                 // the gauge unchecked. An absent field stays valid; a
-                // present one must still be non-negative.
-                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], min: 0, optional: true });
+                // present one must still satisfy the range.
+                specs.push({ field: "pressure_pa", aliases: ["pressure_pascal"], ...sysFunc.TELEMETRY_FIELD_RANGES.pressurePa, optional: true });
             }
             // Altitude is optional for every air device: bme280 is the only
             // one expected to send it (null when the adjusted pressure is
@@ -1595,11 +1597,9 @@ export class MqttNetworking implements IMqttNetworking {
             // malformed payload carrying a finite altitude from any air
             // device would otherwise reach the gauge unchecked. An absent or
             // non-finite field stays valid; a present one must sit within
-            // the barometric range, which comfortably encompasses every
-            // plausible fixed-sensor deployment (lowest land surface
-            // ~-430 m; well above the highest attainable barometric
-            // altitude) while rejecting obviously invalid values.
-            specs.push({ field: "altitude_m", min: -1000, max: 20000, optional: true });
+            // the range (see TELEMETRY_FIELD_RANGES.altitudeM for the
+            // rationale).
+            specs.push({ field: "altitude_m", ...sysFunc.TELEMETRY_FIELD_RANGES.altitudeM, optional: true });
             if (this.is_telemetry_valid(devicePayload, source, specs)) {
                 // Valid message: admit the firmware version, then publish.
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
@@ -1611,7 +1611,7 @@ export class MqttNetworking implements IMqttNetworking {
 
         case "water": {
             if (this.is_telemetry_valid(devicePayload, source, [
-                { field: "temperature_c", convert: celsiusToFahrenheit, min: -50, max: 212 },
+                { field: "temperature_c", convert: celsiusToFahrenheit, ...sysFunc.TELEMETRY_FIELD_RANGES.waterTemperatureF },
             ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_water({ water: devicePayload }, source, firmwareVersion);
@@ -1622,10 +1622,10 @@ export class MqttNetworking implements IMqttNetworking {
 
         case "light": {
             // lux and uv_index cannot be negative; no upper bound is
-            // defined for these sensors, so only the physical floor.
+            // defensible for these sensors (see TELEMETRY_FIELD_RANGES).
             if (this.is_telemetry_valid(devicePayload, source, [
-                { field: "lux", min: 0 },
-                { field: "uv_index", min: 0 },
+                { field: "lux", ...sysFunc.TELEMETRY_FIELD_RANGES.lux },
+                { field: "uv_index", ...sysFunc.TELEMETRY_FIELD_RANGES.uvIndex },
             ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_light({ light: devicePayload }, source, firmwareVersion);
@@ -1636,12 +1636,12 @@ export class MqttNetworking implements IMqttNetworking {
 
         case "soil": {
             // yl69_fc28 / plantmate_soil: relative_moisture_percent is the
-            // calibrated reading (0-100 physical range); raw (16-bit ADC)
-            // remains optional — an out-of-range raw is skipped by the
-            // publisher without rejecting the message — and digital_state
-            // is ignored (nullable, not a useful gauge).
+            // calibrated reading; raw (16-bit ADC) remains optional — an
+            // out-of-range raw is skipped by the publisher without
+            // rejecting the message — and digital_state is ignored
+            // (nullable, not a useful gauge).
             if (this.is_telemetry_valid(devicePayload, source, [
-                { field: "relative_moisture_percent", min: 0, max: 100 },
+                { field: "relative_moisture_percent", ...sysFunc.TELEMETRY_FIELD_RANGES.soilMoisturePercent },
             ])) {
                 const firmwareVersion = this.getFirmwareVersion(json_doc);
                 this.promWriter.publish_soil({ soil: devicePayload }, source, firmwareVersion);
@@ -1877,13 +1877,14 @@ export class MqttNetworking implements IMqttNetworking {
      * within the inclusive physical bounds after any unit conversion.
      * Returns true only if ALL fields are valid.
      *
-     * The physical-range checks mirror the PrometheusWriter's publisher
-     * checks for the same fields, so the routing layer — not the
-     * publisher — owns acceptance: a message whose required reading is
-     * out of range is rejected here (structured warning, no publish, no
-     * freshness stamp, no firmware admission) instead of being counted
-     * as accepted and then leaving stale gauges with a fresh
-     * last-seen timestamp.
+     * The specs' min/max come from TELEMETRY_FIELD_RANGES (SystemFunctions)
+     * — the same table the publishers' per-gauge checks read — so the
+     * routing layer and the publisher layer cannot disagree on a field's
+     * bounds. That matters because the routing layer, not the publisher,
+     * owns acceptance: a message whose required reading is out of range
+     * is rejected here (structured warning, no publish, no freshness
+     * stamp, no firmware admission) instead of being counted as accepted
+     * and then leaving stale gauges with a fresh last-seen timestamp.
      */
     private is_telemetry_valid(
         section: JsonObject,

@@ -21,7 +21,7 @@ import type {
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 import { validateConfig } from "../schemas/config";
-import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, stepThrottle, truncateForLog, write_file_yaml } from "./SystemFunctions";
+import { boundForLog, buildSourceValidCharsRegex, ensureError, get_numeric_field, read_file_yaml, stepThrottle, TELEMETRY_FIELD_RANGES, truncateForLog, withinTelemetryRange, write_file_yaml } from "./SystemFunctions";
 import type { ThrottleState } from "./SystemFunctions";
 
 // Defaults the writer coalesces the optional source-label config keys to at
@@ -2304,7 +2304,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                 }
             );
             return;
-        } else if (temp_f < -100 || temp_f > 200) {
+        } else if (!withinTelemetryRange(temp_f, TELEMETRY_FIELD_RANGES.airTemperatureF)) {
             this.logger.write_warn(
                 "prometheus/publishAirTempOutOfRange",
                 `Source: ${sanitized}, temperature_c out of physical range (${air["temperature_c"]}C = ${temp_f}F), skipping Air_Temperature gauge`,
@@ -2315,8 +2315,8 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     field: "temperature_c",
                     value: boundForLog(air["temperature_c"]),
                     convertedValue: temp_f,
-                    minRange: -100,
-                    maxRange: 200,
+                    minRange: TELEMETRY_FIELD_RANGES.airTemperatureF.min,
+                    maxRange: TELEMETRY_FIELD_RANGES.airTemperatureF.max,
                 }
             );
         } else {
@@ -2343,7 +2343,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
 
         // air telemetry
         if (humidity !== undefined) {
-            if (humidity < 0 || humidity > 100) {
+            if (!withinTelemetryRange(humidity, TELEMETRY_FIELD_RANGES.airHumidityPercent)) {
                 this.logger.write_warn(
                     "prometheus/publishAirHumidityOutOfRange",
                     `Source: ${sanitized}, humidity_percent out of physical range (${humidity}%), skipping Air_Humidity gauge`,
@@ -2353,8 +2353,8 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                         source: sanitized,
                         field: "humidity_percent",
                         value: humidity,
-                        minRange: 0,
-                        maxRange: 100,
+                        minRange: TELEMETRY_FIELD_RANGES.airHumidityPercent.min,
+                        maxRange: TELEMETRY_FIELD_RANGES.airHumidityPercent.max,
                     }
                 );
             } else {
@@ -2392,9 +2392,10 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         // Altitude arrives in meters (null when the adjusted pressure is
         // non-positive). bme280 is the only device expected to send it, but
         // like pressure the publisher reads it generically whenever present,
-        // so the physical range is enforced at the routing boundary
-        // (handle_v3_device_telemetry), not here — the writer keeps a single
-        // finiteness guard and no second range policy.
+        // so the physical range (TELEMETRY_FIELD_RANGES.altitudeM) is
+        // enforced at the routing boundary (handle_v3_device_telemetry),
+        // not here — the writer keeps a single finiteness guard and no
+        // second range policy.
         const altitudeM = get_numeric_field(air, "altitude_m");
         const altitudeFt = altitudeM === undefined ? NaN : this.metersToFeet(altitudeM);
         if (Number.isFinite(altitudeFt)) {
@@ -2524,7 +2525,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     value: boundForLog(water["temperature_c"]),
                 }
             );
-        } else if (temp_f < -50 || temp_f > 212) {
+        } else if (!withinTelemetryRange(temp_f, TELEMETRY_FIELD_RANGES.waterTemperatureF)) {
             this.logger.write_warn(
                 "prometheus/publishWaterTempOutOfRange",
                 `Source: ${sanitized}, temperature_c out of physical range (${water["temperature_c"]}C = ${temp_f}F), skipping Water_Temperature gauge`,
@@ -2535,8 +2536,8 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     field: "temperature_c",
                     value: boundForLog(water["temperature_c"]),
                     convertedValue: temp_f,
-                    minRange: -50,
-                    maxRange: 212,
+                    minRange: TELEMETRY_FIELD_RANGES.waterTemperatureF.min,
+                    maxRange: TELEMETRY_FIELD_RANGES.waterTemperatureF.max,
                 }
             );
         } else {
@@ -2590,7 +2591,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     value: boundForLog(soil["relative_moisture_percent"]),
                 }
             );
-        } else if (percent < 0 || percent > 100) {
+        } else if (!withinTelemetryRange(percent, TELEMETRY_FIELD_RANGES.soilMoisturePercent)) {
             this.logger.write_warn(
                 "prometheus/publishSoilPercentOutOfRange",
                 `Source: ${sanitized}, relative_moisture_percent out of physical range (${percent}%), skipping Soil_Moisture_Percent gauge`,
@@ -2600,8 +2601,8 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     source: sanitized,
                     field: "relative_moisture_percent",
                     value: percent,
-                    minRange: 0,
-                    maxRange: 100,
+                    minRange: TELEMETRY_FIELD_RANGES.soilMoisturePercent.min,
+                    maxRange: TELEMETRY_FIELD_RANGES.soilMoisturePercent.max,
                 }
             );
         } else {
@@ -2622,7 +2623,7 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
         // raw is an optional uncalibrated 16-bit ADC value
         const raw = get_numeric_field(soil, "raw");
         if (raw !== undefined) {
-            if (raw < 0 || raw > 65535) {
+            if (!withinTelemetryRange(raw, TELEMETRY_FIELD_RANGES.soilRaw)) {
                 this.logger.write_warn(
                     "prometheus/publishSoilRawOutOfRange",
                     `Source: ${sanitized}, raw out of 16-bit ADC range (${raw}), skipping Soil_Moisture_Raw gauge`,
@@ -2632,8 +2633,8 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                         source: sanitized,
                         field: "raw",
                         value: boundForLog(raw),
-                        minRange: 0,
-                        maxRange: 65535,
+                        minRange: TELEMETRY_FIELD_RANGES.soilRaw.min,
+                        maxRange: TELEMETRY_FIELD_RANGES.soilRaw.max,
                     }
                 );
             } else {

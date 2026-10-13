@@ -19,8 +19,10 @@ import {
   LOG_VALUE_MAX_LENGTH,
   read_file_yaml_first,
   stepThrottle,
+  TELEMETRY_FIELD_RANGES,
   truncateForLog,
   truncateForLogList,
+  withinTelemetryRange,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
 import type { ThrottleState } from "../../../src/dodsonlabs/SystemFunctions";
@@ -844,5 +846,39 @@ describe("stepThrottle", () => {
       fire: true,
       suppressedCount: 1,
     });
+  });
+});
+
+describe("withinTelemetryRange", () => {
+  it("treats bounds as inclusive", () => {
+    const range = TELEMETRY_FIELD_RANGES.airHumidityPercent;
+    expect(withinTelemetryRange(0, range)).toBe(true);
+    expect(withinTelemetryRange(100, range)).toBe(true);
+    expect(withinTelemetryRange(-0.1, range)).toBe(false);
+    expect(withinTelemetryRange(100.1, range)).toBe(false);
+    expect(withinTelemetryRange(42, range)).toBe(true);
+  });
+
+  it("leaves a missing bound open", () => {
+    const range = TELEMETRY_FIELD_RANGES.pressurePa;
+    expect(withinTelemetryRange(0, range)).toBe(true);
+    expect(withinTelemetryRange(-1, range)).toBe(false);
+    expect(withinTelemetryRange(1e12, range)).toBe(true);
+  });
+
+  it("pins the shared table's values — both enforcement layers read these", () => {
+    // The routing layer (MqttNetworking) and the publishers
+    // (PrometheusWriter) both compare against this table, so an edit here
+    // changes both layers at once; these pins keep the intended physical
+    // policy itself visible in the suite.
+    expect(TELEMETRY_FIELD_RANGES.airTemperatureF).toEqual({ min: -100, max: 200 });
+    expect(TELEMETRY_FIELD_RANGES.airHumidityPercent).toEqual({ min: 0, max: 100 });
+    expect(TELEMETRY_FIELD_RANGES.pressurePa).toEqual({ min: 0 });
+    expect(TELEMETRY_FIELD_RANGES.altitudeM).toEqual({ min: -1000, max: 20000 });
+    expect(TELEMETRY_FIELD_RANGES.waterTemperatureF).toEqual({ min: -50, max: 212 });
+    expect(TELEMETRY_FIELD_RANGES.lux).toEqual({ min: 0 });
+    expect(TELEMETRY_FIELD_RANGES.uvIndex).toEqual({ min: 0 });
+    expect(TELEMETRY_FIELD_RANGES.soilMoisturePercent).toEqual({ min: 0, max: 100 });
+    expect(TELEMETRY_FIELD_RANGES.soilRaw).toEqual({ min: 0, max: 65535 });
   });
 });

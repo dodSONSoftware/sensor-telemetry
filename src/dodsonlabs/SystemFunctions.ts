@@ -700,3 +700,65 @@ export function stepThrottle(
   state.suppressedCount = 0;
   return { fire: true, suppressedCount: suppressed };
 }
+
+// **** telemetry physical ranges
+
+/**
+ * The physical range policy for one telemetry field, in the unit the
+ * checks compare in (Fahrenheit for temperatures, AFTER any unit
+ * conversion). Bounds are inclusive; a missing bound means "no bound on
+ * that side".
+ *
+ * This table is the ONLY place a telemetry field's physical bounds are
+ * defined. Two layers enforce them on purpose — the routing layer
+ * (MqttNetworking.is_telemetry_valid) rejects a message whose required
+ * reading is out of range so it is not counted as accepted or stamped
+ * fresh, and the publishers (PrometheusWriter) skip the gauge for an
+ * out-of-range value — and both read these same values, so the layers
+ * cannot drift apart (a one-sided edit used to be possible when the
+ * bounds were hardcoded in each layer). Finiteness is a separate
+ * concern and is not expressed here: a finiteness-only guard (pressure,
+ * altitude at the publisher) is "no range policy" at that layer, while
+ * the field's range — if it has one — still lives in this table.
+ */
+export interface TelemetryRange {
+  min?: number;
+  max?: number;
+}
+
+export const TELEMETRY_FIELD_RANGES = {
+  // Air (bme280 / sht35). Temperatures arrive in Celsius; the routing
+  // layer converts to Fahrenheit before the check, matching the
+  // publisher.
+  airTemperatureF: { min: -100, max: 200 },
+  airHumidityPercent: { min: 0, max: 100 },
+  // Pressure must be physically non-negative. There is deliberately no
+  // upper bound — a general atmospheric "max" is not a defensible range
+  // without a deployment contract.
+  pressurePa: { min: 0 },
+  // The barometric range comfortably encompasses every plausible
+  // fixed-sensor deployment (lowest land surface ~-430 m; well above the
+  // highest attainable barometric altitude) while rejecting obviously
+  // invalid values.
+  altitudeM: { min: -1000, max: 20000 },
+  // Water (ds18b20).
+  waterTemperatureF: { min: -50, max: 212 },
+  // Light (ltr390): cannot be negative; no defensible upper bound.
+  lux: { min: 0 },
+  uvIndex: { min: 0 },
+  // Soil (yl69_fc28 / plantmate_soil): calibrated percent, and the
+  // uncalibrated 16-bit ADC value.
+  soilMoisturePercent: { min: 0, max: 100 },
+  soilRaw: { min: 0, max: 65535 },
+} as const satisfies Record<string, TelemetryRange>;
+
+/**
+ * True when value sits within the field's physical range (bounds
+ * inclusive, missing bounds open).
+ */
+export function withinTelemetryRange(value: number, range: TelemetryRange): boolean {
+  return (
+    (range.min === undefined || value >= range.min) &&
+    (range.max === undefined || value <= range.max)
+  );
+}
