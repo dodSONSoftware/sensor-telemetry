@@ -4,6 +4,11 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.4.4] — Bronze Falcon (2026-10-12)
+
+- Forwarded sensor-log bodies no longer leak `message_schema_version`: the V3 rename of `schema_version` was extracted and carried as the `schema_version` metadata field, but only the old spelling was removed from the log data — a log message without a `message`/`msg` field forwards the whole log data as its body, so the key (and its value) survived into the forwarded log text. It is now removed alongside its sibling service-managed fields (`schema_version`, `runtime_id`, `firmware_version`, `uptime_ms`); the value still reaches Loki via the `schema_version` metadata label
+- A regression test forwards a log document carrying top-level `message_schema_version` with no `message`/`msg` field and pins that the key is absent from the forwarded body while `schema_version` and `runtime_id` remain in the metadata; it fails against the pre-fix handler
+
 ## [4.4.3] — Bronze Falcon (2026-10-12)
 
 - Repeated SUBACK denials are now tiered like connection failures: because the service re-subscribes on every (re)connect, a persistently denying broker previously re-logged a full `mqtt_subscription_failed` ERROR for every topic on every reconnect (every 5 s during a reconnect storm). Only the first denial of the current denial state is now a full ERROR (with the error object); repeats are a WARN carrying the attempt count, and any granted subscription resets the tier so the next denial starts fresh at its full ERROR. The `mqtt_subscription_failed` event name and the `subscription_active` / `mqtt_subscription_active` reporting are unchanged

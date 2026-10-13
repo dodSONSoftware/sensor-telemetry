@@ -1991,6 +1991,32 @@ describe("bounded structured metadata in forwarded sensor logs (regression P2-2)
     expect(meta.level).toBe("info");
   });
 
+  it("does not leak message_schema_version into a forwarded log body lacking a message field", () => {
+    // message_schema_version is the V3 rename of schema_version: it is
+    // extracted and carried as metadata.schema_version, and it must be
+    // removed from the log data like the old spelling. A log message
+    // without a message/msg field forwards the WHOLE log data as its
+    // body, so a missing delete would leak the key into the body.
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: "src",
+      level: "info",
+      message_schema_version: "v3",
+      runtime_id: "r1",
+    });
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    // The forwarded body is the JSON-serialized log data: the key is gone,
+    // its sibling service-managed field is gone too...
+    expect(info?.[1]).not.toContain("message_schema_version");
+    expect(info?.[1]).not.toContain("runtime_id");
+    // ...and the value is still carried as structured metadata.
+    expect((info?.[2] as Record<string, unknown>).schema_version).toBe("v3");
+    expect((info?.[2] as Record<string, unknown>).runtime_id).toBe("r1");
+  });
+
   it("bounds large strings nested inside data", () => {
     const meta = logMeta({
       message_type: "log",

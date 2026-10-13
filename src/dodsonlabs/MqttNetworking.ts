@@ -1200,8 +1200,13 @@ export class MqttNetworking implements IMqttNetworking {
         const uptimeMs = sysFunc.get_millisecond_field(json_doc, "uptime_ms");
         const sequence = sysFunc.get_numeric_field(json_doc, "sequence");
 
-        // Remove service-managed fields from log data (not metadata)
+        // Remove service-managed fields from log data (not metadata).
+        // message_schema_version is the V3 rename of schema_version (both
+        // spellings are accepted above and carried as metadata.schema_version):
+        // without its own delete, a message without a message/msg field
+        // forwards the whole logData as the body and the key leaks into it.
         delete logData["schema_version"];
+        delete logData["message_schema_version"];
         delete logData["runtime_id"];
         delete logData["firmware_version"];
         delete logData["uptime_ms"];
