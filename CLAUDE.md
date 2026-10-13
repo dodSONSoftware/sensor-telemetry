@@ -6,9 +6,9 @@ Guidance for Claude Code working in Sensor Telemetry Services (Node.js 22 / Type
 
 - Read the relevant document(s) below **before modifying behavior**. Code and tests win over stale prose; update affected documentation with each change.
 - Prefer minimal, targeted changes; preserve public metric names, config compatibility where possible, API behavior and telemetry validation. Add regression tests for changed contracts.
-- Run `npm run build && npm run lint && npm test -- --runInBand` before completion; report any failures. `/blt` performs the build/lint/test gate without committing.
+- Run `npm run build && npm run lint && npm test -- --runInBand` **from `code/`** before completion; report any failures. `/blt` performs the build/lint/test gate without committing.
 - Never log secrets or unsanitized MQTT input. Never alter deployment secrets or commit `.env`.
-- When releasing, `/git-commit` updates version files, CHANGELOG and README; `src/version.ts` `APP_VERSION`/`APP_NAME` assignments intentionally have **no trailing semicolons** for its scripts.
+- When releasing, `/git-commit` updates version files, CHANGELOG and README; `code/src/version.ts` `APP_VERSION`/`APP_NAME` assignments intentionally have **no trailing semicolons** for its scripts.
 
 ## Documentation map
 
@@ -23,6 +23,10 @@ Guidance for Claude Code working in Sensor Telemetry Services (Node.js 22 / Type
 | [README](README.md) | Operator usage, API and deployment. |
 | [CHANGELOG](CHANGELOG.md) | Versioned change history (newest first). |
 
+## Layout
+
+The repo root holds documentation only (this file, README, CHANGELOG, `docs/`); all code and code-related files — `src/`, `tests/`, `package.json`, `tsconfig*.json`, `jest.*`, `eslint.config.mjs`, `config.yml`, `Dockerfile`, `docker-compose.yml`, `docker-refresh.sh` — live in `code/`, and npm/docker commands run from there.
+
 ## Navigation
 
-`src/index.ts` boots and shuts down; `src/dodsonlabs/MqttNetworking.ts` handles MQTT; `src/dodsonlabs/PrometheusWriter.ts` owns metrics and HTTP; `src/dodsonlabs/SystemFunctions.ts` owns typed field and logging helpers; `src/schemas/config.ts` validates configuration; `src/dodsonlabs/Logger.ts` and `LokiTransport.ts` handle redacted logs. Suites mirror `src` in `tests/__tests__/`.
+`code/src/index.ts` boots and shuts down; `code/src/dodsonlabs/MqttNetworking.ts` handles MQTT; `code/src/dodsonlabs/PrometheusWriter.ts` owns metrics and HTTP; `code/src/dodsonlabs/SystemFunctions.ts` owns typed field and logging helpers; `code/src/schemas/config.ts` validates configuration; `code/src/dodsonlabs/Logger.ts` and `LokiTransport.ts` handle redacted logs. Suites mirror `code/src` in `code/tests/__tests__/`.

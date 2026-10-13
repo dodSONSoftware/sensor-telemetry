@@ -7,7 +7,10 @@ It establishes how functionality, reliability, and correctness are verified befo
 
 ## Quality gate
 
+All commands run from `code/`:
+
 ```bash
+cd code
 npm ci
 npm run build
 npm run lint
@@ -15,7 +18,7 @@ npm test -- --runInBand
 npm run test:coverage -- --runInBand
 ```
 
-`npm run build` invokes `tsc` and copies `config.yml` into `dist/`. `npm test` invokes Jest through `ts-jest`, with `tsconfig.jest.json` and `jest.setup.ts`; test suites live under `tests/__tests__/`. Running a focused suite: `npx jest tests/__tests__/dodsonlabs/PrometheusWriterDefaultMetrics.test.ts --runInBand`. Use `/blt` in Claude Code to run its build/lint/test workflow; it does not commit.
+`npm run build` invokes `tsc` and copies `config.yml` into `dist/`. `npm test` invokes Jest through `ts-jest`, with `tsconfig.jest.json` and `jest.setup.ts`; test suites live under `tests/__tests__/`. Running a focused suite (from `code/`): `npx jest tests/__tests__/dodsonlabs/PrometheusWriterDefaultMetrics.test.ts --runInBand`. Use `/blt` in Claude Code to run its build/lint/test workflow; it does not commit.
 
 ## Suite map
 

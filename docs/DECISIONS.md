@@ -9,7 +9,7 @@ These are decisions inferred from the current implementation and tests, not sepa
 
 ## D-01 — Validate configuration at every entry point
 
-**Decision:** A strict Zod schema validates startup, write and reload inputs. Topics are exact and case-fold-unique. **Why:** Prevent silent fallback and routing collisions. **Consequence:** Unknown legacy keys and unsupported wildcard topic filters fail fast (`src/schemas/config.ts`).
+**Decision:** A strict Zod schema validates startup, write and reload inputs. Topics are exact and case-fold-unique. **Why:** Prevent silent fallback and routing collisions. **Consequence:** Unknown legacy keys and unsupported wildcard topic filters fail fast (`code/src/schemas/config.ts`).
 
 ## D-02 — Separate runtime changes from construction-time settings
 
@@ -33,7 +33,7 @@ These are decisions inferred from the current implementation and tests, not sepa
 
 ## D-07 — Atomic config replacement and unprivileged Docker
 
-**Decision:** Write YAML using temporary file plus rename and run as uid 1000. **Why:** Avoid partial config files and unnecessary root privileges. **Consequence:** Bind mount must be a writable directory, not a single config file (`SystemFunctions.ts`, `Dockerfile`).
+**Decision:** Write YAML using temporary file plus rename and run as uid 1000. **Why:** Avoid partial config files and unnecessary root privileges. **Consequence:** Bind mount must be a writable directory, not a single config file (`SystemFunctions.ts`, `code/Dockerfile`).
 
 ## D-08 — Single shared Prometheus registry
 

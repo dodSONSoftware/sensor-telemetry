@@ -4,6 +4,11 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.5.0] — Brass Falcon (2026-10-13)
+
+- All code and build/deployment files (`src/`, `tests/`, `package.json`, `package-lock.json`, `tsconfig*.json`, `jest.*`, `eslint.config.mjs`, `config.yml`, `Dockerfile`, `docker-compose.yml`, `docker-refresh.sh`, `.dockerignore`) move from the repository root into `code/` — the root now holds documentation only (CLAUDE.md, README, CHANGELOG, `docs/`), and all npm and Docker commands run from `code/`. Files moved without content changes apart from path-reference updates; no behavior change
+- The Docker build context is now `code/` (`docker build -t sensor-telemetry code/`), and the compose file's local `.env` for the config token is expected at `code/.env` beside `code/docker-compose.yml`
+
 ## [4.4.12] — Bronze Falcon (2026-10-13)
 
 - Project documentation is reorganized from a single dense CLAUDE.md into a topic-specific `docs/` set — Architecture, Configuration, Invariants, Engineering Decisions, Testing, and Known Issues — that CLAUDE.md now indexes as a documentation map; the Dockerfile's config-folder and port-hardcoding comments point to `docs/CONFIGURATION.md` instead of CLAUDE.md. Documentation-only restructure, no behavior change

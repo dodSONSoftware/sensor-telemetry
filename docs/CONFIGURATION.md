@@ -7,7 +7,7 @@ It serves as the authoritative reference for configuring and maintaining consist
 
 ## Sources and validation
 
-Startup checks `/app/configs/config.yml`, `./config.yml`, then `./dist/config.yml` in order (`CONFIG_FILE_CANDIDATES`). An existing but unreadable or malformed higher-priority file fails startup; it is not silently bypassed. Startup, `POST /write-config`, and `GET /reload-config` share the strict Zod `configSchema` (`src/schemas/config.ts`): missing required keys, unknown keys, wrong types and invalid bounds are errors. `config.yml` in this repository is an example of deployment-specific values, **not** a collection of universal defaults.
+Startup checks `/app/configs/config.yml`, `./config.yml`, then `./dist/config.yml` in order (`CONFIG_FILE_CANDIDATES`); the relative candidates resolve against the working directory, so run the service from `code/` in development. An existing but unreadable or malformed higher-priority file fails startup; it is not silently bypassed. Startup, `POST /write-config`, and `GET /reload-config` share the strict Zod `configSchema` (`code/src/schemas/config.ts`): missing required keys, unknown keys, wrong types and invalid bounds are errors. `code/config.yml` in this repository is an example of deployment-specific values, **not** a collection of universal defaults.
 
 ## YAML keys
 
@@ -40,4 +40,4 @@ Defaults listed above reflect code paths in `PrometheusWriter.ts` and routing, n
 
 ## Docker operational requirements
 
-Mount a **directory**, not an individual config file, read-write at `/app/configs`; ensure host directory owner is uid/gid 1000 so atomic rename works. The supplied port value 32002 appears in `config.yml`, Docker `EXPOSE`, Docker `HEALTHCHECK` and Compose port mapping; update the active config and deployment together if changing it. The example Compose file expects a local `.env` for the config token (`.env` is git-ignored). See `docker-refresh.sh` and `README.md` for deployment procedures.
+Mount a **directory**, not an individual config file, read-write at `/app/configs`; ensure host directory owner is uid/gid 1000 so atomic rename works. The supplied port value 32002 appears in `config.yml`, Docker `EXPOSE`, Docker `HEALTHCHECK` and Compose port mapping; update the active config and deployment together if changing it. The example Compose file expects a local `.env` for the config token (`.env` is git-ignored); `docker compose` resolves it from the compose project directory, so it belongs at `code/.env` beside `code/docker-compose.yml`. See `code/docker-refresh.sh` and `README.md` for deployment procedures.

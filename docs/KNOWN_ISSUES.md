@@ -9,7 +9,7 @@ No additional unverified defects are asserted here. The following are **confirme
 
 | ID | Status | Limitation / impact | Workaround or improvement |
 | --- | --- | --- | --- |
-| KI-01 | Open — deployment constraint | Changing `apiPort` in YAML alone leaves Compose port forwarding and image healthcheck on 32002. | Update `config.yml`, Compose ports and Dockerfile healthcheck/EXPOSE together; later derive all from one runtime setting. |
+| KI-01 | Open — deployment constraint | Changing `apiPort` in YAML alone leaves Compose port forwarding and image healthcheck on 32002. | Update `code/config.yml`, Compose ports and the Dockerfile healthcheck/EXPOSE together; later derive all from one runtime setting. |
 | KI-02 | Open — deployment constraint | A file bind mount or unwritable `/app/configs` directory blocks atomic `/write-config` replacement. | Mount the containing directory read-write, owned by uid/gid 1000. |
 | KI-03 | Open — security configuration | If `SENSOR_TELEMETRY_CONFIG_TOKEN` is absent, read/write/reload routes accept unauthenticated requests. Permissive CORS does not protect them. | Set token and restrict network exposure; consider requiring auth by default. |
 | KI-04 | Open — functional behavior | MQTT broker/topic, HTTP port, label limits and `lokiUrl` changes are not hot-reloaded. | Restart the process after persisting restart-only keys. |

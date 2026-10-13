@@ -24,15 +24,15 @@ config.yml → Zod schema → startup; write/reload → runtime config update
 
 | File | Responsibility |
 | --- | --- |
-| `src/index.ts` | Configuration/bootstrap, fatal handlers, startup readiness wait, ordered shutdown. |
-| `src/dodsonlabs/MqttNetworking.ts` | MQTT connect/reconnect/SUBACK tracking, V3 message routing, payload rejection, runtime configuration coordination. |
-| `src/dodsonlabs/PrometheusWriter.ts` | Metrics registry and gauge updates, bounded labels, stale-series removal, HTTP endpoints and configuration API. Constructor starts HTTP server. |
-| `src/dodsonlabs/SystemFunctions.ts` | Typed field reads, telemetry range table, bounded log serialization, throttling, YAML I/O and source-label regex helpers. |
-| `src/dodsonlabs/Interfaces.ts` | Cross-module contracts including untrusted `JsonObject` and fixed MQTT drop reasons. |
-| `src/dodsonlabs/Logger.ts` | Winston logging, metadata redaction, optional Loki transport lifecycle. |
-| `src/dodsonlabs/LokiTransport.ts` | Buffered Loki JSON push, backpressure bounds, direct-console failure reporting and shutdown drain. |
-| `src/schemas/config.ts` | Strict Zod config validation shared by startup/write/reload. |
-| `src/common/global.ts`, `src/version.ts` | Service identity, logger construction, release metadata. |
+| `code/src/index.ts` | Configuration/bootstrap, fatal handlers, startup readiness wait, ordered shutdown. |
+| `code/src/dodsonlabs/MqttNetworking.ts` | MQTT connect/reconnect/SUBACK tracking, V3 message routing, payload rejection, runtime configuration coordination. |
+| `code/src/dodsonlabs/PrometheusWriter.ts` | Metrics registry and gauge updates, bounded labels, stale-series removal, HTTP endpoints and configuration API. Constructor starts HTTP server. |
+| `code/src/dodsonlabs/SystemFunctions.ts` | Typed field reads, telemetry range table, bounded log serialization, throttling, YAML I/O and source-label regex helpers. |
+| `code/src/dodsonlabs/Interfaces.ts` | Cross-module contracts including untrusted `JsonObject` and fixed MQTT drop reasons. |
+| `code/src/dodsonlabs/Logger.ts` | Winston logging, metadata redaction, optional Loki transport lifecycle. |
+| `code/src/dodsonlabs/LokiTransport.ts` | Buffered Loki JSON push, backpressure bounds, direct-console failure reporting and shutdown drain. |
+| `code/src/schemas/config.ts` | Strict Zod config validation shared by startup/write/reload. |
+| `code/src/common/global.ts`, `code/src/version.ts` | Service identity, logger construction, release metadata. |
 
 ## Message pipeline
 
@@ -44,8 +44,8 @@ Accepted sensor traffic updates readings/health and last-seen communication time
 
 `PrometheusWriter` normalizes source and firmware-version label values, disambiguates lossy collisions with an eight-hex-character SHA-256 suffix, and caps cardinality with reserved fallback labels and rejection counters. If `staleSourceRemovalSecs > 0`, a timer removes idle source series and releases admission slots; fallback series are never evicted. When unset or zero, historical series remain until process restart.
 
-`/health` means the HTTP process responds; `/ready` requires both MQTT connectivity and acknowledged subscriptions. `src/index.ts` registers signal and fatal handlers before constructing networking, performs a bounded graceful shutdown, closes networking/HTTP before flushing the logger's Loki transport, and preserves fatal exit status.
+`/health` means the HTTP process responds; `/ready` requires both MQTT connectivity and acknowledged subscriptions. `code/src/index.ts` registers signal and fatal handlers before constructing networking, performs a bounded graceful shutdown, closes networking/HTTP before flushing the logger's Loki transport, and preserves fatal exit status.
 
 ## Deployment boundaries
 
-`Dockerfile` runs the service as uid 1000 and does not bake deployment configuration into the runtime image; the directory mounted at `/app/configs` must be writable for atomic config replacement. `docker-compose.yml` exposes 32002. Configuration validation is in `src/schemas/config.ts`; deployment and environment behavior are documented in [CONFIGURATION.md](CONFIGURATION.md).
+`code/Dockerfile` runs the service as uid 1000 and does not bake deployment configuration into the runtime image; the directory mounted at `/app/configs` must be writable for atomic config replacement. `code/docker-compose.yml` exposes 32002. Configuration validation is in `code/src/schemas/config.ts`; deployment and environment behavior are documented in [CONFIGURATION.md](CONFIGURATION.md).

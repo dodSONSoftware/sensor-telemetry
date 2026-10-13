@@ -1,6 +1,6 @@
 # /git-commit: Analyze and Commit Workflow
 
-Analyze all changes in the repository, update CLAUDE.md, README.md, and CHANGELOG.md to reflect current project state, create a formatted commit message, stage everything, and commit. All commands execute from the project root.
+Analyze all changes in the repository, update CLAUDE.md, README.md, and CHANGELOG.md to reflect current project state, create a formatted commit message, stage everything, and commit. All commands execute from the project root; all application code and build files live in `code/`.
 
 ## Steps
 
@@ -8,9 +8,9 @@ Analyze all changes in the repository, update CLAUDE.md, README.md, and CHANGELO
 
 Run these before making any changes:
 - `git status --porcelain=v1` — record the change set (baseline for step 1; this command's purpose is to commit these changes, so a dirty tree is expected)
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && test -f "$PROJECT_ROOT/package.json"` — verify package.json exists at project root
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "try { JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/package.json')); true } catch(e) { false }"` — validate package.json syntax
-- `test -f src/version.ts && grep -E "^export const APP_(VERSION|NAME) = " src/version.ts` — get the current app version and release codename for reference. `src/version.ts` is the app version's source of truth (reported by `/about`); `package.json` must stay in sync with it. If `version.ts` is missing or either constant is missing, abort with a clear error.
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && test -f "$PROJECT_ROOT/code/package.json"` — verify package.json exists at `code/`
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "try { JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/code/package.json')); true } catch(e) { false }"` — validate package.json syntax
+- `test -f code/src/version.ts && grep -E "^export const APP_(VERSION|NAME) = " code/src/version.ts` — get the current app version and release codename for reference. `code/src/version.ts` is the app version's source of truth (reported by `/about`); `code/package.json` must stay in sync with it. If `version.ts` is missing or either constant is missing, abort with a clear error.
 - `test -f CHANGELOG.md` — verify the changelog exists. If it is missing, abort with a clear error rather than inventing a format.
 
 If checks fail, abort with clear error message.
@@ -44,7 +44,7 @@ Apply semantic versioning rules:
 
 Read current version and compute new version:
 ```bash
-PACKAGE_JSON=$(git rev-parse --show-toplevel)/package.json
+PACKAGE_JSON=$(git rev-parse --show-toplevel)/code/package.json
 CURRENT_VERSION=$(node -p "require('$PACKAGE_JSON').version")
 # Compute NEW_VERSION based on version bump rules
 ```
@@ -59,12 +59,12 @@ Verify the update:
 node -p "require('$PACKAGE_JSON').version"
 ```
 
-**Update `APP_VERSION` in `src/version.ts`:**
+**Update `APP_VERSION` in `code/src/version.ts`:**
 
-`src/version.ts` is the app version's source of truth (`src/common/global.ts` imports `APP_VERSION` into `serviceMetadata`, which `/about` and the `/endpoints` documentation report), so it must equal the new package.json version. Apply the same replace-and-verify discipline as the version bump (exactly one assignment):
+`code/src/version.ts` is the app version's source of truth (`code/src/common/global.ts` imports `APP_VERSION` into `serviceMetadata`, which `/about` and the `/endpoints` documentation report), so it must equal the new `code/package.json` version. Apply the same replace-and-verify discipline as the version bump (exactly one assignment):
 ```js
 const fs = require("fs");
-const VERSION_TS = "src/version.ts";
+const VERSION_TS = "code/src/version.ts";
 let content = fs.readFileSync(VERSION_TS, "utf8");
 
 const matches = content.match(/^export const APP_VERSION = "[^"]*"\s*$/gm);
@@ -84,12 +84,12 @@ if (!content.includes(`export const APP_VERSION = "${NEW_VERSION}"`)) {
 fs.writeFileSync(VERSION_TS, content);
 ```
 
-**Update `APP_NAME` (the release codename) in `src/version.ts`:**
+**Update `APP_NAME` (the release codename) in `code/src/version.ts`:**
 
 `APP_NAME` is the release codename. It is a deterministic function of the final version (see the RELEASE CODENAME SCHEME at the end of this file): look up `MAJOR` in the Animal table and `MINOR` in the Material table, and name it `<Material> <Animal>`. `PATCH` does not affect the codename — a patch bump on the same major.minor leaves `APP_NAME` unchanged. Unlike a drifted version, which is ambiguous and stops the workflow, the codename can always be recomputed, so an authored version bump whose `APP_NAME` was left stale is corrected here, not reported. If the existing `APP_NAME` already equals the derived name, no edit is needed. Apply the same replace-and-verify discipline:
 ```js
 const fs = require("fs");
-const VERSION_TS = "src/version.ts";
+const VERSION_TS = "code/src/version.ts";
 let content = fs.readFileSync(VERSION_TS, "utf8");
 
 const matches = content.match(/^export const APP_NAME = "[^"]*"\s*$/gm);
@@ -183,8 +183,8 @@ EOF
 Run:
 - `git status` — confirm working tree is clean
 - `git log --oneline -3` — confirm commit landed correctly
-- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "require('$PROJECT_ROOT/package.json').version"` — verify version in committed commit
-- `grep -E "^export const APP_(VERSION|NAME) = " src/version.ts` — verify `APP_VERSION` equals the committed version and the codename matches the committed version's major.minor
+- `PROJECT_ROOT=$(git rev-parse --show-toplevel) && node -p "require('$PROJECT_ROOT/code/package.json').version"` — verify version in committed commit
+- `grep -E "^export const APP_(VERSION|NAME) = " code/src/version.ts` — verify `APP_VERSION` equals the committed version and the codename matches the committed version's major.minor
 
 ## Error Handling
 
@@ -192,7 +192,7 @@ Run:
 - **version.ts and package.json disagree on the current version**: Abort with a message showing both values; the drift is ambiguous and must be resolved by hand first
 - **Malformed package.json**: Show parsing error and exit
 - **Git command failure**: Show error output and exit code
-- **Commit failure**: Rollback the version bump and documentation edits (restore original package.json, src/version.ts, README.md, CLAUDE.md, and CHANGELOG.md)
+- **Commit failure**: Rollback the version bump and documentation edits (restore original code/package.json, code/src/version.ts, README.md, CLAUDE.md, and CHANGELOG.md)
 
 ## Output
 
@@ -212,10 +212,10 @@ After successful commit, return:
 ```
 [4.5.0, Brass Falcon] feat: add user authentication
 
-- src/middleware/auth.ts: implement JWT-based auth middleware
-- src/controllers/userController.ts: add login/register endpoints
-- tests/__tests__/auth.test.ts: add auth middleware tests
-- package.json: bump version 4.4.1 → 4.5.0
+- code/src/middleware/auth.ts: implement JWT-based auth middleware
+- code/src/controllers/userController.ts: add login/register endpoints
+- code/tests/__tests__/auth.test.ts: add auth middleware tests
+- code/package.json: bump version 4.4.1 → 4.5.0
 - README.md: add authentication section with usage examples
 
 Notable changes: Users can now authenticate via JWT tokens. Breaking: /api/* routes require Authorization header.

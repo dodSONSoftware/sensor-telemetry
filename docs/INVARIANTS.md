@@ -18,4 +18,4 @@ These invariants must be preserved during development, refactoring, maintenance,
 11. **Loki isolation:** Transport errors cannot recurse into Winston or become unhandled rejections; failed batches remain bounded and observable. Shutdown flushes Loki **after** networking/HTTP close logs.
 12. **Termination:** Register fatal/signal handlers before networking construction; shutdown remains idempotent and bounded; fatal errors must not be downgraded to a successful exit.
 
-Tests pin many of these contracts; see [TESTING.md](TESTING.md) and `tests/__tests__/`.
+Tests pin many of these contracts; see [TESTING.md](TESTING.md) and `code/tests/__tests__/`.
