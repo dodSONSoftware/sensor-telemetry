@@ -1628,7 +1628,10 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
                     `Stale-source sweep pass failed: ${ensureError(error).message}`,
                     {
                         event: "stale_source_sweep_error",
-                        logType: "audit",
+                        // Service, not audit: the sweep runs unattended on
+                        // a timer — no user/admin initiates an individual
+                        // pass (see the LogType taxonomy in Interfaces.ts).
+                        logType: "service",
                         error,
                     }
                 );
@@ -1719,7 +1722,11 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
             `Removing per-source series (including sensor_last_seen_timestamp_seconds) for source idle for ${ageSeconds}s (threshold ${this.staleSourceRemovalSecs}s)`,
             {
                 event: "stale_source_removed",
-                logType: "audit",
+                // Service, not audit: the eviction is timer-driven (the
+                // sweep pass runs unattended) — no user/admin initiates an
+                // individual eviction (see the LogType taxonomy in
+                // Interfaces.ts).
+                logType: "service",
                 source: truncateForLog(source),
                 ageSeconds,
                 thresholdSeconds: this.staleSourceRemovalSecs,

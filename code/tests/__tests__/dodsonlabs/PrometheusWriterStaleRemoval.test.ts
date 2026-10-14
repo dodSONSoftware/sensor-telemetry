@@ -240,6 +240,9 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
     const evictions = evictionWarnings();
     expect(evictions).toHaveLength(1);
     expect(evictions[0]).toMatchObject({
+      // Timer-driven eviction: service, not audit (no user initiates an
+      // individual eviction — see the LogType taxonomy in Interfaces.ts).
+      logType: "service",
       source: "alpha",
       thresholdSeconds: 3600,
       ageSeconds: expect.any(Number),
@@ -492,7 +495,9 @@ describe("PrometheusWriter stale-source removal (staleSourceRemovalSecs)", () =>
       .map((call) => call[2] as Record<string, unknown> | undefined)
       .filter((meta) => meta?.event === "stale_source_sweep_error");
     expect(sweepErrors).toHaveLength(1);
-    expect(sweepErrors[0]).toMatchObject({ logType: "audit" });
+    // Unattended timer pass: service, not audit (same rationale as
+    // stale_source_removed above).
+    expect(sweepErrors[0]).toMatchObject({ logType: "service" });
     expect((sweepErrors[0]!.error as Error).message).toBe("simulated gauge failure");
     // The in-flight series are untouched by the failed pass.
     expect(await seriesValue("sensor_health_cpu_temperature_c", "sweep-err")).toBe(22);

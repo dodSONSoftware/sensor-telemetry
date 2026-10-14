@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.4] — Copper Falcon (2026-10-14)
+
+- The timer-driven stale-source sweep events (`stale_source_removed` and `stale_source_sweep_error`) are now logged with `logType: "service"` instead of `"audit"` — the documented taxonomy reserves audit for state-changing operations initiated by users/admins, and no user initiates an individual sweep eviction; audit-scoped log queries no longer over-include unattended maintenance events
+
 ## [4.6.3] — Copper Falcon (2026-10-14)
 
 - `docs/KNOWN_ISSUES.md` now records KI-08: stale-source eviction frees the source's admission slot but not its `firmware_version` cardinality slot (no source→firmware map is tracked), so a permanently-gone source's firmware label pins a `sensorSourceCardinalityCap` slot for the process lifetime — the limitation was previously documented only in a code comment; the comment now cross-references KI-08. Documentation-only change, no behavior change
