@@ -38,3 +38,7 @@ These are decisions inferred from the current implementation and tests, not sepa
 ## D-08 — Single shared Prometheus registry
 
 **Decision:** Use an idempotent `initializeDefaultMetrics()` to register `collectDefaultMetrics()` once into the same registry as custom metrics; avoid duplicate `process_*` families. **Why:** Duplicate metric names throw and break collection. **Consequence:** When adding custom runtime gauges, check standard names first (`PrometheusWriter.ts`).
+
+## D-09 — Throttle persistent degraded-health reports per (source, reasons)
+
+**Decision:** The `v3_health_degraded` warn fires on first occurrence per bounded (source, reasons-signature) key; repeats re-warn at most every 5 minutes carrying a `suppressedCount`, and the throttle map is capped (a never-tracked key at the cap logs unthrottled). **Why:** A permanently degraded sensor is a persistent state whose live value is the `sensor_health_up` gauge — warn-per-report would flood the log channel (~2,880 warns/day per sensor at a 30 s cadence) — while including the reasons in the key keeps reason changes first-occurrence-visible. **Consequence:** Steady-state degraded-warn volume is bounded; the key content is attacker-controllable payload text (unlike the rejection throttle's closed event-name set), so the map is size-capped instead of closed-set (`MqttNetworking.ts`).

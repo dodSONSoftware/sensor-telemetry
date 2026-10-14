@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.2] — Copper Falcon (2026-10-14)
+
+- The `v3_health_degraded` warning is now throttled per source + reasons set: the first report is always logged, repeats re-warn at most every 5 minutes carrying a `suppressedCount`, and a changed reasons set is logged immediately — a permanently degraded sensor reporting every 30 s no longer emits ~2,880 warn lines a day (the live state remains visible in the `sensor_health_up` gauge)
+
 ## [4.6.1] — Copper Falcon (2026-10-14)
 
 - Forwarded sensor-log lines no longer record the literal `module: "undefined"` / `function: "undefined"` when the device omits those fields — the labels stay unset and the service records its true origin (`networking/log*`) for them, so Loki queries on `module`/`function` no longer match a spurious `undefined` value; lines that carry device-provided `module`/`function` values are unchanged

@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Copper Falcon — firmware 4.6.1.
+**Release:** Copper Falcon — firmware 4.6.2.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -344,7 +344,7 @@ Notes:
 - Unknown device types are dropped with a warning in the logs.
 - Telemetry messages must carry a usable `device` field; a telemetry message without one (missing, null, or blank) is dropped with an `mqtt_telemetry_missing_device` warning. The legacy V2 section-based path (`payload.air`, `payload.water`, ...) is no longer accepted.
 - V3 health payloads must be a JSON object; a non-object payload (string, number, boolean, array) is dropped with an `mqtt_health_invalid_payload` warning and does not refresh `sensor_last_seen_timestamp_seconds`. The empty object `{}` is accepted (every V3 health field is optional).
-- V3 health messages additionally populate the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning.
+- V3 health messages additionally populate the v4 health gauges (`sensor_health_heap_min_free_bytes`, `sensor_health_devices_active`, `sensor_health_devices_configured`, `sensor_health_network_stack_ready`, `sensor_health_wifi_connected`, `sensor_health_mqtt_connected`, `sensor_health_core_1_active`, `sensor_health_outbound_queue_depth`, `sensor_health_outbound_evicted`, `sensor_health_outbound_rejected`, `sensor_health_utc_valid`, `sensor_health_utc_sync_age_sec`). A non-empty `degraded_reasons` array is logged as a `v3_health_degraded` warning: the first report per source + reasons set is always logged, repeats re-warn at most every 5 minutes carrying a `suppressedCount`, and a changed reasons set is logged immediately.
 - All health/diagnostic metrics share the `sensor_health_` prefix (including the system-info gauges `sensor_health_cpu_temperature_c`, `sensor_health_heap_free_bytes`, and `sensor_health_wifi_rssi_dbm`); physical sensor readings do not.
 
 Example V3 SHT35 telemetry message:

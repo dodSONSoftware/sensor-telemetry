@@ -281,3 +281,145 @@ describe("per-event throttle for per-message rejection warnings", () => {
     expect((errors[0]?.[2] as Record<string, unknown>).source).toBeUndefined();
   });
 });
+
+describe("per-(source, reasons) throttle for v3_health_degraded warns", () => {
+  // A permanently degraded sensor reporting every 30s is a persistent
+  // state (the live value is the sensor_health_up gauge), so the re-warn
+  // cadence is 5 minutes, not the rejection throttle's 60s. The key
+  // includes the reasons signature, so a changed reasons set re-fires
+  // immediately.
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const degraded = (source: string, reasons: string[]) => ({
+    message_type: "health",
+    source,
+    payload: { status: "degraded", degraded_reasons: reasons },
+  });
+
+  const degradedWarns = (logger: MockLogger) =>
+    logger.write_warn.mock.calls.filter(
+      (call) => call[2]?.event === "v3_health_degraded"
+    );
+
+  it("logs the first occurrence without suppressedCount and suppresses repeats within the window", () => {
+    const { logger, send } = build();
+    send(degraded("v3-src", ["low_free_heap"]));
+    send(degraded("v3-src", ["low_free_heap"]));
+    send(degraded("v3-src", ["low_free_heap"]));
+
+    const warns = degradedWarns(logger);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.[2]).toMatchObject({
+      source: "v3-src",
+      status: "degraded",
+      degraded_reasons: ["low_free_heap"],
+    });
+    expect((warns[0]?.[2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+  });
+
+  it("re-warns after the 5-minute window with suppressedCount, then restarts the window", () => {
+    const { logger, send } = build();
+    const dateNow = jest.spyOn(Date, "now").mockReturnValue(10_000_000);
+    try {
+      send(degraded("v3-src", ["low_free_heap"])); // first occurrence
+      dateNow.mockReturnValue(10_000_000 + 30_000);
+      send(degraded("v3-src", ["low_free_heap"])); // suppressed (30s cadence)
+      dateNow.mockReturnValue(10_000_000 + 300_001);
+      send(degraded("v3-src", ["low_free_heap"])); // re-warn
+
+      const warns = degradedWarns(logger);
+      expect(warns).toHaveLength(2);
+      expect(warns[1]?.[2]).toMatchObject({ suppressedCount: 1 });
+
+      // The window restarted: a repeat well before 5 minutes is
+      // suppressed again.
+      dateNow.mockReturnValue(10_000_000 + 360_000);
+      send(degraded("v3-src", ["low_free_heap"]));
+      expect(degradedWarns(logger)).toHaveLength(2);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("re-fires immediately when the reasons set changes (new signature, first-occurrence shape)", () => {
+    const { logger, send } = build();
+    const dateNow = jest.spyOn(Date, "now").mockReturnValue(20_000_000);
+    try {
+      send(degraded("v3-src", ["low_free_heap"])); // first occurrence
+      dateNow.mockReturnValue(20_000_000 + 5_000);
+      send(degraded("v3-src", ["low_free_heap", "mqtt_not_connected"])); // new key
+      // The old key is still live too: its next occurrence is suppressed.
+      send(degraded("v3-src", ["low_free_heap"]));
+
+      const warns = degradedWarns(logger);
+      expect(warns).toHaveLength(2);
+      expect(warns[1]?.[2]).toMatchObject({
+        degraded_reasons: ["low_free_heap", "mqtt_not_connected"],
+      });
+      // First-occurrence shape: no suppressedCount on the new signature.
+      expect((warns[1]?.[2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("throttles distinct sources independently (each source keeps first-occurrence visibility)", () => {
+    const { logger, send } = build();
+    send(degraded("src-a", ["low_free_heap"]));
+    send(degraded("src-b", ["low_free_heap"])); // different key — fires
+    send(degraded("src-a", ["low_free_heap"])); // suppressed
+
+    expect(degradedWarns(logger)).toHaveLength(2);
+  });
+
+  it("keeps a re-warn plain (no suppressedCount field) when nothing was suppressed in between", () => {
+    const { logger, send } = build();
+    const dateNow = jest.spyOn(Date, "now").mockReturnValue(30_000_000);
+    try {
+      send(degraded("v3-src", ["low_free_heap"])); // first occurrence
+      dateNow.mockReturnValue(30_000_000 + 300_001);
+      send(degraded("v3-src", ["low_free_heap"])); // re-warn, 0 suppressed
+
+      const warns = degradedWarns(logger);
+      expect(warns).toHaveLength(2);
+      expect((warns[1]?.[2] as Record<string, unknown>).suppressedCount).toBeUndefined();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("caps the throttle map: a never-tracked key at the cap logs unthrottled instead of growing it", () => {
+    const { logger, send, networking } = build();
+    const map = (
+      networking as unknown as { healthDegradedThrottle: Map<string, unknown> }
+    ).healthDegradedThrottle;
+    // Fill the cap with one distinct (source, reasons) key each.
+    for (let i = 0; i < 1024; i++) {
+      send(degraded(`hostile-source-${i}`, ["r"]));
+    }
+    expect(map.size).toBe(1024);
+
+    // A never-tracked key at the cap: logged (the pre-throttle behavior),
+    // and repeated occurrences stay logged — but the map does not grow.
+    send(degraded("one-more", ["r"]));
+    send(degraded("one-more", ["r"]));
+    expect(map.size).toBe(1024);
+    expect(
+      degradedWarns(logger).filter(
+        (call) => (call[2] as Record<string, unknown>).source === "one-more"
+      )
+    ).toHaveLength(2);
+
+    // Tracked keys still throttle: a repeat of a filled-in source is
+    // suppressed.
+    send(degraded("hostile-source-0", ["r"]));
+    expect(
+      degradedWarns(logger).filter(
+        (call) => (call[2] as Record<string, unknown>).source === "hostile-source-0"
+      )
+    ).toHaveLength(1);
+  });
+});

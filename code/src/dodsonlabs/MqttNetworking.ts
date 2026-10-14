@@ -260,6 +260,27 @@ export class MqttNetworking implements IMqttNetworking {
     // most 6 entries for the process lifetime and never needs cleanup.
     private readonly rejectionWarnThrottle = new Map<string, sysFunc.ThrottleState>();
 
+    // Re-warn cadence for the v3_health_degraded warns (see
+    // logDegradedHealthWarn): a degraded report is a persistent STATE,
+    // unlike the fault events the rejection throttle covers, and its live
+    // value sits in the sensor_health_up gauge. The re-warn only proves
+    // the condition is ongoing and carries suppressedCount, so its cadence
+    // is slower than the rejection throttle's 60s — a permanently degraded
+    // sensor reporting every 30s is two warns a minute at the faster
+    // cadence, one every five minutes at this one.
+    private static readonly HEALTH_DEGRADED_REWARN_INTERVAL_MS = 300_000;
+
+    // Throttle state for the v3_health_degraded warns. Keyed by
+    // (bounded source, bounded reasons signature): both components are
+    // log-bounded, so every key is a bounded string — but the CONTENT is
+    // attacker-controlled (a hostile publisher can mint a fresh key per
+    // message), so unlike rejectionWarnThrottle the map is capped. A key
+    // never tracked at the cap logs unthrottled (the pre-throttle
+    // behavior for that key) rather than growing the map: memory stays
+    // bounded and no first-occurrence signal is silently dropped.
+    private static readonly HEALTH_DEGRADED_THROTTLE_MAX_KEYS = 1024;
+    private readonly healthDegradedThrottle = new Map<string, sysFunc.ThrottleState>();
+
     // ********
     // ******** PRIVATE FUNCTIONS
 
@@ -1074,6 +1095,39 @@ export class MqttNetworking implements IMqttNetworking {
         }
     }
 
+    /**
+     * Emit the v3_health_degraded warn. Message, originator, and base
+     * metadata are unchanged from the unthrottled call, so existing
+     * queries and alerting keep working; the only addition is
+     * suppressedCount on a re-warn that had suppressions in between.
+     * suppressedCount undefined (first occurrence, or the untracked-at-cap
+     * path) and 0 (interval elapsed with nothing suppressed in between —
+     * the stepThrottle contract) both keep the plain metadata.
+     */
+    private logDegradedHealthWarn(
+        source: string,
+        status: string | undefined,
+        boundedDegradedReasons: string[],
+        suppressedCount: number | undefined
+    ): void {
+        const metadata: LogMetadata = {
+            event: "v3_health_degraded",
+            logType: "sensor",
+            source: sysFunc.truncateForLog(source),
+            // Bounded like every other untrusted log value: status is
+            // a validated string here, capped at the log limit.
+            status: status === undefined ? undefined : sysFunc.truncateForLog(status),
+            degraded_reasons: boundedDegradedReasons,
+        };
+        this.logger.write_warn(
+            "networking/handleHealth",
+            `Source: ${sysFunc.truncateForLog(source)} reports degraded health: ${boundedDegradedReasons.join(", ")}`,
+            suppressedCount !== undefined && suppressedCount > 0
+                ? { ...metadata, suppressedCount }
+                : metadata
+        );
+    }
+
     private handle_mqtt_message(json_doc: JsonObject): void {
         // initialize
         // message_type is a scalar protocol field: proven scalar at the
@@ -1794,21 +1848,39 @@ export class MqttNetworking implements IMqttNetworking {
         const degradedReasons = Array.isArray(degradedReasonsRaw) ? degradedReasonsRaw : undefined;
         if (degradedReasons !== undefined && degradedReasons.length > 0) {
             // Bound both the number of reasons and each reason's length for the log
-            // channel; the payload array itself is left untouched.
+            // channel; the payload array itself is left untouched. The bounded
+            // form doubles as the throttle key's reasons signature — it is
+            // JSON-encoded, so distinct reason lists never collapse onto one
+            // key — and a changed reasons set is a new key that re-fires
+            // immediately with first-occurrence visibility.
             const boundedDegradedReasons = sysFunc.truncateForLogList(degradedReasons);
-            this.logger.write_warn(
-                "networking/handleHealth",
-                `Source: ${sysFunc.truncateForLog(source)} reports degraded health: ${boundedDegradedReasons.join(", ")}`,
-                {
-                    event: "v3_health_degraded",
-                    logType: "sensor",
-                    source: sysFunc.truncateForLog(source),
-                    // Bounded like every other untrusted log value: status is
-                    // a validated string here, capped at the log limit.
-                    status: status === undefined ? undefined : sysFunc.truncateForLog(status),
-                    degraded_reasons: boundedDegradedReasons,
+            const signature = `${sysFunc.truncateForLog(source)}|${JSON.stringify(boundedDegradedReasons)}`;
+            let state = this.healthDegradedThrottle.get(signature);
+            if (
+                state === undefined &&
+                this.healthDegradedThrottle.size >= MqttNetworking.HEALTH_DEGRADED_THROTTLE_MAX_KEYS
+            ) {
+                // Map at cap (see the field for the hostile-minting
+                // rationale): a never-tracked key logs unthrottled — the
+                // pre-throttle behavior for that key — instead of growing
+                // the map.
+                this.logDegradedHealthWarn(source, status, boundedDegradedReasons, undefined);
+            } else {
+                if (state === undefined) {
+                    // Fresh state (lastWarnMs 0): stepThrottle below always
+                    // fires the first occurrence and starts the window.
+                    state = { lastWarnMs: 0, suppressedCount: 0 };
+                    this.healthDegradedThrottle.set(signature, state);
                 }
-            );
+                const step = sysFunc.stepThrottle(
+                    state,
+                    Date.now(),
+                    MqttNetworking.HEALTH_DEGRADED_REWARN_INTERVAL_MS
+                );
+                if (step.fire) {
+                    this.logDegradedHealthWarn(source, status, boundedDegradedReasons, step.suppressedCount);
+                }
+            }
         }
         // uptime_ms sits at the top level of V3 messages (fallback to payload)
         let uptimeMs = sysFunc.get_millisecond_field(json_doc, "uptime_ms");
