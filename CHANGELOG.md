@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.8] — Copper Falcon (2026-10-14)
+
+- The `/about` description text in `PrometheusWriter.ts` is now accurate against actual behavior: it names the MQTT health topic and the V4 per-device health field set, corrects "memory usage" to free heap memory, names the unit conversions, replaces "Loki-compatible structured labels" with the real design (static per-process Loki stream labels; structured fields ride in the log line body), scopes "runtime configuration updates" to the runtime-effective subset with the remainder explicit as restart-only, and adds stale-source eviction, firmware-version admission with cardinality caps, strict configuration validation, and service/sensor/audit log classification — a regression test pins the description against reintroducing the "structured labels" overstatement or dropping the restart-only caveat
+
 ## [4.6.7] — Copper Falcon (2026-10-14)
 
 - The `ILogger.setLogLevel` JSDoc in `Interfaces.ts` now lists `"critical"` alongside `"error"`, `"warn"`, `"info"`, and `"debug"` — the interface documented the contract for callers, but `Logger.setLogLevel` accepts (and maps) `critical` and the config schema offers it; the interface JSDoc was written before `critical` support landed and had drifted. Documentation-only change, no behavior change

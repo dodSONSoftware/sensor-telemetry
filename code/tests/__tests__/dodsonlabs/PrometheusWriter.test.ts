@@ -1002,6 +1002,24 @@ describe("PrometheusWriter", () => {
       expect(description).toContain("restart");
     });
 
+    it("keeps the /about description accurate about Loki labeling and config application", async () => {
+      // Loki stream labels are static per process ({ service, environment,
+      // version }); the structured fields ride in the line body. The
+      // description must not claim "structured labels".
+      const res = await fetch(`http://127.0.0.1:${port}/about`, {
+        headers: { Connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        about: { description: string };
+      };
+      const description = body.about.description.toLowerCase();
+      expect(description).not.toContain("structured labels");
+      // /write-config applies only the runtime-effective subset; the
+      // restart-only remainder must stay explicit.
+      expect(description).toContain("restart");
+    });
+
     it("serves /endpoints on GET with the advertised verbs", async () => {
       const res = await fetch(`http://127.0.0.1:${port}/endpoints`, {
         headers: { Connection: "close" },
