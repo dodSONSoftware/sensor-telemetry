@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.5] — Copper Falcon (2026-10-14)
+
+- `winston-transport` is now declared as a direct dependency in `code/package.json` (lock file refreshed to match) — `LokiTransport.ts` imports it directly, but it had resolved only as a transitive dependency of `winston` via npm's flat hoisting, so the import would break under stricter package-manager layouts or a winston release that relocates it; declaring it removes that latent startup failure with no behavior change
+
 ## [4.6.4] — Copper Falcon (2026-10-14)
 
 - The timer-driven stale-source sweep events (`stale_source_removed` and `stale_source_sweep_error`) are now logged with `logType: "service"` instead of `"audit"` — the documented taxonomy reserves audit for state-changing operations initiated by users/admins, and no user initiates an individual sweep eviction; audit-scoped log queries no longer over-include unattended maintenance events
