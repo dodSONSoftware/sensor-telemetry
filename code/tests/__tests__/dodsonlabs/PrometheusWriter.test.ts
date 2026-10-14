@@ -18,6 +18,7 @@ import {
   LOG_VALUE_MAX_LENGTH,
   write_file_yaml,
 } from "../../../src/dodsonlabs/SystemFunctions";
+import { APP_NAME } from "../../../src/version";
 import type { ILogger, IMqttNetworking } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
@@ -953,6 +954,7 @@ describe("PrometheusWriter", () => {
         about: {
           name: string;
           version: string;
+          release: string;
           author: string;
           copyright: string;
           license: string;
@@ -969,6 +971,9 @@ describe("PrometheusWriter", () => {
       );
       expect(body.about.license).toBe("MIT");
       expect(body.about.version).toBe(packageJsonVersion);
+      // release is the codename from src/version.ts, the version's source
+      // of truth (package.json carries no codename to cross-check).
+      expect(body.about.release).toBe(APP_NAME);
       expect(body.routes.map((r) => r.route)).toContain("/endpoints");
     });
 

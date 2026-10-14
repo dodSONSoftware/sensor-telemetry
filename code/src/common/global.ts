@@ -8,10 +8,11 @@ import { Logger } from "../dodsonlabs/Logger";
 import type { configSchema } from "../schemas/config";
 import type { z } from "zod";
 
-// The app version comes from src/version.ts — the version's source of truth
-// (reported by /about). package.json is kept in sync with it by the
-// /git-commit workflow, so no module-load lookup is needed.
-import { APP_VERSION } from "../version";
+// The app version and release codename come from src/version.ts — the
+// version's source of truth (reported by /about). package.json is kept in
+// sync with it by the /git-commit workflow, so no module-load lookup is
+// needed.
+import { APP_VERSION, APP_NAME } from "../version";
 
 // Single source of truth for the service's common identity and legal
 // metadata, shared by aboutDude() and the /about endpoint. Each
@@ -19,6 +20,7 @@ import { APP_VERSION } from "../version";
 export const serviceMetadata = {
     name: "Sensor Telemetry Services",
     version: APP_VERSION,
+    release: APP_NAME,
     author: "Randel Dodson",
     copyright: "Copyright © 2026 dodson Software ( dodson labs )",
     license: "MIT",

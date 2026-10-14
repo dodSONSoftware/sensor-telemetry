@@ -6,7 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { aboutDude, serviceMetadata } from "../../../src/common/global";
-import { APP_VERSION } from "../../../src/version";
+import { APP_NAME, APP_VERSION } from "../../../src/version";
 
 // src/version.ts is the authoritative application version, which
 // serviceMetadata.version must report — package.json must stay in sync.
@@ -28,6 +28,10 @@ describe("serviceMetadata (shared service identity)", () => {
     expect(serviceMetadata.version).toBe(APP_VERSION);
     // package.json must stay in sync with src/version.ts
     expect(packageJson.version).toBe(APP_VERSION);
+  });
+
+  it("reports the release codename from src/version.ts", () => {
+    expect(serviceMetadata.release).toBe(APP_NAME);
   });
 });
 

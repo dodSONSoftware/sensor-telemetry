@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.0] — Copper Falcon (2026-10-13)
+
+- The `/about` endpoint now reports the release codename as `release` in its `about` section (e.g., `"release": "Copper Falcon"`), sourced from `APP_NAME` in `code/src/version.ts` — the version's source of truth — through the shared `serviceMetadata`, so the codename moves with every major/minor version bump
+
 ## [4.5.0] — Brass Falcon (2026-10-13)
 
 - All code and build/deployment files (`src/`, `tests/`, `package.json`, `package-lock.json`, `tsconfig*.json`, `jest.*`, `eslint.config.mjs`, `config.yml`, `Dockerfile`, `docker-compose.yml`, `docker-refresh.sh`, `.dockerignore`) move from the repository root into `code/` — the root now holds documentation only (CLAUDE.md, README, CHANGELOG, `docs/`), and all npm and Docker commands run from `code/`. Files moved without content changes apart from path-reference updates; no behavior change
