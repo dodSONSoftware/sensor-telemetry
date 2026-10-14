@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.6] — Copper Falcon (2026-10-14)
+
+- `PrometheusWriter.ts`: the three-line comment and `const result = read_file_yaml(...)` statement in both `handleReadConfig` and `handleReloadConfig` are re-indented to the method body (12 spaces) — the identical blocks had landed at column 0 in both handlers, a paste artifact that made the statements read as module scope; whitespace-only, no behavior change
+
 ## [4.6.5] — Copper Falcon (2026-10-14)
 
 - `winston-transport` is now declared as a direct dependency in `code/package.json` (lock file refreshed to match) — `LokiTransport.ts` imports it directly, but it had resolved only as a transitive dependency of `winston` via npm's flat hoisting, so the import would break under stricter package-manager layouts or a winston release that relocates it; declaring it removes that latent startup failure with no behavior change

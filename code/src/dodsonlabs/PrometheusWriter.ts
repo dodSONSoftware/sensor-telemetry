@@ -1131,9 +1131,9 @@ export class PrometheusWriter {
             // the config change callback. Use /reload-config to apply disk
             // contents to the running service.
             // Pass the logger so a read/parse failure is reported as a structured
-// winston error (respecting the configured level) instead of falling back
-// to a raw console.error in SystemFunctions — the write path already does.
-const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
+            // winston error (respecting the configured level) instead of falling back
+            // to a raw console.error in SystemFunctions — the write path already does.
+            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
                 // Read audit: a SUCCESSFUL read proves the caller held the
@@ -1434,9 +1434,9 @@ const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, t
     private async handleReloadConfig(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         try {
             // Pass the logger so a read/parse failure is reported as a structured
-// winston error (respecting the configured level) instead of falling back
-// to a raw console.error in SystemFunctions — the write path already does.
-const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
+            // winston error (respecting the configured level) instead of falling back
+            // to a raw console.error in SystemFunctions — the write path already does.
+            const result = read_file_yaml<z.infer<typeof configSchema>>(this.configSource, this.logger);
             if (result.data !== null) {
                 const validatedConfig = validateConfig(result.data);
                 // Diff against the RUNNING config before the commit below
