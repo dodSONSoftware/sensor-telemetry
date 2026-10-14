@@ -263,9 +263,10 @@ export class PrometheusWriter {
     // sensor_last_seen_timestamp_seconds, whose series is removed with the
     // source on eviction. Bounded by sourceCardinalityCap: entries are added
     // in mark_source_seen and deleted in evictStaleSource.
-    // Known limitation: admittedFirmwareVersions slots are NOT freed on
-    // eviction — no source→firmware map is tracked, so a permanently-gone
-    // source's firmware label keeps its cap slot for the process lifetime.
+    // Known limitation (docs/KNOWN_ISSUES.md KI-08): admittedFirmwareVersions
+    // slots are NOT freed on eviction — no source→firmware map is tracked,
+    // so a permanently-gone source's firmware label keeps its cap slot for
+    // the process lifetime.
     private sourceLastSeenTimes = new Map<string, number>();
     private staleSourceRemovalSecs = 0;
     // The stale sweep interval; undefined while disabled. Cleared in close().

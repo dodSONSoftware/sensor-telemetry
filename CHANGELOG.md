@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.3] — Copper Falcon (2026-10-14)
+
+- `docs/KNOWN_ISSUES.md` now records KI-08: stale-source eviction frees the source's admission slot but not its `firmware_version` cardinality slot (no source→firmware map is tracked), so a permanently-gone source's firmware label pins a `sensorSourceCardinalityCap` slot for the process lifetime — the limitation was previously documented only in a code comment; the comment now cross-references KI-08. Documentation-only change, no behavior change
+
 ## [4.6.2] — Copper Falcon (2026-10-14)
 
 - The `v3_health_degraded` warning is now throttled per source + reasons set: the first report is always logged, repeats re-warn at most every 5 minutes carrying a `suppressedCount`, and a changed reasons set is logged immediately — a permanently degraded sensor reporting every 30 s no longer emits ~2,880 warn lines a day (the live state remains visible in the `sensor_health_up` gauge)

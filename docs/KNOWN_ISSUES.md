@@ -16,6 +16,7 @@ No additional unverified defects are asserted here. The following are **confirme
 | KI-05 | Open — observability tradeoff | Loki transport is best effort: failed batches are dropped; logs cannot be replayed after transport recovery. | Keep console logs/collector; monitor throttled transport errors; evaluate durable buffering only if needed. |
 | KI-06 | Open — metric lifecycle | Without `staleSourceRemovalSecs`, source series persist until restart. With eviction, removal occurs on a periodic sweep, not exactly at the threshold. | Enable a comfortably long expiry (above publisher interval) or alert using last-seen time in Prometheus. |
 | KI-07 | Open — payload scope | MQTT wildcard subscription filters are intentionally unsupported and unknown V3 device categories are rejected. | Configure exact topics; add supported devices via explicit routing and tests. |
+| KI-08 | Open — metric lifecycle | Stale-source eviction frees the source's admission slot but NOT its `firmware_version` cardinality slot — no source→firmware map is tracked, so a permanently-gone source's firmware label pins a `sensorSourceCardinalityCap` slot for the process lifetime (new distinct versions then map to `unknown_firmware` sooner). | Harmful only when distinct firmware versions approach the cap; resolve by tracking the source→firmware association and freeing the slot in `evictStaleSource`. |
 
 ## Maintenance protocol
 
