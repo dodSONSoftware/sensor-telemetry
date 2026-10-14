@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.1] — Copper Falcon (2026-10-14)
+
+- Forwarded sensor-log lines no longer record the literal `module: "undefined"` / `function: "undefined"` when the device omits those fields — the labels stay unset and the service records its true origin (`networking/log*`) for them, so Loki queries on `module`/`function` no longer match a spurious `undefined` value; lines that carry device-provided `module`/`function` values are unchanged
+
 ## [4.6.0] — Copper Falcon (2026-10-13)
 
 - The `/about` endpoint now reports the release codename as `release` in its `about` section (e.g., `"release": "Copper Falcon"`), sourced from `APP_NAME` in `code/src/version.ts` — the version's source of truth — through the shared `serviceMetadata`, so the codename moves with every major/minor version bump

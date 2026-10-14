@@ -2114,6 +2114,63 @@ describe("bounded structured metadata in forwarded sensor logs (regression P2-2)
   });
 });
 
+describe("forwarded sensor log originator labels (regression: absent module/function)", () => {
+  // Legacy behavior: truncateForLog(undefined) stringified an ABSENT
+  // module/function field to the literal "undefined" in the metadata. That
+  // string suppressed the Logger's documented originator-derived label
+  // (LogMetadata.module/function: "derived from originator parsing if not
+  // provided explicitly"), so every forwarded log without those fields
+  // recorded module "undefined" instead of its true origin. An absent
+  // field must stay absent; a present scalar must still ride through.
+
+  it("leaves module/function absent when the sensor sent neither", () => {
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m" },
+    });
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    const meta = info?.[2] as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("module");
+    expect(meta).not.toHaveProperty("function");
+    // The legacy bug's shape: the keys present with the literal string.
+    expect(meta.module).not.toBe("undefined");
+    expect(meta.function).not.toBe("undefined");
+  });
+
+  it("carries module/function through when the sensor sent scalar values", () => {
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", module: "firmware", function: "onLoop" },
+    });
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    const meta = info?.[2] as Record<string, unknown>;
+    expect(meta.module).toBe("firmware");
+    expect(meta.function).toBe("onLoop");
+  });
+
+  it("treats a structured module value as absent rather than stringifying it", () => {
+    const { logger } = driveMessage({
+      message_type: "log",
+      source: "src",
+      payload: { level: "info", message: "m", module: { nested: true } },
+    });
+    const info = logger.write_info.mock.calls.find(
+      (call) => call[0] === "networking/logInfo"
+    );
+    expect(info).toBeDefined();
+    const meta = info?.[2] as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("module");
+  });
+});
+
 describe("MQTT payload size guard (regression)", () => {
   const wasSizeGuarded = (logger: MockLogger): boolean =>
     logger.write_warn.mock.calls.some(

@@ -303,6 +303,29 @@ describe("Logger printf-token messages keep structured metadata", () => {
     expect(record.version).toBeUndefined();
   });
 
+  it("derives module/function from the originator when the metadata omits them", async () => {
+    // Forwarded sensor logs now omit module/function entirely when the
+    // sensor did not send them (the legacy path stringified absence to
+    // the literal "undefined", suppressing this fallback). The record
+    // must carry the originator's labels instead.
+    const record = await captureRecord(
+      "info",
+      "networking/logInfo",
+      '[sensor-1] {"body":"m"}',
+      {
+        event: "sensor_log_generic",
+        logType: "sensor",
+        source: "sensor-1",
+        level: "info",
+        version: undefined,
+      },
+    );
+
+    expect(record.module).toBe("networking");
+    expect(record.function).toBe("logInfo");
+    expect(record.logType).toBe("sensor");
+  });
+
   it("keeps structured metadata for a message containing %%", async () => {
     const record = await captureRecord(
       "warn",

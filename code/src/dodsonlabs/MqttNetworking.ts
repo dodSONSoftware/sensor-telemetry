@@ -1302,17 +1302,30 @@ export class MqttNetworking implements IMqttNetworking {
         // Every label value comes from the untrusted payload, so each is
         // bounded for the log channel the same way the message text is.
         const metadata: Record<string, unknown> = {
-            // Scalar label fields, proven scalar at the boundary: an absent
-            // field stringifies to "undefined" exactly as it always has, and
-            // a structured value is treated as absent rather than recursed.
+            // event always carries a value (the generic fallback), so the
+            // Logger's originator derivation never applies to it.
             event: sysFunc.truncateForLog(sysFunc.getStringField(logData, "event", "message_type") ?? "sensor_log_generic"),
             logType: "sensor",
             source: sysFunc.truncateForLog(source),
-            // Add Loki-compatible labels
-            module: sysFunc.truncateForLog(sysFunc.getStringField(logData, "module")),
-            function: sysFunc.truncateForLog(sysFunc.getStringField(logData, "function")),
             level: sysFunc.truncateForLog(level.toLowerCase()),
         };
+        // module/function are payload-provided OVERRIDES of the Logger's
+        // originator-derived labels (LogMetadata.module/function: "derived
+        // from originator parsing if not provided explicitly"). Ride them
+        // along only when the sensor sent a scalar value: an absent field
+        // stays absent so the Logger records the true originator
+        // (networking/log*) — the legacy truncateForLog(undefined)
+        // stringified absence to the literal "undefined", a value that
+        // suppressed that fallback. A structured value is treated as
+        // absent rather than recursed, like every other scalar field.
+        const moduleField = sysFunc.getStringField(logData, "module");
+        if (moduleField !== undefined) {
+            metadata.module = sysFunc.truncateForLog(moduleField);
+        }
+        const functionField = sysFunc.getStringField(logData, "function");
+        if (functionField !== undefined) {
+            metadata.function = sysFunc.truncateForLog(functionField);
+        }
 
         // Add remaining top-level fields to metadata if available
         if (runtimeId !== undefined) metadata.runtime_id = sysFunc.truncateForLog(runtimeId);
