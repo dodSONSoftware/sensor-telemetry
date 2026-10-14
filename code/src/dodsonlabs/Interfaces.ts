@@ -223,7 +223,7 @@ export interface ILogger {
 
   /**
    * Update the log level at runtime.
-   * @param level - New log level string ("error", "warn", "info", "debug")
+   * @param level - New log level string ("error", "warn", "info", "debug", "critical")
    * @returns true if the level was changed, false if invalid
    */
   setLogLevel(level: string): boolean;

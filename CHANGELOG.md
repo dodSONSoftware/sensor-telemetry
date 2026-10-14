@@ -4,6 +4,10 @@ All notable changes to the Sensor Telemetry Services are documented in this file
 Versions are listed newest first.
 
 
+## [4.6.7] — Copper Falcon (2026-10-14)
+
+- The `ILogger.setLogLevel` JSDoc in `Interfaces.ts` now lists `"critical"` alongside `"error"`, `"warn"`, `"info"`, and `"debug"` — the interface documented the contract for callers, but `Logger.setLogLevel` accepts (and maps) `critical` and the config schema offers it; the interface JSDoc was written before `critical` support landed and had drifted. Documentation-only change, no behavior change
+
 ## [4.6.6] — Copper Falcon (2026-10-14)
 
 - `PrometheusWriter.ts`: the three-line comment and `const result = read_file_yaml(...)` statement in both `handleReadConfig` and `handleReloadConfig` are re-indented to the method body (12 spaces) — the identical blocks had landed at column 0 in both handlers, a paste artifact that made the statements read as module scope; whitespace-only, no behavior change
