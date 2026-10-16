@@ -37,17 +37,14 @@ services:
       # * to allow all origins, the previous default. Does not replace
       # SENSOR_TELEMETRY_CONFIG_TOKEN authentication.
       - SENSOR_TELEMETRY_CORS_ORIGINS=http://10.10.10.50:3000
-      # /restart-service opt-in (POST /restart-service with the
-      # x-restart-token header). DISABLED BY DEFAULT: set
-      # SENSOR_TELEMETRY_RESTART_ENABLED=true in code/.env together with a
-      # strong, distinct SENSOR_TELEMETRY_RESTART_TOKEN to enable it. The
-      # service refuses to start when the flag is true and the token is
-      # absent (fail-fast — an unauthenticated restart endpoint would be an
-      # instant denial-of-service). An accepted restart schedules the
-      # existing graceful SIGTERM shutdown; the restart: unless-stopped
-      # policy above then starts the same container again. See
-      # docs/CONFIGURATION.md and docs/DECISIONS.md.
-      - SENSOR_TELEMETRY_RESTART_ENABLED=${SENSOR_TELEMETRY_RESTART_ENABLED:-false}
-      # Empty when unset in .env — the app treats an empty token as absent
-      # (never a usable sentinel).
-      - SENSOR_TELEMETRY_RESTART_TOKEN=${SENSOR_TELEMETRY_RESTART_TOKEN}
+      # /restart-service (POST /restart-service with an Authorization:
+      # Bearer header) — enabled by the PRESENCE of a validated token;
+      # there is no separate enable flag. Three states: unset or empty ->
+      # endpoint disabled (503), the service runs normally; set, not
+      # whitespace-only, at least 32 bytes -> endpoint enabled; set but
+      # weak (whitespace-only or under 32 bytes) -> the service REFUSES TO
+      # START (crash-loops under the restart: unless-stopped policy above
+      # until fixed — a dummy value cannot disable the endpoint, unsetting
+      # it does). `:-` keeps an unset host .env value empty inside the
+      # container. See code/.env.example and docs/CONFIGURATION.md.
+      - RESTART_SERVICE_TOKEN=${RESTART_SERVICE_TOKEN:-}

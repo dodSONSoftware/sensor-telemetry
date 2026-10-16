@@ -12,8 +12,9 @@ import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
-// This file constructs its writer with the /restart-service feature
-// enabled and a lifecycle callback that THROWS, so it needs its own file:
+// This file constructs its writer with the /restart-service endpoint
+// enabled (RESTART_SERVICE_TOKEN set) and a shutdown hook that THROWS,
+// so it needs its own file:
 // the callback is fixed at construction, and prom-client's global registry
 // allows only one real writer per process. The contract under test: a
 // throwing callback means no shutdown started, so the single-flight guard
@@ -65,7 +66,7 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const RESTART_TOKEN = "restart-fail-token-1";
+const RESTART_TOKEN = "restart-fail-token-1-0123456789abcdef";
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",
@@ -78,14 +79,11 @@ describe("PrometheusWriter with a throwing restart callback", () => {
   let restartCallback: jest.Mock;
   let port: number;
   let configSource: string;
-  let savedRestartEnabled: string | undefined;
   let savedRestartToken: string | undefined;
 
   beforeAll(async () => {
-    savedRestartEnabled = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    savedRestartToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
-    process.env.SENSOR_TELEMETRY_RESTART_ENABLED = "true";
-    process.env.SENSOR_TELEMETRY_RESTART_TOKEN = RESTART_TOKEN;
+    savedRestartToken = process.env.RESTART_SERVICE_TOKEN;
+    process.env.RESTART_SERVICE_TOKEN = RESTART_TOKEN;
 
     port = await getFreePort();
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-restart-fail-test-"));
@@ -113,15 +111,10 @@ describe("PrometheusWriter with a throwing restart callback", () => {
       )
     );
     fs.rmSync(path.dirname(configSource), { recursive: true, force: true });
-    if (savedRestartEnabled === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    } else {
-      process.env.SENSOR_TELEMETRY_RESTART_ENABLED = savedRestartEnabled;
-    }
     if (savedRestartToken === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
+      delete process.env.RESTART_SERVICE_TOKEN;
     } else {
-      process.env.SENSOR_TELEMETRY_RESTART_TOKEN = savedRestartToken;
+      process.env.RESTART_SERVICE_TOKEN = savedRestartToken;
     }
   });
 
@@ -130,7 +123,7 @@ describe("PrometheusWriter with a throwing restart callback", () => {
       method: "POST",
       headers: {
         Connection: "close",
-        "x-restart-token": RESTART_TOKEN,
+        Authorization: `Bearer ${RESTART_TOKEN}`,
       },
     });
     return { status: res.status, body: await res.json() };

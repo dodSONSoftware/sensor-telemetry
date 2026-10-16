@@ -12,11 +12,13 @@ import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
-// This file constructs its writer WITH the /restart-service feature enabled
-// (SENSOR_TELEMETRY_RESTART_ENABLED=true + SENSOR_TELEMETRY_RESTART_TOKEN),
-// so it needs its own file: the flag and token are captured at construction,
-// and prom-client's global registry allows only one real writer per process
-// (each Jest file gets its own module sandbox, so one file = one writer).
+// This file constructs its writer WITH the /restart-service endpoint
+// enabled (RESTART_SERVICE_TOKEN set), so it needs its own file: the token
+// is captured at construction, and prom-client's global registry allows
+// only one real writer per process (each Jest file gets its own module
+// sandbox, so one file = one writer). The live token is EXACTLY 32 ASCII
+// bytes, so this file's writer doubles as the "exactly 32 bytes is valid"
+// startup-validation boundary test.
 //
 // State model for the whole file: an ACCEPTED request latches the
 // writer's restartPending guard for the writer's lifetime (in production
@@ -24,8 +26,8 @@ import type { z } from "zod";
 // rejection-path tests below therefore all run first, and the accept-path
 // tests reset the private guard (the suites elsewhere in this repo reach
 // into private state the same way) so each accept test starts clean.
-// The lifecycle callback is a spy that records invocations — it never
-// signals, so the test process is never terminated.
+// The shutdown hook is a spy that records invocations — it never signals,
+// so the test process is never terminated.
 
 interface MockLogger {
   global_log_level: jest.Mock;
@@ -72,7 +74,12 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const RESTART_TOKEN = "restart-secret-12345";
+// Exactly 32 ASCII bytes — the minimum length for a valid token (the
+// file's live writer proves the boundary boots and enables).
+const RESTART_TOKEN = "0123456789abcdef0123456789abcdef";
+const bearer = (token: string = RESTART_TOKEN): Record<string, string> => ({
+  Authorization: `Bearer ${token}`,
+});
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",
@@ -85,16 +92,13 @@ describe("PrometheusWriter with /restart-service enabled", () => {
   let restartCallback: jest.Mock;
   let port: number;
   let configSource: string;
-  let savedRestartEnabled: string | undefined;
   let savedRestartToken: string | undefined;
   let savedCorsOrigins: string | undefined;
 
   beforeAll(async () => {
-    savedRestartEnabled = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    savedRestartToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
+    savedRestartToken = process.env.RESTART_SERVICE_TOKEN;
     savedCorsOrigins = process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
-    process.env.SENSOR_TELEMETRY_RESTART_ENABLED = "true";
-    process.env.SENSOR_TELEMETRY_RESTART_TOKEN = RESTART_TOKEN;
+    process.env.RESTART_SERVICE_TOKEN = RESTART_TOKEN;
     // Allowlist CORS mode (not the wildcard default): every request in this
     // file carries no Origin header (curl-style, unaffected by the
     // allowlist), and the 403 test below needs a denied origin to exist.
@@ -164,8 +168,7 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     );
     fs.rmSync(path.dirname(configSource), { recursive: true, force: true });
     for (const [name, saved] of [
-      ["SENSOR_TELEMETRY_RESTART_ENABLED", savedRestartEnabled],
-      ["SENSOR_TELEMETRY_RESTART_TOKEN", savedRestartToken],
+      ["RESTART_SERVICE_TOKEN", savedRestartToken],
       ["SENSOR_TELEMETRY_CORS_ORIGINS", savedCorsOrigins],
     ] as const) {
       if (saved === undefined) {
@@ -180,7 +183,13 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     reqPath: string,
     headers: Record<string, string> = {},
     body: string | undefined = undefined
-  ): Promise<{ status: number; allow: string | null; cacheControl: string | null; body: Record<string, unknown> }> {
+  ): Promise<{
+    status: number;
+    allow: string | null;
+    cacheControl: string | null;
+    wwwAuthenticate: string | null;
+    body: Record<string, unknown>;
+  }> {
     const res = await fetch(`http://127.0.0.1:${port}${reqPath}`, {
       method: "POST",
       // Connection: close keeps undici's keep-alive pool from holding a
@@ -192,23 +201,30 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       status: res.status,
       allow: res.headers.get("allow"),
       cacheControl: res.headers.get("cache-control"),
+      wwwAuthenticate: res.headers.get("www-authenticate"),
       body: await res.json(),
     };
   }
 
-  async function get(reqPath: string): Promise<{ status: number; allow: string | null; body: Record<string, unknown> }> {
+  async function get(reqPath: string): Promise<{ status: number; allow: string | null; cacheControl: string | null; body: Record<string, unknown> }> {
     const res = await fetch(`http://127.0.0.1:${port}${reqPath}`, {
       headers: { Connection: "close" },
     });
-    return { status: res.status, allow: res.headers.get("allow"), body: await res.json() };
+    return {
+      status: res.status,
+      allow: res.headers.get("allow"),
+      cacheControl: res.headers.get("cache-control"),
+      body: await res.json(),
+    };
   }
 
   describe("method check (before authentication and enablement)", () => {
-    it("returns 405 with Allow: POST for GET, and never invokes the callback", async () => {
-      const { status, allow, body } = await get("/restart-service");
+    it("returns 405 with Allow: POST for GET, no-store, and never invokes the callback", async () => {
+      const { status, allow, cacheControl, body } = await get("/restart-service");
 
       expect(status).toBe(405);
       expect(allow).toBe("POST");
+      expect(cacheControl).toBe("no-store");
       expect(body.success).toBe(false);
       expect(restartCallback).not.toHaveBeenCalled();
     });
@@ -219,28 +235,31 @@ describe("PrometheusWriter with /restart-service enabled", () => {
           method,
           headers: {
             Connection: "close",
-            "x-restart-token": RESTART_TOKEN,
+            ...bearer(),
           },
         });
         const body = (await res.json()) as { success: boolean };
         expect(res.status).toBe(405);
         expect(res.headers.get("allow")).toBe("POST");
+        expect(res.headers.get("cache-control")).toBe("no-store");
         expect(body.success).toBe(false);
       }
       expect(restartCallback).not.toHaveBeenCalled();
     });
   });
 
-  describe("token check", () => {
-    it("returns 401 with an audit warning when the token header is missing", async () => {
+  describe("Authorization check", () => {
+    it("returns 401 with WWW-Authenticate and an audit warning when the header is missing", async () => {
       logger.write_warn.mockClear();
 
-      const { status, body } = await post("/restart-service");
+      const { status, wwwAuthenticate, cacheControl, body } = await post("/restart-service");
 
       expect(status).toBe(401);
+      expect(wwwAuthenticate).toBe("Bearer");
+      expect(cacheControl).toBe("no-store");
       expect(body).toEqual({
         success: false,
-        message: "missing or invalid x-restart-token",
+        message: "missing or invalid Authorization header",
       });
       expect(restartCallback).not.toHaveBeenCalled();
       const warn = logger.write_warn.mock.calls.find(
@@ -254,75 +273,102 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       expect(typeof warn![2].remoteAddress).toBe("string");
       expect((warn![2].remoteAddress as string).length).toBeGreaterThan(0);
       // The token value never reaches the log channel.
-      const serialized = JSON.stringify(
-        logger.write_warn.mock.calls
-      );
+      const serialized = JSON.stringify(logger.write_warn.mock.calls);
       expect(serialized).not.toContain(RESTART_TOKEN);
+      expect(serialized).not.toContain(`Bearer ${RESTART_TOKEN}`);
     });
 
-    it("returns 401 when the token header has the wrong value (same length)", async () => {
+    it("rejects header-shape violations before any comparison (all 401)", async () => {
+      // Each of these is malformed per the exact contract: one
+      // case-sensitive "Bearer" scheme, a single space, one token with no
+      // embedded whitespace.
+      const malformed = [
+        `bearer ${RESTART_TOKEN}`, // lowercase scheme
+        "Bearer", // no token
+        `Bearer${RESTART_TOKEN}`, // no space
+        `Bearer  ${RESTART_TOKEN}`, // double space
+        `Bearer ${RESTART_TOKEN} extra`, // embedded whitespace
+        "Bearer aaa, Bearer bbb", // comma-joined values
+      ];
+      for (const value of malformed) {
+        const { status, wwwAuthenticate, body } = await post("/restart-service", {
+          Authorization: value,
+        });
+        expect(status).toBe(401);
+        expect(wwwAuthenticate).toBe("Bearer");
+        expect(body).toEqual({
+          success: false,
+          message: "missing or invalid Authorization header",
+        });
+      }
+      expect(restartCallback).not.toHaveBeenCalled();
+    });
+
+    it("returns 401 for duplicated Authorization headers even when the first value is valid", async () => {
+      // Raw socket: send the SAME header twice, the first value VALID.
+      // Node's parser surfaces only the first value in req.headers (the
+      // second is silently dropped), so if the code compared req.headers
+      // alone it would ACCEPT — a 401 here proves the duplicate rejection
+      // happens before any comparison, via the rawHeaders count.
+      const socket = net.connect(port, "127.0.0.1");
+      const chunks: Buffer[] = [];
+      const ended = new Promise<string>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("timed out reading response")), 3000);
+        socket.on("end", () => {
+          clearTimeout(t);
+          resolve(Buffer.concat(chunks).toString("utf8"));
+        });
+        socket.on("data", (c: Buffer) => chunks.push(c));
+      });
+      socket.write(
+        "POST /restart-service HTTP/1.1\r\n" +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Authorization: Bearer ${RESTART_TOKEN}\r\n` +
+        `Authorization: Bearer ${"f".repeat(32)}\r\n` +
+        "Connection: close\r\n\r\n"
+      );
+      const full = await ended;
+      socket.end();
+
+      expect(full.startsWith("HTTP/1.1 401")).toBe(true);
+      expect(full).toContain("missing or invalid Authorization header");
+      expect(restartCallback).not.toHaveBeenCalled();
+    });
+
+    it("returns 401 when the token has the wrong value (same length)", async () => {
       // Same length as RESTART_TOKEN so the comparison reaches
       // timingSafeEqual.
-      const { status, body } = await post("/restart-service", {
-        "x-restart-token": "wrong-secret-999999",
-      });
+      const { status, body } = await post("/restart-service", bearer("ffffffffffffffffffffffffffffffff"));
 
       expect(status).toBe(401);
       expect(body).toEqual({
         success: false,
-        message: "missing or invalid x-restart-token",
+        message: "missing or invalid Authorization header",
       });
       expect(restartCallback).not.toHaveBeenCalled();
     });
 
-    it("returns 401 when the token header has the wrong length", async () => {
+    it("returns 401 when the token has the wrong length", async () => {
       // Different length: exercises the length check that guards
       // timingSafeEqual (which throws on unequal-length buffers).
-      const { status, body } = await post("/restart-service", {
-        "x-restart-token": "short",
-      });
+      const { status, body } = await post("/restart-service", bearer("short"));
 
       expect(status).toBe(401);
       expect(body).toEqual({
         success: false,
-        message: "missing or invalid x-restart-token",
+        message: "missing or invalid Authorization header",
       });
       expect(restartCallback).not.toHaveBeenCalled();
     });
 
-    it("does not accept the config token in the restart header", async () => {
+    it("does not accept the config token in place of the Authorization header", async () => {
       // The restart secret is DISTINCT: SENSOR_TELEMETRY_CONFIG_TOKEN is
       // unset in this file, so the config token's header cannot exist —
-      // but the point is that x-restart-token is checked against the
+      // but the point is that Authorization is checked against the
       // restart token only, with no fallback.
       const { status } = await post("/restart-service", {
         "x-config-token": RESTART_TOKEN,
       });
-
-      expect(status).toBe(401);
-      expect(restartCallback).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("body contract", () => {
-    it("returns 400 when the request carries a non-empty body", async () => {
-      const { status, body } = await post(
-        "/restart-service",
-        { "x-restart-token": RESTART_TOKEN },
-        JSON.stringify({ ignore: "me" })
-      );
-
-      expect(status).toBe(400);
-      expect(body).toEqual({ success: false, message: "request body must be empty" });
-      expect(restartCallback).not.toHaveBeenCalled();
-    });
-
-    it("checks the token before the body: wrong token with a body is 401", async () => {
-      const { status } = await post(
-        "/restart-service",
-        { "x-restart-token": "nope" },
-        "x"
-      );
 
       expect(status).toBe(401);
       expect(restartCallback).not.toHaveBeenCalled();
@@ -336,7 +382,7 @@ describe("PrometheusWriter with /restart-service enabled", () => {
         headers: {
           Origin: "http://evil.example",
           Connection: "close",
-          "x-restart-token": RESTART_TOKEN,
+          ...bearer(),
         },
       });
       const body = (await res.json()) as { success: boolean };
@@ -387,7 +433,8 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       expect(entry!.verb).toBe("POST");
       expect(entry!.responseBody).toContain("restart_scheduled");
       expect(entry!.responseBody).toContain("503");
-      expect(entry!.requestBody).toContain("x-restart-token");
+      expect(entry!.requestBody).toContain("Authorization");
+      expect(entry!.requestBody).toContain("RESTART_SERVICE_TOKEN");
     });
 
     it("lists /restart-service in /about routes", async () => {
@@ -414,9 +461,7 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     it("returns 202 with the scheduled contract and fires the callback exactly once after the response", async () => {
       logger.write_info.mockClear();
 
-      const { status, cacheControl, body } = await post("/restart-service", {
-        "x-restart-token": RESTART_TOKEN,
-      });
+      const { status, cacheControl, body } = await post("/restart-service", bearer());
 
       expect(status).toBe(202);
       expect(cacheControl).toBe("no-store");
@@ -439,7 +484,29 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       expect(audits[0][2].logType).toBe("audit");
       expect(audits[0][2].statusCode).toBe(202);
       expect(typeof audits[0][2].remoteAddress).toBe("string");
-      expect(JSON.stringify(logger.write_info.mock.calls)).not.toContain(RESTART_TOKEN);
+      const serialized = JSON.stringify([
+        ...logger.write_info.mock.calls,
+        ...logger.write_warn.mock.calls,
+      ]);
+      expect(serialized).not.toContain(RESTART_TOKEN);
+      expect(serialized).not.toContain(`Bearer ${RESTART_TOKEN}`);
+    });
+
+    it("ignores the request body: a JSON body with a valid token is still 202", async () => {
+      const { status, body } = await post(
+        "/restart-service",
+        bearer(),
+        JSON.stringify({ ignore: "me" })
+      );
+
+      expect(status).toBe(202);
+      expect(body).toEqual({
+        success: true,
+        status: "restart_scheduled",
+        message: "Service restart requested",
+      });
+      await until(() => restartCallback.mock.calls.length >= 1);
+      expect(restartCallback).toHaveBeenCalledTimes(1);
     });
 
     it("serves the full 202 body even though the callback has already fired", async () => {
@@ -465,9 +532,8 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       socket.write(
         "POST /restart-service HTTP/1.1\r\n" +
         `Host: 127.0.0.1:${port}\r\n` +
-        "x-restart-token: " + RESTART_TOKEN + "\r\n" +
-        "Connection: close\r\n" +
-        "Content-Length: 0\r\n\r\n"
+        `Authorization: Bearer ${RESTART_TOKEN}\r\n` +
+        "Connection: close\r\n\r\n"
       );
       await until(() => restartCallback.mock.calls.length >= 1);
       const full = await ended;
@@ -479,19 +545,16 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     });
 
     it("returns 409 for a second authenticated POST while pending, with no duplicate callback", async () => {
-      const first = await post("/restart-service", {
-        "x-restart-token": RESTART_TOKEN,
-      });
+      const first = await post("/restart-service", bearer());
       expect(first.status).toBe(202);
       await until(() => restartCallback.mock.calls.length >= 1);
 
-      const second = await post("/restart-service", {
-        "x-restart-token": RESTART_TOKEN,
-      });
+      const second = await post("/restart-service", bearer());
       expect(second.status).toBe(409);
+      expect(second.cacheControl).toBe("no-store");
       expect(second.body).toEqual({
         success: false,
-        message: "restart already scheduled",
+        message: "Restart already in progress.",
       });
       await new Promise((r) => setTimeout(r, 50));
       expect(restartCallback).toHaveBeenCalledTimes(1);
@@ -499,9 +562,7 @@ describe("PrometheusWriter with /restart-service enabled", () => {
 
     it("accepts exactly one of several concurrent authenticated POSTs", async () => {
       const results = await Promise.all(
-        [1, 2, 3, 4].map(() =>
-          post("/restart-service", { "x-restart-token": RESTART_TOKEN })
-        )
+        [1, 2, 3, 4].map(() => post("/restart-service", bearer()))
       );
       const statuses = results.map((r) => r.status).sort((a, b) => a - b);
       expect(statuses).toEqual([202, 409, 409, 409]);
@@ -539,9 +600,8 @@ describe("PrometheusWriter with /restart-service enabled", () => {
       socket.write(
         "POST /restart-service HTTP/1.1\r\n" +
         `Host: 127.0.0.1:${port}\r\n` +
-        "x-restart-token: " + RESTART_TOKEN + "\r\n" +
-        "Connection: close\r\n" +
-        "Content-Length: 0\r\n\r\n"
+        `Authorization: Bearer ${RESTART_TOKEN}\r\n` +
+        "Connection: close\r\n\r\n"
       );
       const status = await received;
       expect(status.startsWith("HTTP/1.1 202")).toBe(true);
@@ -558,37 +618,54 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     });
   });
 
-  describe("startup fail-fast (constructor)", () => {
-    it("refuses to start when the flag is true but no token is set", () => {
-      const savedEnabled = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-      const savedToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
-      process.env.SENSOR_TELEMETRY_RESTART_ENABLED = "true";
-      delete process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
+  describe("startup validation (constructor, three token states)", () => {
+    // These constructors throw BEFORE any prom-client registration or
+    // server creation (the fail-fast block runs first), so no cleanup is
+    // needed and they cannot collide with this file's live writer.
+    it("refuses to start when the token is whitespace-only", () => {
+      const savedToken = process.env.RESTART_SERVICE_TOKEN;
+      process.env.RESTART_SERVICE_TOKEN = "   ";
       try {
         expect(() =>
           new PrometheusWriter(
             { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
             createMockLogger()
           )
-        ).toThrow(/SENSOR_TELEMETRY_RESTART_TOKEN/);
+        ).toThrow(/RESTART_SERVICE_TOKEN/);
       } finally {
-        process.env.SENSOR_TELEMETRY_RESTART_ENABLED = savedEnabled;
-        process.env.SENSOR_TELEMETRY_RESTART_TOKEN = savedToken;
+        process.env.RESTART_SERVICE_TOKEN = savedToken;
       }
     });
 
-    it("treats an empty token as missing (fail-fast)", () => {
-      const savedToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
-      process.env.SENSOR_TELEMETRY_RESTART_TOKEN = "";
+    it("refuses to start when the token is 31 bytes (one under the minimum)", () => {
+      const savedToken = process.env.RESTART_SERVICE_TOKEN;
+      process.env.RESTART_SERVICE_TOKEN = "a".repeat(31);
       try {
         expect(() =>
           new PrometheusWriter(
             { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
             createMockLogger()
           )
-        ).toThrow(/SENSOR_TELEMETRY_RESTART_TOKEN/);
+        ).toThrow(/RESTART_SERVICE_TOKEN/);
       } finally {
-        process.env.SENSOR_TELEMETRY_RESTART_TOKEN = savedToken;
+        process.env.RESTART_SERVICE_TOKEN = savedToken;
+      }
+    });
+
+    it("counts bytes, not characters: 10 × 3-byte UTF-8 chars (30 bytes) refuses to start", () => {
+      const savedToken = process.env.RESTART_SERVICE_TOKEN;
+      // "€" is 3 bytes in UTF-8, so this is 10 characters but only 30
+      // bytes — under the 32-byte minimum.
+      process.env.RESTART_SERVICE_TOKEN = "€".repeat(10);
+      try {
+        expect(() =>
+          new PrometheusWriter(
+            { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
+            createMockLogger()
+          )
+        ).toThrow(/RESTART_SERVICE_TOKEN/);
+      } finally {
+        process.env.RESTART_SERVICE_TOKEN = savedToken;
       }
     });
   });

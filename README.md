@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Nickel Falcon — firmware 4.7.0.
+**Release:** Steel Falcon — firmware 4.8.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -197,8 +197,7 @@ The configuration schema is strict: unknown keys fail validation with an `Unreco
 |----------|-------------|---------|
 | `SENSOR_TELEMETRY_CORS_ORIGINS` | Comma-separated list of browser origins permitted to call the HTTP API cross-origin. Origins must match exactly, including scheme and port. When unset or set to `*`, all browser origins are allowed for backward compatibility. Example: `http://10.10.10.50:3000,https://sensors.home.lab` | unset (all origins allowed) |
 | `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/read-config`, `/write-config`, and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
-| `SENSOR_TELEMETRY_RESTART_ENABLED` | Strict opt-in for `POST /restart-service`. Only the exact value `true` enables the endpoint (anything else — `yes`, `1`, `TRUE`, unset — disables it, so a typo can only ever turn the feature off) | unset (endpoint disabled) |
-| `SENSOR_TELEMETRY_RESTART_TOKEN` | Strong, distinct secret required by `POST /restart-service` (sent as the `x-restart-token` header). Never accepted as a fallback is `SENSOR_TELEMETRY_CONFIG_TOKEN`. **The service refuses to start when `SENSOR_TELEMETRY_RESTART_ENABLED=true` and this is absent/empty** | unset (feature disabled; required when the flag is `true`) |
+| `RESTART_SERVICE_TOKEN` | The switch for `POST /restart-service` — there is no separate enable flag. Unset/empty: endpoint disabled. Set, not whitespace-only, ≥32 bytes: endpoint enabled (send it as the `Authorization: Bearer` header). **Set but weak (whitespace-only or under 32 bytes): the service refuses to start** — a dummy value can never disable the endpoint. Never accepted as a fallback is `SENSOR_TELEMETRY_CONFIG_TOKEN`. Generate one with `openssl rand -hex 32` | unset (endpoint disabled) |
 
 CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
 
@@ -234,14 +233,13 @@ The token must be treated as a secret and should not be committed to source cont
 
 ## Service Restart (`POST /restart-service`)
 
-An optional, strictly opt-in endpoint that restarts the service's own container: it is active only when `SENSOR_TELEMETRY_RESTART_ENABLED=true` **and** `SENSOR_TELEMETRY_RESTART_TOKEN` is set (both are environment variables, never keys in `config.yml`, which `/read-config` would expose — see `code/.env.example` for the local `.env` template). Unlike the config token, there is no unauthenticated mode: with the flag set and no token, the service **refuses to start** rather than expose a one-request denial-of-service.
+An optional endpoint that restarts the service's own container. There is no enable flag: the presence of a validated `RESTART_SERVICE_TOKEN` environment variable **is** the switch (it is never a key in `config.yml`, which `/read-config` would expose — see `code/.env.example` for the local `.env` template). Unset or empty, the endpoint is disabled (`503`). Set but weak (whitespace-only or under 32 bytes), the service **refuses to start** — a dummy value can never disable the endpoint, only unsetting it does. A valid token (≥32 bytes, not whitespace-only) enables the endpoint, protected by `Authorization: Bearer <token>`.
 
 An authenticated request schedules — it does not complete — a restart:
 
 ```bash
 curl --fail-with-body -i -X POST \
-  -H "x-restart-token: ${SENSOR_TELEMETRY_RESTART_TOKEN}" \
-  -H 'Content-Length: 0' \
+  -H "Authorization: Bearer ${RESTART_SERVICE_TOKEN}" \
   http://HOST:32002/restart-service
 ```
 
@@ -255,7 +253,7 @@ After the `202` response is delivered, the service runs its existing graceful SI
 - `202` means **scheduled**, not completed — and the response is best-effort (the process may exit before you finish reading it). Verify the new process with `GET /health` and `GET /ready`, and check the container's `RestartCount`/`StartedAt` with `docker inspect sensor-telemetry`.
 - It re-reads the persisted `config.yml`, so restart-only settings written earlier via `/write-config` apply on the next startup. It does **not** rebuild the image, update deployment files, or reconcile a changed `apiPort` (the Compose mapping and image healthcheck still pin 32002 — change those together).
 - It is not a replacement for operator control: a container you `docker stop`ped stays stopped, and a deployment without a restart policy will not come back after the endpoint stops the process.
-- Other outcomes: `401` missing/invalid `x-restart-token`, `405` wrong method, `409` a restart is already pending, `500` no restart mechanism available, `503` feature disabled, `400` non-empty body.
+- Other outcomes: `401` missing/invalid `Authorization` header (with `WWW-Authenticate: Bearer`; the header shape is checked exactly — one `Bearer` scheme, one space, one whitespace-free token, no duplicated headers), `405` wrong method, `409` a restart is already in progress, `503` endpoint disabled. The request body is ignored, and every response from the endpoint carries `Cache-Control: no-store`.
 - Treat the token as a high-privilege secret: anyone holding it can restart the service at will (a repeated-restart denial-of-service). Keep exposure LAN-only and never put the token in docs, shared command history, or logs.
 
 ## Sensor Log Messages
@@ -554,7 +552,7 @@ The service handles SIGTERM and SIGINT signals gracefully. The optional `POST /r
 | `/read-config` | GET | Read current configuration |
 | `/write-config` | POST | Update configuration |
 | `/reload-config` | GET | Reload configuration from disk |
-| `/restart-service` | POST | Schedule a graceful restart of this container (202; disabled unless `SENSOR_TELEMETRY_RESTART_ENABLED=true` with `SENSOR_TELEMETRY_RESTART_TOKEN` set, then requires the `x-restart-token` header) |
+| `/restart-service` | POST | Schedule a graceful restart of this container (202; disabled unless `RESTART_SERVICE_TOKEN` is set — at least 32 bytes, not whitespace-only — then requires the `Authorization: Bearer` header) |
 
 Both persist the complete configuration but hot-apply only the runtime-effective keys — `logLevel`, `forwardSensorLogs`, `forwardSensorLogsLevel`, and `staleSourceRemovalSecs`. The remaining keys take effect on the next restart; see [Runtime vs Restart-Required Configuration](#runtime-vs-restart-required-configuration).
 

@@ -12,15 +12,21 @@ import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
-// This file constructs its writer with the /restart-service feature
-// enabled but WITHOUT a lifecycle callback (standalone construction —
-// index.ts always injects one, so this is a miswiring, not a deployment
-// state), so it needs its own file: the callback is fixed at construction,
-// and prom-client's global registry allows only one real writer per
-// process. The contract under test: a restart that cannot be scheduled is
-// reported as a 500 BEFORE any 202 — a restart must never be represented
-// as scheduled — and the single-flight guard is never set (no 409 can
-// follow).
+// This file constructs its writer with a VALID RESTART_SERVICE_TOKEN but
+// WITHOUT a shutdown hook (standalone construction — index.ts always
+// injects one, so this is a miswiring, not a deployment state), so it
+// needs its own file: the hook is fixed at construction, and prom-client's
+// global registry allows only one real writer per process.
+//
+// The contract under test is the SECOND half of the fail-closed check:
+// either half missing — no validated token, or no injected hook — answers
+// the SAME byte-identical 503, so the response cannot probe which half a
+// deployment lacks. The companion PrometheusWriterRestartDisabled suite
+// (token unset/empty, hook present) asserts the same literal against its
+// own writer, proving the byte-identity across halves without sharing
+// state across Jest module sandboxes. A restart is never represented as
+// scheduled: the acceptance audit must not fire, and the single-flight
+// guard is never set (no 409 can follow).
 
 interface MockLogger {
   global_log_level: jest.Mock;
@@ -67,33 +73,33 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const RESTART_TOKEN = "restart-nocb-token-1";
+const RESTART_TOKEN = "restart-nocb-token-1-0123456789abcdef";
+// The EXACT wire bytes of the disabled response — the same literal the
+// PrometheusWriterRestartDisabled suite asserts (see the file header).
+const DISABLED_503_BODY = '{"success":false,"message":"Restart endpoint is disabled."}';
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",
   mqttTopicTelemetry: "iot/v3/telemetry",
 };
 
-describe("PrometheusWriter with the feature enabled but no lifecycle callback", () => {
+describe("PrometheusWriter with a valid token but no shutdown hook", () => {
   let logger: MockLogger & ILogger;
   let writer: PrometheusWriter;
   let port: number;
   let configSource: string;
-  let savedRestartEnabled: string | undefined;
   let savedRestartToken: string | undefined;
 
   beforeAll(async () => {
-    savedRestartEnabled = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    savedRestartToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
-    process.env.SENSOR_TELEMETRY_RESTART_ENABLED = "true";
-    process.env.SENSOR_TELEMETRY_RESTART_TOKEN = RESTART_TOKEN;
+    savedRestartToken = process.env.RESTART_SERVICE_TOKEN;
+    process.env.RESTART_SERVICE_TOKEN = RESTART_TOKEN;
 
     port = await getFreePort();
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-restart-nocb-test-"));
     configSource = path.join(configDir, "config.yml");
 
     logger = createMockLogger();
-    // No fifth constructor argument: no lifecycle callback.
+    // No fifth constructor argument: no shutdown hook.
     writer = new PrometheusWriter(
       { ...VALID_CONFIG, apiPort: port } as z.infer<typeof configSchema>,
       logger,
@@ -111,51 +117,60 @@ describe("PrometheusWriter with the feature enabled but no lifecycle callback", 
       )
     );
     fs.rmSync(path.dirname(configSource), { recursive: true, force: true });
-    if (savedRestartEnabled === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    } else {
-      process.env.SENSOR_TELEMETRY_RESTART_ENABLED = savedRestartEnabled;
-    }
     if (savedRestartToken === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
+      delete process.env.RESTART_SERVICE_TOKEN;
     } else {
-      process.env.SENSOR_TELEMETRY_RESTART_TOKEN = savedRestartToken;
+      process.env.RESTART_SERVICE_TOKEN = savedRestartToken;
     }
   });
 
-  it("answers 500 with an authenticated POST — never 202, never 409", async () => {
-    logger.write_error.mockClear();
-
+  it("answers the exact disabled 503 bytes with an authenticated POST — never 202, never 409, never 401", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/restart-service`, {
       method: "POST",
       headers: {
         Connection: "close",
-        "x-restart-token": RESTART_TOKEN,
+        Authorization: `Bearer ${RESTART_TOKEN}`,
       },
     });
-    const body = (await res.json()) as { success: boolean; message: string };
+    const text = await res.text();
 
-    expect(res.status).toBe(500);
-    expect(body.success).toBe(false);
-    expect(body.message).toBe("service restart is unavailable");
-    // The missing callback is logged as an error, and the acceptance
+    expect(res.status).toBe(503);
+    // Byte-identical to the missing-token half (the Disabled suite): a
+    // valid token cannot reveal that the missing half is the hook.
+    expect(text).toBe(DISABLED_503_BODY);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    // The disabled probe is audited (throttled), and the acceptance
     // audit (which would assert a scheduled restart) must NOT have fired.
     expect(
-      logger.write_error.mock.calls.some((c) => c[2]?.event === "restart_callback_missing")
+      logger.write_warn.mock.calls.some((c) => c[2]?.event === "restart_disabled")
     ).toBe(true);
     expect(
       logger.write_info.mock.calls.some((c) => c[2]?.event === "service_restart_requested")
     ).toBe(false);
   });
 
-  it("still answers 500 on a repeat (the guard was never set, so no 409)", async () => {
+  it("answers the same 503 bytes unauthenticated (the half-check precedes auth)", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/restart-service`, {
+      method: "POST",
+      headers: { Connection: "close" },
+    });
+    const text = await res.text();
+
+    expect(res.status).toBe(503);
+    expect(text).toBe(DISABLED_503_BODY);
+  });
+
+  it("still answers 503 on a repeat (the guard was never set, so no 409)", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/restart-service`, {
       method: "POST",
       headers: {
         Connection: "close",
-        "x-restart-token": RESTART_TOKEN,
+        Authorization: `Bearer ${RESTART_TOKEN}`,
       },
     });
-    expect(res.status).toBe(500);
+    const text = await res.text();
+
+    expect(res.status).toBe(503);
+    expect(text).toBe(DISABLED_503_BODY);
   });
 });

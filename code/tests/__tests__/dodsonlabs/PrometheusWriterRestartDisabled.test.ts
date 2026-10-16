@@ -12,11 +12,16 @@ import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
-// This file constructs its writer with the /restart-service feature
-// DISABLED (flag unset — the default deployment), so it needs its own
-// file: the flag is captured at construction, and prom-client's global
-// registry allows only one real writer per process. The callback spy must
-// NEVER be invoked by any request in this file.
+// This file constructs its writer with the /restart-service endpoint
+// DISABLED — token state 1: RESTART_SERVICE_TOKEN is the empty string, so
+// it needs its own file: the token is captured at construction, and
+// prom-client's global registry allows only one real writer per process.
+// The empty string (not a deleted variable) is deliberate: compose
+// injects `${RESTART_SERVICE_TOKEN:-}`, so an unset host variable arrives
+// in the container as an EMPTY value — this is the real deployed disabled
+// state (true-unset takes the same code branch). The shutdown hook IS
+// injected here: the missing half of the fail-closed check is the token.
+// The callback spy must NEVER be invoked by any request in this file.
 
 interface MockLogger {
   global_log_level: jest.Mock;
@@ -63,28 +68,30 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
+// The EXACT wire bytes of the disabled response. The companion
+// PrometheusWriterRestartNoCallback suite (valid token, missing shutdown
+// hook) asserts the same literal against its own writer — byte-identity
+// across the two halves of the fail-closed check, proven without sharing
+// state across Jest module sandboxes.
+const DISABLED_503_BODY = '{"success":false,"message":"Restart endpoint is disabled."}';
+
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",
   mqttTopicTelemetry: "iot/v3/telemetry",
 };
 
-describe("PrometheusWriter with /restart-service disabled (default)", () => {
+describe("PrometheusWriter with /restart-service disabled (token unset/empty)", () => {
   let logger: MockLogger & ILogger;
   let writer: PrometheusWriter;
   let restartCallback: jest.Mock;
   let port: number;
   let configSource: string;
-  let savedRestartEnabled: string | undefined;
   let savedRestartToken: string | undefined;
 
   beforeAll(async () => {
-    savedRestartEnabled = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    savedRestartToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
-    // Unset on purpose: the default deployment. The token is set anyway —
-    // the flag alone must keep the feature off.
-    delete process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    process.env.SENSOR_TELEMETRY_RESTART_TOKEN = "should-not-matter";
+    savedRestartToken = process.env.RESTART_SERVICE_TOKEN;
+    process.env.RESTART_SERVICE_TOKEN = "";
 
     port = await getFreePort();
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-restart-off-test-"));
@@ -123,34 +130,26 @@ describe("PrometheusWriter with /restart-service disabled (default)", () => {
       )
     );
     fs.rmSync(path.dirname(configSource), { recursive: true, force: true });
-    if (savedRestartEnabled === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-    } else {
-      process.env.SENSOR_TELEMETRY_RESTART_ENABLED = savedRestartEnabled;
-    }
     if (savedRestartToken === undefined) {
-      delete process.env.SENSOR_TELEMETRY_RESTART_TOKEN;
+      delete process.env.RESTART_SERVICE_TOKEN;
     } else {
-      process.env.SENSOR_TELEMETRY_RESTART_TOKEN = savedRestartToken;
+      process.env.RESTART_SERVICE_TOKEN = savedRestartToken;
     }
   });
 
-  it("answers POST with 503 (feature disabled), never invoking the callback", async () => {
+  it("answers POST with the exact disabled 503 bytes, never invoking the callback", async () => {
     logger.write_warn.mockClear();
     const res = await fetch(`http://127.0.0.1:${port}/restart-service`, {
       method: "POST",
-      headers: {
-        Connection: "close",
-        "x-restart-token": "should-not-matter",
-      },
+      headers: { Connection: "close" },
     });
-    const body = (await res.json()) as { success: boolean; message: string };
+    const text = await res.text();
 
     expect(res.status).toBe(503);
-    expect(body).toEqual({
-      success: false,
-      message: "service restart endpoint is disabled",
-    });
+    // Byte-identical body: the response must not leak which half of the
+    // fail-closed check is missing.
+    expect(text).toBe(DISABLED_503_BODY);
+    expect(res.headers.get("cache-control")).toBe("no-store");
     expect(restartCallback).not.toHaveBeenCalled();
     // The disabled probe is audited (throttled) so unauthenticated
     // discovery attempts stay visible.
@@ -159,17 +158,20 @@ describe("PrometheusWriter with /restart-service disabled (default)", () => {
     ).toBe(true);
   });
 
-  it("answers 503 even with a correct token when the flag is unset", async () => {
+  it("answers the same 503 bytes with a plausible Bearer header (the token cannot grant enablement)", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/restart-service`, {
       method: "POST",
       headers: {
         Connection: "close",
-        // The token is valid — but enablement is a strict opt-in the
-        // token alone cannot grant.
-        "x-restart-token": "should-not-matter",
+        // A well-formed, strong-looking Bearer header — enablement comes
+        // from the environment token, never from the request.
+        Authorization: `Bearer ${"a".repeat(48)}`,
       },
     });
+    const text = await res.text();
+
     expect(res.status).toBe(503);
+    expect(text).toBe(DISABLED_503_BODY);
     expect(restartCallback).not.toHaveBeenCalled();
   });
 
@@ -181,8 +183,20 @@ describe("PrometheusWriter with /restart-service disabled (default)", () => {
 
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("POST");
+    expect(res.headers.get("cache-control")).toBe("no-store");
     expect(body.success).toBe(false);
     expect(restartCallback).not.toHaveBeenCalled();
+  });
+
+  it("boots and runs normally while disabled: /health stays 200", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Connection: "close" },
+    });
+    const body = (await res.json()) as { status: string };
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("healthy");
+    expect(writer.is_ready()).toBe(true);
   });
 
   it("does not announce the feature at construction", () => {

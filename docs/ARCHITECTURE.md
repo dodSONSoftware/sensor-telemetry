@@ -15,11 +15,11 @@ MQTT broker (telemetry / health / log exact topics)
       → PrometheusWriter (gauges, counters, label identity, stale eviction)
           → HTTP /metrics, /health, /ready, /about, /endpoints,
                  /read-config, /write-config, /reload-config,
-                 /restart-service (opt-in; requests a shutdown, never owns it)
+                 /restart-service (token-gated; requests a shutdown, never owns it)
       → Logger (redacted structured logs)
           → console; optional LokiTransport → Loki push API
 config.yml → Zod schema → startup; write/reload → runtime config update
-env (SENSOR_TELEMETRY_RESTART_*) → index.ts restart callback → SIGTERM
+env (RESTART_SERVICE_TOKEN) → index.ts restart callback → SIGTERM
 ```
 
 ## Source ownership
@@ -28,7 +28,7 @@ env (SENSOR_TELEMETRY_RESTART_*) → index.ts restart callback → SIGTERM
 | --- | --- |
 | `code/src/index.ts` | Configuration/bootstrap, fatal handlers, startup readiness wait, ordered shutdown; owns the `/restart-service` lifecycle callback (self-SIGTERM). |
 | `code/src/dodsonlabs/MqttNetworking.ts` | MQTT connect/reconnect/SUBACK tracking, V3 message routing, payload rejection, runtime configuration coordination; threads the restart callback to the writer. |
-| `code/src/dodsonlabs/PrometheusWriter.ts` | Metrics registry and gauge updates, bounded labels, stale-series removal, HTTP endpoints and configuration API, `/restart-service` (enablement, token, single-flight, response-before-shutdown). Constructor starts HTTP server. |
+| `code/src/dodsonlabs/PrometheusWriter.ts` | Metrics registry and gauge updates, bounded labels, stale-series removal, HTTP endpoints and configuration API, `/restart-service` (token-state validation, Bearer auth, single-flight, response-before-shutdown). Constructor starts HTTP server. |
 | `code/src/dodsonlabs/SystemFunctions.ts` | Typed field reads, telemetry range table, bounded log serialization, throttling, YAML I/O and source-label regex helpers. |
 | `code/src/dodsonlabs/Interfaces.ts` | Cross-module contracts including untrusted `JsonObject` and fixed MQTT drop reasons. |
 | `code/src/dodsonlabs/Logger.ts` | Winston logging, metadata redaction, optional Loki transport lifecycle. |
@@ -48,7 +48,7 @@ Accepted sensor traffic updates readings/health and last-seen communication time
 
 `/health` means the HTTP process responds; `/ready` requires both MQTT connectivity and acknowledged subscriptions. `code/src/index.ts` registers signal and fatal handlers before constructing networking, performs a bounded graceful shutdown, closes networking/HTTP before flushing the logger's Loki transport, and preserves fatal exit status.
 
-`/restart-service` inverts that direction deliberately: the HTTP layer *requests* a restart through a one-shot callback injected from `index.ts` (via `MqttNetworking`), and `index.ts` — the process owner — self-signals SIGTERM so the restart reuses the identical graceful path as an operator `docker stop`. The writer answers `202` only after the response is flushed (with a bounded fallback when the client disconnects first), fires the callback at most once per process, and fails startup when enabled without a token.
+`/restart-service` inverts that direction deliberately: the HTTP layer *requests* a restart through a one-shot callback injected from `index.ts` (via `MqttNetworking`), and `index.ts` — the process owner — self-signals SIGTERM so the restart reuses the identical graceful path as an operator `docker stop`. The writer answers `202` only after the response is flushed (with a bounded fallback when the client disconnects first), fires the callback at most once per process, and fails startup when the token is set but weak (unset/empty disables the endpoint).
 
 ## Deployment boundaries
 

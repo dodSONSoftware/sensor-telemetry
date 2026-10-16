@@ -170,20 +170,23 @@ export class PrometheusWriter {
     // allowlisted Origin values receive Access-Control-Allow-Origin.
     private readonly corsAllowAllOrigins: boolean;
     private readonly corsAllowedOrigins: ReadonlySet<string>;
-    // ---- /restart-service (opt-in process self-restart). Active only when
-    // SENSOR_TELEMETRY_RESTART_ENABLED is exactly "true" AND
-    // SENSOR_TELEMETRY_RESTART_TOKEN is non-empty. Unlike configToken —
-    // which deliberately fails OPEN for trusted-LAN deployments — a
-    // process-restart endpoint with no authentication is an immediate
-    // denial-of-service, so the constructor refuses to start (fail-fast)
-    // when the flag is set without a token (see the constructor).
+    // ---- /restart-service (token-gated process self-restart). There is no
+    // separate enable flag: a VALIDATED RESTART_SERVICE_TOKEN (set, not
+    // whitespace-only, at least 32 bytes) IS the switch — unset or empty
+    // disables the endpoint, and a set-but-weak token fails the startup
+    // (see the constructor), so a dummy value can never disable it.
+    // Like the config token it is env-only, never config.yml (which
+    // /read-config would expose). Fail-closed: the endpoint is usable only
+    // when BOTH a validated secret AND an injected shutdown hook are
+    // present; either half missing answers the same byte-identical 503,
+    // so the response cannot probe which half a deployment lacks.
     private readonly restartEnabled: boolean;
     private readonly restartToken: string | undefined;
     // Single-flight guard: true between accepting a restart request and
     // firing the lifecycle callback. Stays true for the process lifetime
     // on success (the process is exiting) and resets only when the
-    // callback throws or is missing (no shutdown was started, so a retry
-    // must be possible instead of a permanent 409).
+    // callback throws (no shutdown was started, so a retry must be
+    // possible instead of a permanent 409).
     private restartPending = false;
     // Bounded fallback timer: fires the scheduling when the 202 response
     // never completes ('finish' never fires — the client disconnected
@@ -338,8 +341,15 @@ export class PrometheusWriter {
     // cross-origin requests may use, and how long a browser may cache the
     // preflight answer (bounds how long a stale policy can persist).
     private static readonly CORS_ALLOW_METHODS = "GET, POST, OPTIONS";
-    private static readonly CORS_ALLOW_HEADERS = "Content-Type, X-Config-Token, X-Restart-Token";
+    private static readonly CORS_ALLOW_HEADERS = "Content-Type, X-Config-Token, Authorization";
     private static readonly CORS_MAX_AGE_SECONDS = 600;
+    // Exact shape of the Authorization header protecting /restart-service:
+    // one case-sensitive "Bearer" scheme, a single space, one non-empty
+    // token containing no whitespace. The whitespace-free token rejects
+    // comma-joined or duplicated header values on the value itself; the
+    // extra rawHeaders lines a duplicated header leaves behind are counted
+    // separately, before any comparison (see verifyRestartAuthorization).
+    private static readonly BEARER_AUTHORIZATION_SHAPE = /^Bearer (\S+)$/;
     // Bounded fallback for the /restart-service scheduling: the lifecycle
     // callback fires when the 202 response 'finish' event does not fire
     // (the client disconnected before the response was fully flushed), so
@@ -410,40 +420,55 @@ export class PrometheusWriter {
             );
         }
 
-        // ---- /restart-service credentials, captured at construction (same
-        // env-not-YAML policy as the config token: /read-config would expose
-        // anything in the file). This block runs BEFORE any prom-client
-        // registration, event-loop monitor, or HTTP server creation: the
-        // fail-fast throw below must leave no half-constructed writer behind.
-        // The flag is strict ("true" only — "yes", "1", "TRUE" all read as
-        // disabled, so a typo can only ever DISABLE the feature, never
-        // enable it) and, unlike the config token, enabled-without-token
-        // fails the STARTUP: an unauthenticated process-restart endpoint is
-        // an instant denial-of-service, and silently disabling it here would
-        // mask the operator's intent to enable it. The throw escapes the
-        // MqttNetworking constructor and is routed by index.ts's
-        // unhandledRejection handler to a structured fatal log and exit 1 —
-        // with the Docker restart policy in play, a misconfigured
-        // container crash-loops until the environment is fixed, which is the
-        // intended fail-fast visibility.
+        // ---- /restart-service credentials, captured exactly once at
+        // startup (same env-not-YAML policy as the config token: /read-config
+        // would expose anything in the file). This block runs BEFORE any
+        // prom-client registration, event-loop monitor, or HTTP server
+        // creation: the fail-fast throw below must leave no half-constructed
+        // writer behind. There is no separate enable flag — the presence of
+        // a VALIDATED RESTART_SERVICE_TOKEN is the switch, with exactly
+        // three states:
+        //   1. unset or empty        -> endpoint disabled (503), normal boot
+        //   2. not whitespace-only,
+        //      at least 32 bytes     -> validated; endpoint enabled (only
+        //                               when a shutdown hook was injected
+        //                               too — see the restartEnabled field)
+        //   3. set but weak
+        //      (whitespace-only or < 32 bytes) -> startup failure. A dummy
+        //      value must never disable the endpoint: the only way to
+        //      disable it is to leave the variable unset or empty.
+        // The throw escapes the MqttNetworking constructor and is routed by
+        // index.ts's unhandledRejection handler to a structured fatal log
+        // and exit 1 — with the Docker restart policy in play, a
+        // misconfigured container crash-loops until the environment is
+        // fixed, which is the intended fail-fast visibility.
         this.requestRestart = requestRestartCallback;
-        this.restartToken = process.env.SENSOR_TELEMETRY_RESTART_TOKEN || undefined;
-        const restartFlag = process.env.SENSOR_TELEMETRY_RESTART_ENABLED;
-        if (restartFlag === "true" && this.restartToken === undefined) {
+        const rawRestartToken = process.env.RESTART_SERVICE_TOKEN;
+        if (rawRestartToken === undefined || rawRestartToken === "") {
+            this.restartToken = undefined;
+            this.restartEnabled = false;
+        } else if (rawRestartToken.trim() === "" || Buffer.byteLength(rawRestartToken, "utf8") < 32) {
             throw new Error(
-                "SENSOR_TELEMETRY_RESTART_ENABLED is true but SENSOR_TELEMETRY_RESTART_TOKEN is not set; " +
-                "set a strong, distinct restart token (or leave the flag unset/false to disable the feature). " +
-                "The service refuses to start while the restart endpoint would be unauthenticated."
+                "RESTART_SERVICE_TOKEN is set but weak: it is whitespace-only or shorter than 32 bytes. " +
+                "A dummy value must not disable /restart-service — to disable the endpoint, leave " +
+                "RESTART_SERVICE_TOKEN unset (or empty). To enable it, set a strong, distinct secret of " +
+                "at least 32 bytes (e.g. `openssl rand -hex 32`). " +
+                "The service refuses to start while the restart endpoint would be under-protected."
             );
+        } else {
+            this.restartToken = rawRestartToken;
+            // Fail-closed: the endpoint is usable only with BOTH a validated
+            // secret AND an injected shutdown hook; the handler answers the
+            // identical 503 when either half is missing.
+            this.restartEnabled = this.requestRestart !== undefined;
         }
-        this.restartEnabled = restartFlag === "true" && this.restartToken !== undefined;
         if (this.restartEnabled) {
             // Enabled is a security-relevant state: announce it once at
             // startup (no per-request logging needed — every accepted
             // request audit-logs, and the endpoint is not orchestrator-polled).
             logger.write_info(
                 "prometheus/constructor",
-                "/restart-service endpoint enabled (x-restart-token required)",
+                "/restart-service endpoint enabled (Authorization: Bearer required)",
                 {
                     event: "restart_endpoint_enabled",
                     logType: "service",
@@ -891,42 +916,70 @@ export class PrometheusWriter {
     }
 
     /**
-     * Verify the shared secret protecting /restart-service. Called only
-     * when the feature is enabled, so the token is always configured
-     * (the constructor refuses to start otherwise). The x-restart-token
-     * header is compared in constant time, exactly like the config token;
-     * it is a DISTINCT secret — it never falls back to
-     * SENSOR_TELEMETRY_CONFIG_TOKEN, so the config token's value is
-     * useless against the restart endpoint. Responds with 401 and returns
-     * false on failure; the rejection audit never carries the token value.
+     * Verify the Authorization header protecting /restart-service. Called
+     * only when the endpoint is enabled, so the token is always a
+     * validated >=32-byte secret (the constructor refuses to start
+     * otherwise). Exact shape: one case-sensitive "Bearer" scheme, a
+     * single space, one token with no embedded whitespace — and at most
+     * ONE Authorization header. The secret is a distinct one: it never
+     * falls back to SENSOR_TELEMETRY_CONFIG_TOKEN, so the config token's
+     * value is useless against the restart endpoint. Duplicated
+     * Authorization headers are rejected BEFORE any comparison: Node's
+     * parser surfaces only the FIRST value in req.headers (the rest are
+     * silently dropped), so the count must come from req.rawHeaders,
+     * which preserves every line; comma-joined values are caught by the
+     * shape check. The token is compared in constant time — a length
+     * mismatch is a definitive reject that never reaches
+     * timingSafeEqual. Responds 401 with WWW-Authenticate: Bearer and
+     * returns false on failure; the rejection audit never carries the
+     * token or header value (only that an attempt was made).
      */
-    private verifyRestartToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-        const header = req.headers["x-restart-token"];
-        const provided = Array.isArray(header) ? (header[0] ?? "") : (header ?? "");
+    private verifyRestartAuthorization(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+        let authorizationHeaderCount = 0;
+        for (let i = 0; i < req.rawHeaders.length; i += 2) {
+            if (req.rawHeaders[i].toLowerCase() === "authorization") {
+                authorizationHeaderCount += 1;
+            }
+        }
+        // Authorization is never surfaced as an array by the parser (the
+        // first value wins), but normalize defensively like every other
+        // header read in this class.
+        const header = req.headers["authorization"];
+        const raw = Array.isArray(header) ? (header[0] ?? "") : (header ?? "");
+        const match = PrometheusWriter.BEARER_AUTHORIZATION_SHAPE.exec(raw);
+        if (authorizationHeaderCount > 1 || match === null) {
+            this.sendRestartAuthFailure(req, res);
+            return false;
+        }
         const expected = Buffer.from(this.restartToken ?? "", "utf8");
-        const actual = Buffer.from(provided, "utf8");
+        const actual = Buffer.from(match[1], "utf8");
         if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-            this.logThrottledHttpWarning(
-                "restart_token_rejected",
-                "prometheus/restartTokenRejected",
-                "Rejected /restart-service request with missing or invalid x-restart-token",
-                {
-                    event: "restart_token_rejected",
-                    logType: "audit",
-                    method: req.method || "UNKNOWN",
-                    // Untrusted request path, bounded like the config-token
-                    // audit — never the token value itself.
-                    url: truncateForLog(req.url || "/"),
-                    // The directly observed socket address, for operational
-                    // forensics — no reverse DNS, no proxy-header trust.
-                    remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
-                    statusCode: 401,
-                }
-            );
-            this.sendJson(res, 401, { success: false, message: "missing or invalid x-restart-token" });
+            this.sendRestartAuthFailure(req, res);
             return false;
         }
         return true;
+    }
+
+    private sendRestartAuthFailure(req: http.IncomingMessage, res: http.ServerResponse): void {
+        this.logThrottledHttpWarning(
+            "restart_token_rejected",
+            "prometheus/restartTokenRejected",
+            "Rejected /restart-service request with missing or invalid Authorization header",
+            {
+                event: "restart_token_rejected",
+                logType: "audit",
+                method: req.method || "UNKNOWN",
+                // Untrusted request path, bounded like the config-token
+                // audit — never the token or header value itself.
+                url: truncateForLog(req.url || "/"),
+                // The directly observed socket address, for operational
+                // forensics — no reverse DNS, no proxy-header trust.
+                remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                statusCode: 401,
+            }
+        );
+        res.setHeader("WWW-Authenticate", "Bearer");
+        this.sendJson(res, 401, { success: false, message: "missing or invalid Authorization header" });
     }
 
     // ******** private methods for CORS
@@ -1165,7 +1218,7 @@ export class PrometheusWriter {
                 { route: "/read-config", description: "Reads the current configuration." },
                 { route: "/write-config", description: "Validates and persists the configuration; runtime-effective settings are applied immediately, restart-only settings take effect on the next restart." },
                 { route: "/reload-config", description: "Reloads the configuration from disk and applies the runtime-effective settings; the file on disk is not modified." },
-                { route: "/restart-service", description: "Requests a graceful restart of this service (202 when scheduled). Disabled unless SENSOR_TELEMETRY_RESTART_ENABLED=true with SENSOR_TELEMETRY_RESTART_TOKEN set; requires the x-restart-token header." }
+                { route: "/restart-service", description: "Requests a graceful restart of this service (202 when scheduled). Disabled unless RESTART_SERVICE_TOKEN is set (at least 32 bytes, not whitespace-only — a set-but-weak token fails startup); requires an Authorization: Bearer header." }
             ]
         };
         this.sendJson(res, 200, aboutInfo);
@@ -1241,8 +1294,8 @@ export class PrometheusWriter {
                 name: "Restart Service",
                 route: "/restart-service",
                 verb: "POST",
-                requestBody: "None (a non-empty body is rejected with 400). Requires the x-restart-token header; the feature must be enabled with SENSOR_TELEMETRY_RESTART_ENABLED=true and SENSOR_TELEMETRY_RESTART_TOKEN set (the service refuses to start when the flag is set without a token).",
-                responseBody: "202 { success: true, status: \"restart_scheduled\", message: \"Service restart requested\" }; 401 missing/invalid x-restart-token; 405 Allow: POST; 409 restart already pending; 500 no restart mechanism available; 503 feature disabled",
+                requestBody: "None (the request body is ignored). Requires the Authorization: Bearer header, where the token is the environment-only RESTART_SERVICE_TOKEN (unset or empty disables the endpoint; a set-but-weak token — whitespace-only or under 32 bytes — fails startup).",
+                responseBody: "202 { success: true, status: \"restart_scheduled\", message: \"Service restart requested\" }; 401 (WWW-Authenticate: Bearer) missing/invalid Authorization header; 405 Allow: POST; 409 restart already in progress; 503 endpoint disabled",
                 description: "Schedules a graceful restart of this process: after the 202 response is delivered, the existing SIGTERM shutdown path runs once (MQTT disconnect, HTTP drain, Loki flush, clean exit), and the container restart policy (restart: unless-stopped in the compose file) starts the same container with the persisted configuration. The 202 means scheduled, not completed — the response is best-effort (the process may exit before the client observes the connection close), and callers should verify the new process via /health and /ready. It does not rebuild the image, update deployment files, or apply a changed apiPort's port mapping; docker stop remains the operator's control (a manually stopped container stays stopped)."
             }
         ];
@@ -1637,43 +1690,61 @@ export class PrometheusWriter {
     }
 
     /**
-     * POST /restart-service — opt-in process self-restart (see the
-     * constructor's fail-fast block and docs/DECISIONS.md for the design:
-     * the callback reuses the SIGTERM graceful-shutdown path, and the
-     * Docker restart policy starts the same container again — no Docker
-     * socket, CLI, or process.exit in the HTTP layer).
+     * POST /restart-service — token-gated process self-restart (see the
+     * constructor's three-state validation and docs/DECISIONS.md for the
+     * design: the injected hook reuses the SIGTERM graceful-shutdown
+     * path, and the container restart policy starts the same container
+     * again — no Docker socket, CLI, or process.exit in the HTTP layer).
      *
      * Contract (advertised by /endpoints):
      * - 405 Allow: POST for other verbs (checked before authentication,
      *   like every other route),
-     * - 503 while the feature is disabled (strict opt-in, off by default),
-     * - 401 on a missing/invalid x-restart-token (throttled audit; the
-     *   token value is never logged),
-     * - 500 when no lifecycle callback was injected at construction (the
-     *   restart cannot be scheduled, and a restart must never be
-     *   misrepresented as scheduled — so this is answered BEFORE the 202),
-     * - 400 when the body is non-empty (this route takes no payload),
-     * - 409 while a restart is already pending (single-flight),
+     * - 503 when EITHER half of the fail-closed check is missing — no
+     *   validated RESTART_SERVICE_TOKEN, or no shutdown hook injected at
+     *   construction. The body is byte-identical for both halves and is
+     *   answered BEFORE authentication, so the response cannot probe
+     *   which half a deployment lacks (throttled audit; a restart must
+     *   never be misrepresented as scheduled),
+     * - 401 on a missing/invalid Authorization: Bearer header — strict
+     *   shape (case-sensitive scheme, single space, whitespace-free
+     *   token), duplicated Authorization headers rejected before any
+     *   comparison, constant-time token comparison; WWW-Authenticate:
+     *   Bearer; throttled audit; the token value is never logged,
+     * - 409 while a restart is already pending (single-flight; the guard
+     *   is set synchronously before the response is written),
      * - 202 when accepted: the callback fires exactly once, after the
      *   response has been flushed (or after the bounded fallback when the
      *   client disconnects first). The response is BEST-EFFORT — the
      *   process is about to exit, so a lost response does not prove the
      *   restart was not scheduled.
+     *
+     * The request body is IGNORED (this route takes no payload), and
+     * Cache-Control: no-store is sent on every response from this
+     * endpoint.
      */
     private handleRestartService(req: http.IncomingMessage, res: http.ServerResponse): void {
+        // no-store on EVERY response from this endpoint: set at handler
+        // entry, before any sub-call, so the shared requireMethod 405 and
+        // every later path (503/401/409/202) inherit it. The centrally
+        // answered OPTIONS preflight never reaches this handler (it is a
+        // CORS-boundary response, not an endpoint response).
+        res.setHeader("Cache-Control", "no-store");
         if (!this.requireMethod(req, res, "POST")) {
             return;
         }
+        // Fail-closed half-check, BEFORE authentication: no validated
+        // token OR no injected shutdown hook answers the SAME
+        // byte-identical 503, so the response cannot probe which half a
+        // deployment lacks. 503, not 404: /endpoints lists this route
+        // publicly, and a disabled feature is a STATE, not a missing
+        // route — a 404 would misreport the cause. The throttled audit
+        // keeps unauthenticated probing visible without letting one
+        // client own the log channel.
         if (!this.restartEnabled) {
-            // 503, not 404: /endpoints already lists this route publicly,
-            // and the feature is an opt-in STATE, not a missing route — a
-            // 404 would misreport the cause. The throttled audit keeps
-            // unauthenticated probing visible without letting one client
-            // own the log channel.
             this.logThrottledHttpWarning(
                 "restart_disabled",
                 "prometheus/restartDisabled",
-                "POST /restart-service while the feature is disabled",
+                "POST /restart-service while the endpoint is disabled",
                 {
                     event: "restart_disabled",
                     logType: "audit",
@@ -1681,171 +1752,119 @@ export class PrometheusWriter {
                     statusCode: 503,
                 }
             );
-            this.sendJson(res, 503, { success: false, message: "service restart endpoint is disabled" });
+            this.sendJson(res, 503, { success: false, message: "Restart endpoint is disabled." });
             return;
         }
-        if (!this.verifyRestartToken(req, res)) {
+        if (!this.verifyRestartAuthorization(req, res)) {
             return;
         }
-        // Authenticated from here on. The remaining rejections are ordered
-        // so none of them can leave restartPending stuck: the guard is set
-        // only on the accept path, and the check-and-set inside the 'end'
-        // handler is synchronous (no await in between), so two concurrent
-        // authenticated POSTs cannot both pass.
-        if (this.requestRestart === undefined) {
-            // index.ts always injects a callback; a standalone
-            // construction (e.g. in tests) does not. Report it as a 500
-            // BEFORE any 202 — the restart was not scheduled.
-            this.logger.write_error(
-                "prometheus/restartCallbackMissing",
-                "/restart-service reached with no lifecycle callback configured; cannot schedule a restart",
-                {
-                    event: "restart_callback_missing",
-                    logType: "service",
-                    statusCode: 500,
-                }
-            );
-            this.sendJson(res, 500, { success: false, message: "service restart is unavailable" });
+        // One-shot acceptance — fully synchronous (the request body is
+        // ignored, so there is nothing to wait for): the guard is set
+        // before the response is written, so a duplicate POST in the same
+        // tick cannot slip between the check and the set.
+        if (this.restartPending) {
+            this.sendJson(res, 409, { success: false, message: "Restart already in progress." });
             return;
         }
-        let rejected = false;
-        const endWithFailure = (): void => {
-            if (!res.headersSent) {
-                res.statusCode = 400;
+        this.restartPending = true;
+        // Capture the directly observed socket address NOW: the lifecycle
+        // callback runs after the response is flushed and the socket may
+        // be gone by then. Same forensics policy as the config audits —
+        // no proxy-header trust, no secrets.
+        const remoteAddress = req.socket.remoteAddress ?? "UNKNOWN";
+        // Acceptance audit: every accepted request logs exactly once
+        // (the rejection paths have their own, throttled, audits).
+        this.logger.write_info(
+            "prometheus/restartService",
+            "Service restart requested",
+            {
+                event: "service_restart_requested",
+                logType: "audit",
+                remoteAddress,
+                statusCode: 202,
             }
-            if (!res.writableEnded) {
-                res.end();
+        );
+        // The 202 must be fully delivered BEFORE the lifecycle callback
+        // runs: shutdown() closes the HTTP server, and a response that is
+        // still flushing cannot be closed out from under it. 'finish'
+        // (bytes flushed) and a bounded fallback (client disconnected
+        // before flush → 'close' without 'finish') both funnel into one
+        // single-fire scheduler, so the callback never runs twice — and
+        // the accepted request is honored even when the client vanishes
+        // instead of leaving restartPending stuck forever.
+        let fired = false;
+        const scheduleRestart = (): void => {
+            if (fired) return;
+            fired = true;
+            if (this.restartFallbackTimer !== undefined) {
+                clearTimeout(this.restartFallbackTimer);
+                this.restartFallbackTimer = undefined;
+            }
+            try {
+                this.requestRestart?.();
+            } catch (err) {
+                // A synchronous throw means no shutdown started: release
+                // the guard so a later request can retry, and log the
+                // failure — an escape here would reach index.ts's
+                // uncaughtException handler and take a healthy process
+                // down over what should be a recoverable error.
+                this.restartPending = false;
+                this.logger.write_error(
+                    "prometheus/restartCallbackFailed",
+                    `Restart callback failed: ${ensureError(err).message}`,
+                    {
+                        event: "restart_callback_failed",
+                        logType: "service",
+                        error: err,
+                    }
+                );
             }
         };
-        req.on("data", () => {
-            if (rejected) return;
-            rejected = true;
-            // ANY body violates the contract: this is a POST with no
-            // payload. Answer on the first chunk and destroy the request
-            // stream so a hostile client cannot pump data for sport —
-            // memory stays bounded without a byte counter, and the 400
-            // is already written to the socket buffer and reaches the
-            // client before the destroy takes effect.
-            this.sendJson(res, 400, { success: false, message: "request body must be empty" });
-            req.destroy();
+        res.once("finish", () => {
+            // setImmediate lets the HTTP handler unwind (and the client
+            // receive the bytes) before process lifecycle is touched.
+            setImmediate(scheduleRestart);
         });
-        req.on("end", () => {
-            if (rejected) return;
-            if (this.restartPending) {
-                this.sendJson(res, 409, { success: false, message: "restart already scheduled" });
-                return;
-            }
-            this.restartPending = true;
-            // Capture the directly observed socket address NOW: the
-            // lifecycle callback runs after the response is flushed and
-            // the socket may be gone by then. Same forensics policy as the
-            // config audits — no proxy-header trust, no secrets.
-            const remoteAddress = req.socket.remoteAddress ?? "UNKNOWN";
-            // Acceptance audit: every accepted request logs exactly once
-            // (the rejection paths have their own, throttled, audits).
-            this.logger.write_info(
-                "prometheus/restartService",
-                "Service restart requested",
-                {
-                    event: "service_restart_requested",
-                    logType: "audit",
-                    remoteAddress,
-                    statusCode: 202,
-                }
-            );
-            // The 202 must be fully delivered BEFORE the lifecycle callback
-            // runs: shutdown() closes the HTTP server, and a response that
-            // is still flushing cannot be closed out from under it. 'finish'
-            // (bytes flushed) and a bounded fallback (client disconnected
-            // before flush → 'close' without 'finish') both funnel into one
-            // single-fire scheduler, so the callback never runs twice — and
-            // the accepted request is honored even when the client vanishes
-            // instead of leaving restartPending stuck forever.
-            let fired = false;
-            const scheduleRestart = (): void => {
-                if (fired) return;
-                fired = true;
-                if (this.restartFallbackTimer !== undefined) {
-                    clearTimeout(this.restartFallbackTimer);
-                    this.restartFallbackTimer = undefined;
-                }
-                try {
-                    this.requestRestart?.();
-                } catch (err) {
-                    // A synchronous throw means no shutdown started: release
-                    // the guard so a later request can retry, and log the
-                    // failure — an escape here would reach index.ts's
-                    // uncaughtException handler and take a healthy process
-                    // down over what should be a recoverable error.
-                    this.restartPending = false;
-                    this.logger.write_error(
-                        "prometheus/restartCallbackFailed",
-                        `Restart callback failed: ${ensureError(err).message}`,
-                        {
-                            event: "restart_callback_failed",
-                            logType: "service",
-                            error: err,
-                        }
-                    );
-                }
-            };
-            res.once("finish", () => {
-                // setImmediate lets the HTTP handler unwind (and the client
-                // receive the bytes) before process lifecycle is touched.
-                setImmediate(scheduleRestart);
-            });
-            this.restartFallbackTimer = setTimeout(
-                scheduleRestart,
-                PrometheusWriter.RESTART_FALLBACK_DELAY_MS
-            );
-            // no-store: the 202 must never be served from an HTTP cache to
-            // a different client (the same policy the CORS-reject path
-            // applies). Connection: close because the process is about to
-            // exit — the socket must not linger in a keep-alive pool while
-            // the shutdown drains the server.
-            res.setHeader("Cache-Control", "no-store");
-            res.setHeader("Connection", "close");
-            this.sendJson(res, 202, {
-                success: true,
-                status: "restart_scheduled",
-                message: "Service restart requested"
-            });
+        this.restartFallbackTimer = setTimeout(
+            scheduleRestart,
+            PrometheusWriter.RESTART_FALLBACK_DELAY_MS
+        );
+        // no-store was set at handler entry. Connection: close because
+        // the process is about to exit — the socket must not linger in a
+        // keep-alive pool while the shutdown drains the server.
+        res.setHeader("Connection", "close");
+        this.sendJson(res, 202, {
+            success: true,
+            status: "restart_scheduled",
+            message: "Service restart requested"
         });
-        // A client that vanishes mid-body (aborted fetch, dropped TCP)
-        // makes the request stream emit 'error' (e.g. ECONNRESET) or
-        // 'aborted' instead of 'end'. With no handler attached, an
+        // The request stream is never consumed (the body is ignored): a
+        // client that vanishes with an unread body makes the request
+        // stream emit 'error' (e.g. ECONNRESET) or 'aborted', and an
         // unhandled 'error' event on the request stream throws
-        // ERR_UNHANDLED_ERROR and takes the process down. Both paths are
-        // made explicit, as in handleWriteConfig: mark the request
-        // rejected so the 'end' handler cannot accept a partial-body
-        // request, and end the response with an explicit 400 if it is
-        // still open.
+        // ERR_UNHANDLED_ERROR and takes the process down. The response
+        // is already ended by the time either can fire, so these only
+        // swallow + audit.
         req.on("error", (err: Error) => {
-            if (rejected) return;
-            rejected = true;
             this.logger.write_warn(
                 "prometheus/restartRequestError",
-                `/restart-service request errored before completion: ${err.message}`,
+                `/restart-service request errored: ${err.message}`,
                 {
                     event: "restart_request_error",
                     logType: "audit",
                     error: err.message,
                 }
             );
-            endWithFailure();
         });
         req.on("aborted", () => {
-            if (rejected) return;
-            rejected = true;
             this.logger.write_warn(
                 "prometheus/restartRequestAborted",
-                "/restart-service request aborted before completion",
+                "/restart-service request aborted",
                 {
                     event: "restart_request_aborted",
                     logType: "audit",
                 }
             );
-            endWithFailure();
         });
     }
 
