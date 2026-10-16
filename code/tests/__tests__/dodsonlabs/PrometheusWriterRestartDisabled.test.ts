@@ -13,7 +13,7 @@ import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
 // This file constructs its writer with the /restart-service endpoint
-// DISABLED — token state 1: RESTART_SERVICE_TOKEN is the empty string, so
+// DISABLED — RESTART_SERVICE_TOKEN is the empty string, so
 // it needs its own file: the token is captured at construction, and
 // prom-client's global registry allows only one real writer per process.
 // The empty string (not a deleted variable) is deliberate: compose
@@ -81,6 +81,15 @@ const VALID_CONFIG = {
   mqttTopicTelemetry: "iot/v3/telemetry",
 };
 
+// The startup warn must be snapshotted: the request tests below
+// mockClear() write_warn to isolate their throttled audits, which would
+// wipe it.
+function snapshotEvents(mock: jest.Mock): string[] {
+  return mock.mock.calls
+    .map((c) => (c[2] as Record<string, unknown> | undefined)?.event)
+    .filter((e): e is string => typeof e === "string");
+}
+
 describe("PrometheusWriter with /restart-service disabled (token unset/empty)", () => {
   let logger: MockLogger & ILogger;
   let writer: PrometheusWriter;
@@ -88,6 +97,7 @@ describe("PrometheusWriter with /restart-service disabled (token unset/empty)", 
   let port: number;
   let configSource: string;
   let savedRestartToken: string | undefined;
+  let startupWarnEvents: string[];
 
   beforeAll(async () => {
     savedRestartToken = process.env.RESTART_SERVICE_TOKEN;
@@ -107,6 +117,7 @@ describe("PrometheusWriter with /restart-service disabled (token unset/empty)", 
       restartCallback
     );
     await until(() => writer.is_ready());
+    startupWarnEvents = snapshotEvents(logger.write_warn);
   });
 
   const HTTP_AUDIT_REWARN_INTERVAL_DEFAULT = 60_000;
@@ -197,6 +208,10 @@ describe("PrometheusWriter with /restart-service disabled (token unset/empty)", 
     expect(res.status).toBe(200);
     expect(body.status).toBe("healthy");
     expect(writer.is_ready()).toBe(true);
+  });
+
+  it("warns restart_token_not_set at startup (the service boots and warns)", () => {
+    expect(startupWarnEvents).toContain("restart_token_not_set");
   });
 
   it("does not announce the feature at construction", () => {

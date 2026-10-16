@@ -30,6 +30,12 @@ const packageJsonVersion = (JSON.parse(
   fs.readFileSync(path.join(__dirname, "../../..", "package.json"), "utf8")
 ) as { version: string }).version;
 
+// Valid under the shared token rule (at least 32 alphanumeric characters):
+// this file exercises the ENDPOINTS, so it runs with the configuration API
+// enabled. The disabled (unset/empty) and set-but-invalid states have their
+// own files: PrometheusWriterConfigDisabled, PrometheusWriterTokenInvalid.
+const CONFIG_TOKEN = "writerConfigToken0123456789abcdef";
+
 // Fail the disk write on demand (chmod-based failures are unreliable when
 // the suite runs as root). Default behavior is the real write, and
 // everything else in SystemFunctions stays real.
@@ -136,6 +142,7 @@ function postByteByByte(
           "POST /write-config HTTP/1.1\r\n" +
             "Host: 127.0.0.1\r\n" +
             "Content-Type: application/json\r\n" +
+            `x-config-token: ${CONFIG_TOKEN}\r\n` +
             `Content-Length: ${payload.length}\r\n` +
             "\r\n"
         );
@@ -231,9 +238,11 @@ describe("PrometheusWriter", () => {
   const disallowedOrigin = "http://evil.test:3000";
 
   beforeAll(async () => {
-    // Endpoints must be reachable without a token for this test.
+    // The config endpoints are token-protected: every config request in
+    // this file carries x-config-token: CONFIG_TOKEN (the disabled and
+    // invalid-token states are covered by their own files).
     savedToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
-    delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
+    process.env.SENSOR_TELEMETRY_CONFIG_TOKEN = CONFIG_TOKEN;
 
     savedCorsOrigins = process.env.SENSOR_TELEMETRY_CORS_ORIGINS;
     process.env.SENSOR_TELEMETRY_CORS_ORIGINS = allowedOrigin;
@@ -331,7 +340,7 @@ describe("PrometheusWriter", () => {
         method: "POST",
         // Connection: close keeps undici's keep-alive pool from holding a
         // socket open, which would block server.close() in afterAll.
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({
           ...baseConfig,
           apiPort: port,
@@ -360,7 +369,7 @@ describe("PrometheusWriter", () => {
         method: "POST",
         // Connection: close keeps undici's keep-alive pool from holding a
         // socket open, which would block server.close() in afterAll.
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
       });
       const response = await res.json();
@@ -385,7 +394,7 @@ describe("PrometheusWriter", () => {
       logger.setLogLevel.mockClear();
       const retry = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
       });
       const retryResponse = await retry.json();
@@ -398,7 +407,7 @@ describe("PrometheusWriter", () => {
       // Restore the "info" baseline the /reload-config tests depend on.
       const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
       });
       expect(restore.status).toBe(200);
@@ -418,7 +427,7 @@ describe("PrometheusWriter", () => {
       };
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify(oversized),
       });
       const response = (await res.json()) as { success: boolean; message: string };
@@ -448,7 +457,7 @@ describe("PrometheusWriter", () => {
       // The endpoint still serves a normal write afterward.
       const retry = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info" }),
       });
       expect(retry.status).toBe(200);
@@ -486,6 +495,7 @@ describe("PrometheusWriter", () => {
             "POST /write-config HTTP/1.1\r\n" +
               `Host: 127.0.0.1:${port}\r\n` +
               "Content-Type: application/json\r\n" +
+              `x-config-token: ${CONFIG_TOKEN}\r\n` +
               `Content-Length: ${body.length}\r\n` +
               "\r\n"
           );
@@ -524,6 +534,7 @@ describe("PrometheusWriter", () => {
             "POST /write-config HTTP/1.1\r\n" +
               "Host: 127.0.0.1\r\n" +
               "Content-Type: application/json\r\n" +
+              `x-config-token: ${CONFIG_TOKEN}\r\n` +
               "Content-Length: 4096\r\n" +
               "\r\n"
           );
@@ -557,7 +568,7 @@ describe("PrometheusWriter", () => {
       // No unhandled rejection took the process down: the endpoint still
       // answers a normal request.
       const after = await fetch(`http://127.0.0.1:${port}/read-config`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
       expect(after.status).toBe(200);
     });
@@ -572,12 +583,12 @@ describe("PrometheusWriter", () => {
       const [resA, resB] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/write-config`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
           body: JSON.stringify(configA),
         }),
         fetch(`http://127.0.0.1:${port}/write-config`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
           body: JSON.stringify(configB),
         }),
       ]);
@@ -606,7 +617,7 @@ describe("PrometheusWriter", () => {
       // Restore the baseline the /reload-config tests depend on.
       const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true }),
       });
       expect(restore.status).toBe(200);
@@ -628,12 +639,12 @@ describe("PrometheusWriter", () => {
       const [resA, resB] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/write-config`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
           body: JSON.stringify(configA),
         }),
         fetch(`http://127.0.0.1:${port}/write-config`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
           body: JSON.stringify(configB),
         }),
       ]);
@@ -649,7 +660,7 @@ describe("PrometheusWriter", () => {
       // MqttNetworking.updateConfig) all agree, field for field.
       const onDisk = yaml.load(fs.readFileSync(configSource, "utf8")) as z.infer<typeof configSchema>;
       const readRes = await fetch(`http://127.0.0.1:${port}/read-config`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
       const readConfig = (await readRes.json()) as z.infer<typeof configSchema>;
       const runtime = configChangeCallback.mock.calls.at(-1)![0] as z.infer<typeof configSchema>;
@@ -675,7 +686,7 @@ describe("PrometheusWriter", () => {
       // Restore the baseline the /reload-config tests depend on.
       const restore = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "info", forwardSensorLogs: true }),
       });
       expect(restore.status).toBe(200);
@@ -753,7 +764,7 @@ describe("PrometheusWriter", () => {
         method: "POST",
         // Connection: close keeps undici's keep-alive pool from holding a
         // socket open, which would block server.close() in afterAll.
-        headers: { "Content-Type": "application/json", Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, "Content-Type": "application/json", Connection: "close" },
         body: JSON.stringify({ ...baseConfig, apiPort: port, logLevel: "warn" }),
       });
       const writeResponse = await writeRes.json();
@@ -771,7 +782,7 @@ describe("PrometheusWriter", () => {
       );
 
       const reloadRes = await fetch(`http://127.0.0.1:${port}/reload-config`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
       const reloadResponse = await reloadRes.json();
 
@@ -784,7 +795,7 @@ describe("PrometheusWriter", () => {
       logger.setLogLevel.mockClear();
 
       const reloadRes = await fetch(`http://127.0.0.1:${port}/reload-config`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
       expect(reloadRes.status).toBe(200);
 
@@ -825,7 +836,7 @@ describe("PrometheusWriter", () => {
       try {
         logger.write_error.mockClear();
         const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
-          headers: { Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
         });
         expect(res.status).toBe(500);
         const body = (await res.json()) as {
@@ -856,7 +867,7 @@ describe("PrometheusWriter", () => {
         logger.write_error.mockClear();
         configChangeCallback.mockClear();
         const res = await fetch(`http://127.0.0.1:${port}/reload-config`, {
-          headers: { Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
         });
         expect(res.status).toBe(500);
         const body = (await res.json()) as {
@@ -884,7 +895,7 @@ describe("PrometheusWriter", () => {
       for (const method of ["POST", "DELETE", "PATCH"]) {
         const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
           method,
-          headers: { Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
         });
         expect(res.status).toBe(405);
         expect(res.headers.get("allow")).toBe("GET");
@@ -895,7 +906,7 @@ describe("PrometheusWriter", () => {
 
     it("still serves /read-config on GET", async () => {
       const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
       expect(res.status).toBe(200);
     });
@@ -904,7 +915,7 @@ describe("PrometheusWriter", () => {
       for (const method of ["GET", "DELETE", "PUT"]) {
         const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
           method,
-          headers: { Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
         });
         expect(res.status).toBe(405);
         expect(res.headers.get("allow")).toBe("POST");
@@ -917,7 +928,7 @@ describe("PrometheusWriter", () => {
       for (const method of ["POST", "DELETE", "PUT"]) {
         const res = await fetch(`http://127.0.0.1:${port}/reload-config`, {
           method,
-          headers: { Connection: "close" },
+          headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
         });
         expect(res.status).toBe(405);
         expect(res.headers.get("allow")).toBe("GET");
@@ -1193,7 +1204,7 @@ describe("PrometheusWriter", () => {
 
       const longQuery = "?x=" + "a".repeat(LOG_VALUE_MAX_LENGTH + 100);
       const res = await fetch(`http://127.0.0.1:${port}/read-config${longQuery}`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
 
       expect(res.status).toBe(200);
@@ -1373,6 +1384,7 @@ describe("PrometheusWriter", () => {
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "OPTIONS",
         headers: {
+          "x-config-token": CONFIG_TOKEN,
           Origin: allowedOrigin,
           "Access-Control-Request-Method": "POST",
           "Access-Control-Request-Headers": "content-type,x-config-token",
@@ -1403,7 +1415,7 @@ describe("PrometheusWriter", () => {
 
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "OPTIONS",
-        headers: { Origin: allowedOrigin, Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Origin: allowedOrigin, Connection: "close" },
       });
 
       expect(res.status).toBe(204);
@@ -1438,6 +1450,7 @@ describe("PrometheusWriter", () => {
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "POST",
         headers: {
+          "x-config-token": CONFIG_TOKEN,
           Origin: allowedOrigin,
           "Content-Type": "application/json",
           Connection: "close",
@@ -1460,7 +1473,7 @@ describe("PrometheusWriter", () => {
       // status and body rather than an opaque CORS failure.
       const res = await fetch(`http://127.0.0.1:${port}/read-config`, {
         method: "POST",
-        headers: { Origin: allowedOrigin, Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Origin: allowedOrigin, Connection: "close" },
       });
 
       expect(res.status).toBe(405);
@@ -1484,6 +1497,7 @@ describe("PrometheusWriter", () => {
       const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
         method: "OPTIONS",
         headers: {
+          "x-config-token": CONFIG_TOKEN,
           Origin: disallowedOrigin,
           "Access-Control-Request-Method": "POST",
           "Access-Control-Request-Headers": "content-type,x-config-token",
@@ -1647,7 +1661,7 @@ describe("PrometheusWriter", () => {
       // The shared writer has no networking attached, so is_connected() is
       // undefined and the service is not ready to ingest.
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
 
       expect(res.status).toBe(503);
@@ -1664,7 +1678,7 @@ describe("PrometheusWriter", () => {
       } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
 
       expect(res.status).toBe(503);
@@ -1685,7 +1699,7 @@ describe("PrometheusWriter", () => {
       } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
 
       expect(res.status).toBe(503);
@@ -1703,7 +1717,7 @@ describe("PrometheusWriter", () => {
       } as unknown as IMqttNetworking);
 
       const res = await fetch(`http://127.0.0.1:${port}/ready`, {
-        headers: { Connection: "close" },
+        headers: { "x-config-token": CONFIG_TOKEN, Connection: "close" },
       });
 
       expect(res.status).toBe(200);
@@ -2333,7 +2347,7 @@ describe("PrometheusWriter", () => {
     // behavior itself is covered under fake timers in
     // PrometheusWriterStaleRemoval.test.ts.
     it("arms the sweep via /write-config and re-disables it when the key is omitted", async () => {
-      const headers = { "Content-Type": "application/json", Connection: "close" };
+      const headers = { "Content-Type": "application/json", Connection: "close", "x-config-token": CONFIG_TOKEN };
       const postConfig = (patch: Record<string, unknown>) =>
         fetch(`http://127.0.0.1:${port}/write-config`, {
           method: "POST",

@@ -36,17 +36,16 @@ Defaults listed above reflect code paths in `PrometheusWriter.ts` and routing, n
 
 ## HTTP configuration API and security
 
-`GET /read-config`, `POST /write-config`, `GET /reload-config` share token protection when `SENSOR_TELEMETRY_CONFIG_TOKEN` is set: send it in `x-config-token`; compare in constant time. If unset, these routes are exposed without authentication and startup warns. `SENSOR_TELEMETRY_CORS_ORIGINS` is a comma-separated allowlist of exact origins; unset or `*` permits all origins. **CORS is not authentication.** The write endpoint validates and atomically persists YAML via temporary file + rename; reload validates disk configuration without writing it. Audits record key names and bounded client attributes, not secrets or bodies.
+`GET /read-config`, `POST /write-config`, `GET /reload-config` share one token: `SENSOR_TELEMETRY_CONFIG_TOKEN`, sent in `x-config-token` and compared in constant time. A valid token is at least 32 alphanumeric characters (A–Z, a–z, 0–9); it is the switch — with no valid token (unset, empty, or invalid) the routes are **disabled**: every request answers `503 {"success":false,"message":"Configuration API is disabled."}` (a well-formed header cannot grant enablement) and startup warns (`config_token_not_set` / `config_token_invalid`), but the service boots and runs normally. With a valid token, missing or mismatched headers are rejected with `401` and startup announces `config_api_enabled`. `SENSOR_TELEMETRY_CORS_ORIGINS` is a comma-separated allowlist of exact origins; unset or `*` permits all origins. **CORS is not authentication.** The write endpoint validates and atomically persists YAML via temporary file + rename; reload validates disk configuration without writing it. Audits record key names and bounded client attributes, not secrets or bodies.
 
 ## Restart endpoint (`POST /restart-service`)
 
-There is **no enable flag**: the presence of a validated `RESTART_SERVICE_TOKEN` environment variable **is** the switch, with exactly three states:
+There is **no enable flag**: a **valid** `RESTART_SERVICE_TOKEN` environment variable **is** the switch — the same validity rule as the config token (at least 32 alphanumeric characters, A–Z, a–z, 0–9) — validated **once at startup**. The constructor never fails on token state; there are exactly two outcomes:
 
 | Token value | Behavior |
 | --- | --- |
-| Unset or empty | Endpoint **disabled**; every request answers `503 {"success":false,"message":"Restart endpoint is disabled."}` and the service boots and runs normally. |
-| Set, not whitespace-only, ≥ 32 bytes | Validated **once at startup**; the endpoint is enabled. |
-| Set but weak (whitespace-only or < 32 bytes) | **Startup failure** (exit 1, before the server listens): a dummy value can never disable the endpoint — the only way to turn it off is to leave the variable unset or empty. |
+| Unset, empty, or set-but-invalid | Endpoint **disabled**; every request answers `503 {"success":false,"message":"Restart endpoint is disabled."}`, the service logs a startup warning (`restart_token_not_set` / `restart_token_invalid`) and boots and runs normally. A set-but-invalid value disables the endpoint — it never refuses startup. |
+| Valid (≥ 32 alphanumeric characters) | The endpoint is enabled and startup announces `restart_endpoint_enabled`. |
 
 The endpoint is fail-closed on two halves: it answers requests only when **both** a validated secret **and** an injected shutdown hook are present; either half missing yields the byte-identical 503 above, so the response cannot probe which half a deployment lacks. Authentication is `Authorization: Bearer <token>` with exact header-shape validation (one case-sensitive `Bearer` scheme, a single space, one token with no embedded whitespace; duplicated or comma-joined `Authorization` headers are rejected before any comparison); the token compares in constant time and is never logged. It is a distinct secret — `SENSOR_TELEMETRY_CONFIG_TOKEN` is never accepted for it.
 

@@ -14,11 +14,18 @@ import type { ILogger } from "../../../src/dodsonlabs/Interfaces";
 import type { configSchema } from "../../../src/schemas/config";
 import type { z } from "zod";
 
-// This file constructs its writer WITHOUT SENSOR_TELEMETRY_CONFIG_TOKEN set,
-// so the config endpoints are open (no x-config-token header needed). It
-// pins the commit/rejection/read AUDIT events: every one must carry the
-// directly observed remoteAddress (non-empty, the token-suite predicate)
-// and — for commits — key NAMES only, never values.
+// This file constructs its writer WITH a valid SENSOR_TELEMETRY_CONFIG_TOKEN
+// set (every config request below carries the x-config-token header), so it
+// needs its own file: the token is captured at construction and prom-client's
+// global registry allows only one real writer per process. It pins the
+// commit/rejection/read AUDIT events: every one must carry the directly
+// observed remoteAddress (non-empty, the token-suite predicate) and — for
+// commits — key NAMES only, never values. (The disabled and invalid-token
+// states have their own files: PrometheusWriterConfigDisabled,
+// PrometheusWriterTokenInvalid.)
+
+// Valid under the shared token rule (at least 32 alphanumeric characters).
+const AUDIT_TOKEN = "auditSuiteToken0123456789abcdef0";
 
 interface MockLogger {
   global_log_level: jest.Mock;
@@ -104,7 +111,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
 
   beforeAll(async () => {
     savedToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
-    delete process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
+    process.env.SENSOR_TELEMETRY_CONFIG_TOKEN = AUDIT_TOKEN;
 
     port = await getFreePort();
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), "prom-audit-test-"));
@@ -170,7 +177,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     writeValidConfig();
     const reset = await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port }),
     });
     expect(reset.status).toBe(200);
@@ -201,7 +208,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   it("audits a /write-config commit with path, changedKeys, and remoteAddress", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port, logLevel: "warn" }),
     });
     expect(res.status).toBe(200);
@@ -222,7 +229,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   it("reports an empty changedKeys list for an identical commit", async () => {
     await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port }),
     });
 
@@ -235,7 +242,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     // back at the default (30) must not be reported as a changed key.
     const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port, sensorSourceMaxLength: 30 }),
     });
     expect(res.status).toBe(200);
@@ -244,7 +251,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     // A non-default value IS a change.
     await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port, sensorSourceMaxLength: 40 }),
     });
     expect(auditInfo("config_write_committed")?.changedKeys).toEqual(["sensorSourceMaxLength"]);
@@ -254,7 +261,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     const secretBroker = "10.9.9.9";
     await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: port, mqttBrokerIpAddress: secretBroker }),
     });
 
@@ -271,7 +278,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
     // /write-config, then reload: the audit must diff against the running
     // (in-memory) config, not the file.
     writeValidConfig({ mqttTopicLog: "iot/v3/log" });
-    const res = await fetch(`http://127.0.0.1:${port}/reload-config`, { method: "GET" });
+    const res = await fetch(`http://127.0.0.1:${port}/reload-config`, { method: "GET", headers: { "x-config-token": AUDIT_TOKEN } });
     expect(res.status).toBe(200);
 
     const meta = auditInfo("config_reload_completed");
@@ -290,7 +297,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   it("audits a schema-invalid /write-config body as config_write_rejected (400)", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: JSON.stringify({ ...BASE_CONFIG, apiPort: "not-a-number" }),
     });
     expect(res.status).toBe(400);
@@ -311,7 +318,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   it("audits a malformed-JSON /write-config body as config_write_rejected (400)", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/write-config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-config-token": AUDIT_TOKEN },
       body: "{not json",
     });
     expect(res.status).toBe(400);
@@ -321,7 +328,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   it("audits an on-disk schema failure on /reload-config as config_reload_failed (500)", async () => {
     // Valid YAML, missing a required key → parseable but fails validateConfig.
     fs.writeFileSync(configSource, yaml.dump({ logLevel: "info", apiPort: port }));
-    const res = await fetch(`http://127.0.0.1:${port}/reload-config`, { method: "GET" });
+    const res = await fetch(`http://127.0.0.1:${port}/reload-config`, { method: "GET", headers: { "x-config-token": AUDIT_TOKEN } });
     expect(res.status).toBe(500);
 
     const meta = auditWarn("config_reload_failed");
@@ -333,7 +340,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
 
   it("audits an on-disk schema failure on /read-config as config_read_failed (500)", async () => {
     fs.writeFileSync(configSource, yaml.dump({ logLevel: "info", apiPort: port }));
-    const res = await fetch(`http://127.0.0.1:${port}/read-config`, { method: "GET" });
+    const res = await fetch(`http://127.0.0.1:${port}/read-config`, { method: "GET", headers: { "x-config-token": AUDIT_TOKEN } });
     expect(res.status).toBe(500);
 
     const meta = auditWarn("config_read_failed");
@@ -346,7 +353,7 @@ describe("PrometheusWriter config commit/rejection/read audit", () => {
   // ---- Gap 4: successful read audit ----
 
   it("audits a successful /read-config with remoteAddress and no config values", async () => {
-    const res = await fetch(`http://127.0.0.1:${port}/read-config`, { method: "GET" });
+    const res = await fetch(`http://127.0.0.1:${port}/read-config`, { method: "GET", headers: { "x-config-token": AUDIT_TOKEN } });
     expect(res.status).toBe(200);
 
     const meta = auditInfo("config_read_completed");

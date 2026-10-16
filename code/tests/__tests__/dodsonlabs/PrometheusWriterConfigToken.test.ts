@@ -63,7 +63,10 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const TOKEN = "secret-token-12345";
+// Must satisfy the shared token validity rule (at least 32 alphanumeric
+// characters, A-Z, a-z, 0-9): an invalid value would disable the
+// endpoints at construction and break every test in this file.
+const TOKEN = "Aa0b1C2d3E4f5G6h7I8j9K0l1M2n3O4p";
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",
@@ -246,7 +249,7 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
     it("returns 401 when the token header has the wrong value", async () => {
       // Same length as TOKEN so the comparison reaches timingSafeEqual.
       const { status, body } = await get("/reload-config", {
-        "x-config-token": "wrong-token-999999",
+        "x-config-token": "Bb1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q",
       });
 
       expect(status).toBe(401);
@@ -354,7 +357,7 @@ describe("PrometheusWriter with SENSOR_TELEMETRY_CONFIG_TOKEN set", () => {
     it("returns 401 when the token header has the wrong value", async () => {
       // Same length as TOKEN so the comparison reaches timingSafeEqual.
       const { status, body } = await get("/read-config", {
-        "x-config-token": "wrong-token-999999",
+        "x-config-token": "Bb1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q",
       });
 
       expect(status).toBe(401);

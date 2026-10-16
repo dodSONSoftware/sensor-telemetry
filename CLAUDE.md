@@ -20,6 +20,7 @@ Guidance for Claude Code working in Sensor Telemetry Services (Node.js 22 / Type
 | [Engineering Decisions](docs/DECISIONS.md) | Tradeoffs and why key design choices exist. |
 | [Testing](docs/TESTING.md) | Test commands, suite mapping, mocking and quality gate. |
 | [Known Issues](docs/KNOWN_ISSUES.md) | Current limitations and workarounds. |
+| [Curl Commands](docs/curl-commands.md) | Copy-paste HTTP API examples for the config and restart endpoints. |
 | [README](README.md) | Operator usage, API and deployment. |
 | [CHANGELOG](CHANGELOG.md) | Versioned change history (newest first). |
 

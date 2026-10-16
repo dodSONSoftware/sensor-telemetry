@@ -66,7 +66,9 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const RESTART_TOKEN = "restart-fail-token-1-0123456789abcdef";
+// Must satisfy the shared token validity rule (at least 32 alphanumeric
+// characters): this file's contract is a VALID token plus a throwing hook.
+const RESTART_TOKEN = "restartfail0123456789abcdef0123456789abcdef";
 const VALID_CONFIG = {
   logLevel: "info",
   mqttBrokerIpAddress: "10.0.0.1",

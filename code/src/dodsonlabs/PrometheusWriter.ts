@@ -160,9 +160,11 @@ export class PrometheusWriter {
     private configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void;
     // ---- optional shared secret protecting /read-config, /write-config,
     // and /reload-config. Read from the environment (not config.yml, which
-    // /read-config would expose) at construction. When unset, the endpoints
-    // remain open for trusted-LAN deployments and a warning is logged at
-    // startup.
+    // /read-config would expose) at construction and validated once against
+    // SERVICE_TOKEN_PATTERN (at least 32 alphanumeric characters). Held
+    // only when VALID; unset, empty, or set-but-invalid is undefined,
+    // which DISABLES the endpoints (503) with a startup warning — the
+    // service always boots, and a header value can never grant enablement.
     private readonly configToken: string | undefined;
     // ---- browser CORS policy, parsed once at construction from
     // SENSOR_TELEMETRY_CORS_ORIGINS (see parseCorsOrigins). Unset, empty, or
@@ -171,15 +173,16 @@ export class PrometheusWriter {
     private readonly corsAllowAllOrigins: boolean;
     private readonly corsAllowedOrigins: ReadonlySet<string>;
     // ---- /restart-service (token-gated process self-restart). There is no
-    // separate enable flag: a VALIDATED RESTART_SERVICE_TOKEN (set, not
-    // whitespace-only, at least 32 bytes) IS the switch — unset or empty
-    // disables the endpoint, and a set-but-weak token fails the startup
-    // (see the constructor), so a dummy value can never disable it.
-    // Like the config token it is env-only, never config.yml (which
-    // /read-config would expose). Fail-closed: the endpoint is usable only
-    // when BOTH a validated secret AND an injected shutdown hook are
-    // present; either half missing answers the same byte-identical 503,
-    // so the response cannot probe which half a deployment lacks.
+    // separate enable flag: a VALIDATED RESTART_SERVICE_TOKEN (validated
+    // against SERVICE_TOKEN_PATTERN, the same rule as the config token) IS
+    // the switch — unset, empty, or set-but-invalid disables the endpoint
+    // (the constructor never fails on token state; it warns and the
+    // service boots normally). Like the config token it is env-only, never
+    // config.yml (which /read-config would expose). Fail-closed: the
+    // endpoint is usable only when BOTH a validated secret AND an injected
+    // shutdown hook are present; either half missing answers the same
+    // byte-identical 503, so the response cannot probe which half a
+    // deployment lacks.
     private readonly restartEnabled: boolean;
     private readonly restartToken: string | undefined;
     // Single-flight guard: true between accepting a restart request and
@@ -350,6 +353,16 @@ export class PrometheusWriter {
     // extra rawHeaders lines a duplicated header leaves behind are counted
     // separately, before any comparison (see verifyRestartAuthorization).
     private static readonly BEARER_AUTHORIZATION_SHAPE = /^Bearer (\S+)$/;
+    // Shared validity rule for the service tokens (SENSOR_TELEMETRY_CONFIG_TOKEN
+    // and RESTART_SERVICE_TOKEN): at least 32 alphanumeric characters (A-Z,
+    // a-z, 0-9), nothing else. The charset is ASCII-only, so character count
+    // is byte count. The constructor never fails on token state: unset, empty,
+    // or set-but-invalid values disable the related ability and warn at
+    // startup; only a valid token enables it.
+    private static readonly SERVICE_TOKEN_PATTERN = /^[A-Za-z0-9]{32,}$/;
+    private static isValidServiceToken(raw: string | undefined): boolean {
+        return raw !== undefined && PrometheusWriter.SERVICE_TOKEN_PATTERN.test(raw);
+    }
     // Bounded fallback for the /restart-service scheduling: the lifecycle
     // callback fires when the 202 response 'finish' event does not fire
     // (the client disconnected before the response was fully flushed), so
@@ -408,61 +421,75 @@ export class PrometheusWriter {
 
         // Set config change callback early (before server starts accepting requests)
         this.configChangeCallback = configChangeCallback;
-        this.configToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN || undefined;
+        // ---- service tokens (config API + /restart-service), captured
+        // exactly once at startup (same env-not-YAML policy: /read-config
+        // would expose anything in the file). Both share one validity rule
+        // (SERVICE_TOKEN_PATTERN: at least 32 alphanumeric characters,
+        // A-Z, a-z, 0-9). The constructor NEVER fails on token state:
+        // unset or empty (compose delivers empty for an unset variable) and
+        // set-but-invalid both DISABLE the related ability — the service
+        // boots normally and warns — while only a valid token enables it.
+        // The token value is never logged. There is no separate enable flag.
+        this.requestRestart = requestRestartCallback;
+        const rawConfigToken = process.env.SENSOR_TELEMETRY_CONFIG_TOKEN;
+        this.configToken = PrometheusWriter.isValidServiceToken(rawConfigToken) ? rawConfigToken : undefined;
         if (this.configToken === undefined) {
-            logger.write_warn(
+            if (rawConfigToken === undefined || rawConfigToken === "") {
+                logger.write_warn(
+                    "prometheus/constructor",
+                    "SENSOR_TELEMETRY_CONFIG_TOKEN is not set — /read-config, /write-config, and /reload-config are disabled (503)",
+                    {
+                        event: "config_token_not_set",
+                        logType: "service",
+                    }
+                );
+            } else {
+                logger.write_warn(
+                    "prometheus/constructor",
+                    "SENSOR_TELEMETRY_CONFIG_TOKEN is set but invalid (a valid token is at least 32 alphanumeric characters, A-Z, a-z, 0-9) — /read-config, /write-config, and /reload-config are disabled (503)",
+                    {
+                        event: "config_token_invalid",
+                        logType: "service",
+                    }
+                );
+            }
+        } else {
+            // Enabled is a security-relevant state: announce it once at
+            // startup (mirrors the restart endpoint's announcement).
+            logger.write_info(
                 "prometheus/constructor",
-                "SENSOR_TELEMETRY_CONFIG_TOKEN is not set — /read-config, /write-config, and /reload-config are unauthenticated",
+                "/read-config, /write-config, and /reload-config enabled (x-config-token header required)",
                 {
-                    event: "config_token_not_set",
+                    event: "config_api_enabled",
                     logType: "service",
                 }
             );
         }
-
-        // ---- /restart-service credentials, captured exactly once at
-        // startup (same env-not-YAML policy as the config token: /read-config
-        // would expose anything in the file). This block runs BEFORE any
-        // prom-client registration, event-loop monitor, or HTTP server
-        // creation: the fail-fast throw below must leave no half-constructed
-        // writer behind. There is no separate enable flag — the presence of
-        // a VALIDATED RESTART_SERVICE_TOKEN is the switch, with exactly
-        // three states:
-        //   1. unset or empty        -> endpoint disabled (503), normal boot
-        //   2. not whitespace-only,
-        //      at least 32 bytes     -> validated; endpoint enabled (only
-        //                               when a shutdown hook was injected
-        //                               too — see the restartEnabled field)
-        //   3. set but weak
-        //      (whitespace-only or < 32 bytes) -> startup failure. A dummy
-        //      value must never disable the endpoint: the only way to
-        //      disable it is to leave the variable unset or empty.
-        // The throw escapes the MqttNetworking constructor and is routed by
-        // index.ts's unhandledRejection handler to a structured fatal log
-        // and exit 1 — with the Docker restart policy in play, a
-        // misconfigured container crash-loops until the environment is
-        // fixed, which is the intended fail-fast visibility.
-        this.requestRestart = requestRestartCallback;
         const rawRestartToken = process.env.RESTART_SERVICE_TOKEN;
+        this.restartToken = PrometheusWriter.isValidServiceToken(rawRestartToken) ? rawRestartToken : undefined;
+        // Fail-closed: the endpoint is usable only with BOTH a validated
+        // secret AND an injected shutdown hook; the handler answers the
+        // identical 503 when either half is missing.
+        this.restartEnabled = this.restartToken !== undefined && this.requestRestart !== undefined;
         if (rawRestartToken === undefined || rawRestartToken === "") {
-            this.restartToken = undefined;
-            this.restartEnabled = false;
-        } else if (rawRestartToken.trim() === "" || Buffer.byteLength(rawRestartToken, "utf8") < 32) {
-            throw new Error(
-                "RESTART_SERVICE_TOKEN is set but weak: it is whitespace-only or shorter than 32 bytes. " +
-                "A dummy value must not disable /restart-service — to disable the endpoint, leave " +
-                "RESTART_SERVICE_TOKEN unset (or empty). To enable it, set a strong, distinct secret of " +
-                "at least 32 bytes (e.g. `openssl rand -hex 32`). " +
-                "The service refuses to start while the restart endpoint would be under-protected."
+            logger.write_warn(
+                "prometheus/constructor",
+                "RESTART_SERVICE_TOKEN is not set — /restart-service is disabled (503)",
+                {
+                    event: "restart_token_not_set",
+                    logType: "service",
+                }
             );
-        } else {
-            this.restartToken = rawRestartToken;
-            // Fail-closed: the endpoint is usable only with BOTH a validated
-            // secret AND an injected shutdown hook; the handler answers the
-            // identical 503 when either half is missing.
-            this.restartEnabled = this.requestRestart !== undefined;
-        }
-        if (this.restartEnabled) {
+        } else if (this.restartToken === undefined) {
+            logger.write_warn(
+                "prometheus/constructor",
+                "RESTART_SERVICE_TOKEN is set but invalid (a valid token is at least 32 alphanumeric characters, A-Z, a-z, 0-9) — /restart-service is disabled (503)",
+                {
+                    event: "restart_token_invalid",
+                    logType: "service",
+                }
+            );
+        } else if (this.restartEnabled) {
             // Enabled is a security-relevant state: announce it once at
             // startup (no per-request logging needed — every accepted
             // request audit-logs, and the endpoint is not orchestrator-polled).
@@ -877,14 +904,35 @@ export class PrometheusWriter {
 
     /**
      * Verify the shared secret protecting /read-config, /write-config, and
-     * /reload-config. Returns true (no-op) when no token is configured;
-     * otherwise the request must carry a matching x-config-token header,
-     * compared in constant time. Responds with 401 and returns false on
-     * failure.
+     * /reload-config. Called after the method check, so an unsupported method
+     * answers 405 before this can answer. When no valid token is configured
+     * the API is DISABLED — 503 (a disabled feature is a state, not a missing
+     * route; the throttled audit mirrors restart_disabled), and a well-formed
+     * header cannot grant enablement. Otherwise the request must carry a
+     * matching x-config-token header, compared in constant time. Responds
+     * with 503/401 and returns false on failure.
      */
     private verifyConfigToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
         if (this.configToken === undefined) {
-            return true;
+            this.logThrottledHttpWarning(
+                "config_api_disabled",
+                "prometheus/configApiDisabled",
+                "config API request while the configuration API is disabled",
+                {
+                    event: "config_api_disabled",
+                    logType: "audit",
+                    method: req.method || "UNKNOWN",
+                    // Untrusted request path, bounded like the 404 audit
+                    // path — the token is not involved at all here.
+                    url: truncateForLog(req.url || "/"),
+                    // The directly observed socket address, for operational
+                    // forensics — no reverse DNS, no proxy-header trust.
+                    remoteAddress: req.socket.remoteAddress ?? "UNKNOWN",
+                    statusCode: 503,
+                }
+            );
+            this.sendJson(res, 503, { success: false, message: "Configuration API is disabled." });
+            return false;
         }
         const header = req.headers["x-config-token"];
         const provided = Array.isArray(header) ? (header[0] ?? "") : (header ?? "");
@@ -917,9 +965,10 @@ export class PrometheusWriter {
 
     /**
      * Verify the Authorization header protecting /restart-service. Called
-     * only when the endpoint is enabled, so the token is always a
-     * validated >=32-byte secret (the constructor refuses to start
-     * otherwise). Exact shape: one case-sensitive "Bearer" scheme, a
+     * only when the endpoint is enabled, so the token is always a validated
+     * secret matching SERVICE_TOKEN_PATTERN (an invalid token disables the
+     * endpoint at startup with a warning — the constructor never fails).
+     * Exact shape: one case-sensitive "Bearer" scheme, a
      * single space, one token with no embedded whitespace — and at most
      * ONE Authorization header. The secret is a distinct one: it never
      * falls back to SENSOR_TELEMETRY_CONFIG_TOKEN, so the config token's
@@ -1218,7 +1267,7 @@ export class PrometheusWriter {
                 { route: "/read-config", description: "Reads the current configuration." },
                 { route: "/write-config", description: "Validates and persists the configuration; runtime-effective settings are applied immediately, restart-only settings take effect on the next restart." },
                 { route: "/reload-config", description: "Reloads the configuration from disk and applies the runtime-effective settings; the file on disk is not modified." },
-                { route: "/restart-service", description: "Requests a graceful restart of this service (202 when scheduled). Disabled unless RESTART_SERVICE_TOKEN is set (at least 32 bytes, not whitespace-only — a set-but-weak token fails startup); requires an Authorization: Bearer header." }
+                { route: "/restart-service", description: "Requests a graceful restart of this service (202 when scheduled). Disabled (503) unless RESTART_SERVICE_TOKEN is a valid token (at least 32 alphanumeric characters — an invalid token disables the endpoint with a startup warning, the service always starts); requires an Authorization: Bearer header." }
             ]
         };
         this.sendJson(res, 200, aboutInfo);
@@ -1270,7 +1319,7 @@ export class PrometheusWriter {
                 name: "Read Config",
                 route: "/read-config",
                 verb: "GET",
-                requestBody: "None. Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
+                requestBody: "None. Requires the x-config-token header; the API is disabled (503) when SENSOR_TELEMETRY_CONFIG_TOKEN is unset, empty, or invalid (a valid token is at least 32 alphanumeric characters).",
                 responseBody: "Current YAML configuration loaded from disk",
                 description: "Reads the current configuration."
             },
@@ -1278,7 +1327,7 @@ export class PrometheusWriter {
                 name: "Write Config",
                 route: "/write-config",
                 verb: "POST",
-                requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (integer, at least 9, optional), sensorSourceValidCharsRegex (string, optional), sensorSourceCardinalityCap (positive integer, optional), staleSourceRemovalSecs (non-negative integer, 0 = disabled, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional), lokiUrl (absolute http(s) base URL of the Loki instance, optional). Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
+                requestBody: "JSON object with keys: logLevel (error|warn|info|debug|critical), apiPort (positive integer), mqttBrokerIpAddress (string), mqttTopicTelemetry (string), mqttTopicLog (string, optional), mqttTopicHealth (string, optional), sensorSourceMaxLength (integer, at least 9, optional), sensorSourceValidCharsRegex (string, optional), sensorSourceCardinalityCap (positive integer, optional), staleSourceRemovalSecs (non-negative integer, 0 = disabled, optional), forwardSensorLogs (boolean, optional), forwardSensorLogsLevel (error|warn|info|debug|critical, optional), lokiUrl (absolute http(s) base URL of the Loki instance, optional). Requires the x-config-token header; the API is disabled (503) when SENSOR_TELEMETRY_CONFIG_TOKEN is unset, empty, or invalid (a valid token is at least 32 alphanumeric characters).",
                 responseBody: "{ success: boolean, message: string }",
                 description: "Validates the new configuration, persists it to disk, and applies the runtime-effective keys (logLevel, forwardSensorLogs, forwardSensorLogsLevel, staleSourceRemovalSecs). Changes to mqttBrokerIpAddress, the MQTT topics, apiPort, sensorSourceMaxLength, sensorSourceValidCharsRegex, sensorSourceCardinalityCap, or lokiUrl take effect on the next restart. When running in Docker, an apiPort change additionally requires updating the deployment configuration: the image healthcheck probes localhost:32002 and the compose port mapping is 32002:32002."
             },
@@ -1286,7 +1335,7 @@ export class PrometheusWriter {
                 name: "Reload Config",
                 route: "/reload-config",
                 verb: "GET",
-                requestBody: "None. Requires the x-config-token header when SENSOR_TELEMETRY_CONFIG_TOKEN is set.",
+                requestBody: "None. Requires the x-config-token header; the API is disabled (503) when SENSOR_TELEMETRY_CONFIG_TOKEN is unset, empty, or invalid (a valid token is at least 32 alphanumeric characters).",
                 responseBody: "{ success: true, message: \"Configuration reloaded successfully\" }",
                 description: "Reloads the configuration from disk and applies the runtime-effective keys; other keys take effect on the next restart."
             },
@@ -1294,7 +1343,7 @@ export class PrometheusWriter {
                 name: "Restart Service",
                 route: "/restart-service",
                 verb: "POST",
-                requestBody: "None (the request body is ignored). Requires the Authorization: Bearer header, where the token is the environment-only RESTART_SERVICE_TOKEN (unset or empty disables the endpoint; a set-but-weak token — whitespace-only or under 32 bytes — fails startup).",
+                requestBody: "None (the request body is ignored). Requires the Authorization: Bearer header, where the token is the environment-only RESTART_SERVICE_TOKEN. The endpoint is disabled (503) when the token is unset, empty, or invalid (a valid token is at least 32 alphanumeric characters); an invalid token disables the endpoint with a startup warning — the service always starts.",
                 responseBody: "202 { success: true, status: \"restart_scheduled\", message: \"Service restart requested\" }; 401 (WWW-Authenticate: Bearer) missing/invalid Authorization header; 405 Allow: POST; 409 restart already in progress; 503 endpoint disabled",
                 description: "Schedules a graceful restart of this process: after the 202 response is delivered, the existing SIGTERM shutdown path runs once (MQTT disconnect, HTTP drain, Loki flush, clean exit), and the container restart policy (restart: unless-stopped in the compose file) starts the same container with the persisted configuration. The 202 means scheduled, not completed — the response is best-effort (the process may exit before the client observes the connection close), and callers should verify the new process via /health and /ready. It does not rebuild the image, update deployment files, or apply a changed apiPort's port mapping; docker stop remains the operator's control (a manually stopped container stays stopped)."
             }

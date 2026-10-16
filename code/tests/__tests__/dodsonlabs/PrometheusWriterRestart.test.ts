@@ -16,9 +16,12 @@ import type { z } from "zod";
 // enabled (RESTART_SERVICE_TOKEN set), so it needs its own file: the token
 // is captured at construction, and prom-client's global registry allows
 // only one real writer per process (each Jest file gets its own module
-// sandbox, so one file = one writer). The live token is EXACTLY 32 ASCII
-// bytes, so this file's writer doubles as the "exactly 32 bytes is valid"
-// startup-validation boundary test.
+// sandbox, so one file = one writer). The live token is EXACTLY 32
+// alphanumeric characters, so this file's writer doubles as the "exactly
+// 32 is valid" boundary test. The set-but-INVALID states (warn + disable,
+// never a startup failure) live in PrometheusWriterTokenInvalid, and the
+// unset/empty state in PrometheusWriterRestartDisabled — the constructor
+// never fails on token state, so those need their own files.
 //
 // State model for the whole file: an ACCEPTED request latches the
 // writer's restartPending guard for the writer's lifetime (in production
@@ -618,55 +621,10 @@ describe("PrometheusWriter with /restart-service enabled", () => {
     });
   });
 
-  describe("startup validation (constructor, three token states)", () => {
-    // These constructors throw BEFORE any prom-client registration or
-    // server creation (the fail-fast block runs first), so no cleanup is
-    // needed and they cannot collide with this file's live writer.
-    it("refuses to start when the token is whitespace-only", () => {
-      const savedToken = process.env.RESTART_SERVICE_TOKEN;
-      process.env.RESTART_SERVICE_TOKEN = "   ";
-      try {
-        expect(() =>
-          new PrometheusWriter(
-            { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
-            createMockLogger()
-          )
-        ).toThrow(/RESTART_SERVICE_TOKEN/);
-      } finally {
-        process.env.RESTART_SERVICE_TOKEN = savedToken;
-      }
-    });
-
-    it("refuses to start when the token is 31 bytes (one under the minimum)", () => {
-      const savedToken = process.env.RESTART_SERVICE_TOKEN;
-      process.env.RESTART_SERVICE_TOKEN = "a".repeat(31);
-      try {
-        expect(() =>
-          new PrometheusWriter(
-            { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
-            createMockLogger()
-          )
-        ).toThrow(/RESTART_SERVICE_TOKEN/);
-      } finally {
-        process.env.RESTART_SERVICE_TOKEN = savedToken;
-      }
-    });
-
-    it("counts bytes, not characters: 10 × 3-byte UTF-8 chars (30 bytes) refuses to start", () => {
-      const savedToken = process.env.RESTART_SERVICE_TOKEN;
-      // "€" is 3 bytes in UTF-8, so this is 10 characters but only 30
-      // bytes — under the 32-byte minimum.
-      process.env.RESTART_SERVICE_TOKEN = "€".repeat(10);
-      try {
-        expect(() =>
-          new PrometheusWriter(
-            { ...VALID_CONFIG, apiPort: 0 } as z.infer<typeof configSchema>,
-            createMockLogger()
-          )
-        ).toThrow(/RESTART_SERVICE_TOKEN/);
-      } finally {
-        process.env.RESTART_SERVICE_TOKEN = savedToken;
-      }
-    });
-  });
+  // The old "startup validation (constructor, three token states)" suite
+  // (constructor refused to start on a weak token) is gone: the
+  // constructor never fails on token state. The invalid-state coverage
+  // moved to PrometheusWriterTokenInvalid (one real writer per process —
+  // a second writer here would collide on prom-client's global registry),
+  // and the unset/empty state stays in PrometheusWriterRestartDisabled.
 });

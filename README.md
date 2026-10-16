@@ -1,8 +1,8 @@
 # Sensor Telemetry Services
 
-Series 4 — Sensor Telemetry Services
+Series 5 — Sensor Telemetry Services
 
-**Release:** Steel Falcon — firmware 4.8.0.
+**Release:** Iron Wolf — firmware 5.0.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -196,44 +196,31 @@ The configuration schema is strict: unknown keys fail validation with an `Unreco
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SENSOR_TELEMETRY_CORS_ORIGINS` | Comma-separated list of browser origins permitted to call the HTTP API cross-origin. Origins must match exactly, including scheme and port. When unset or set to `*`, all browser origins are allowed for backward compatibility. Example: `http://10.10.10.50:3000,https://sensors.home.lab` | unset (all origins allowed) |
-| `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/read-config`, `/write-config`, and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
-| `RESTART_SERVICE_TOKEN` | The switch for `POST /restart-service` — there is no separate enable flag. Unset/empty: endpoint disabled. Set, not whitespace-only, ≥32 bytes: endpoint enabled (send it as the `Authorization: Bearer` header). **Set but weak (whitespace-only or under 32 bytes): the service refuses to start** — a dummy value can never disable the endpoint. Never accepted as a fallback is `SENSOR_TELEMETRY_CONFIG_TOKEN`. Generate one with `openssl rand -hex 32` | unset (endpoint disabled) |
+| `SENSOR_TELEMETRY_CONFIG_TOKEN` | Shared secret enabling `/read-config`, `/write-config`, and `/reload-config` — see [Configuration API Security Model](#configuration-api-security-model). Valid = at least 32 alphanumeric characters (A–Z, a–z, 0–9); when set, those requests must carry a matching `x-config-token` header. Unset/empty/invalid: the endpoints are **disabled** (`503`) and the service warns at startup (it always boots) | unset (endpoints disabled) |
+| `RESTART_SERVICE_TOKEN` | The switch for `POST /restart-service` — there is no separate enable flag. Same validity rule as the config token (at least 32 alphanumeric characters). Valid: endpoint enabled (send it as the `Authorization: Bearer` header). Unset/empty/invalid: endpoint **disabled** (`503`) with a startup warning — the service always boots; a set-but-invalid value disables, it never fails startup. Never accepted as a fallback is `SENSOR_TELEMETRY_CONFIG_TOKEN`. Generate one with `openssl rand -hex 32` | unset (endpoint disabled) |
 
 CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
 
 ## Configuration API Security Model
 
-The HTTP configuration API (`/read-config`, `/write-config`, and `/reload-config`) is intended for deployment on a trusted private network.
+The HTTP configuration API (`/read-config`, `/write-config`, and `/reload-config`) is intended for deployment on a trusted private network, and is protected by the `SENSOR_TELEMETRY_CONFIG_TOKEN` environment variable — never a key in `config.yml`, which `/read-config` would expose (see `code/.env.example` for the local `.env` template). Both service tokens share one validity rule: **at least 32 alphanumeric characters (A–Z, a–z, 0–9)**; `openssl rand -hex 32` produces a valid token.
 
-`/read-config` is token-protected in the same way as the write and reload paths: when `SENSOR_TELEMETRY_CONFIG_TOKEN` is set, a read requires the same `x-config-token` header. The current strict configuration schema carries no secret-bearing fields, so the token's primary job is still guarding mutation — but a deployment that locks down config mutation should not silently leave the config itself readable by any LAN client, and an operator who sets the token should not be surprised to find the read path still open.
+The token is the switch — there is no separate enable flag, and a request header can never grant enablement:
 
-When `SENSOR_TELEMETRY_CONFIG_TOKEN` is not configured, those endpoints do not require authentication. This is an intentional trust decision, not a defect: the service is deployed on a private LAN with no external exposure.
-
-In this mode, any client that can reach the HTTP service can update or reload the configuration, including non-browser clients such as `curl`, scripts, or other applications.
-
-CORS restrictions do not provide authentication. CORS only controls which browser origins may access the API; it does not prevent direct HTTP clients from calling the endpoints.
-
-Running without `SENSOR_TELEMETRY_CONFIG_TOKEN` is appropriate when:
-
-- the service is reachable only from a trusted private LAN;
-- the service is not exposed through Internet port forwarding, a public reverse proxy, or another external route;
-- hosts on the LAN are considered trusted to access the configuration API.
-
-If clients on the network are not fully trusted, configure `SENSOR_TELEMETRY_CONFIG_TOKEN`.
-
-Authenticated clients must then send:
+- **No valid token** (unset, empty, or invalid): the endpoints are **disabled**. Every request is answered `503 { "success": false, "message": "Configuration API is disabled." }` — even one carrying a well-formed `x-config-token` — and the service logs a startup warning (`config_token_not_set` or `config_token_invalid`). The service boots and runs normally; only the configuration API is off.
+- **Valid token**: the endpoints are enabled and the service logs `config_api_enabled` at startup. All three requests — read, write, and reload — must then send a matching header; mismatched or missing headers are rejected with `401`:
 
 ```
 x-config-token: <token>
 ```
 
-on `/read-config`, `/write-config`, and `/reload-config` requests. Mismatched or missing headers are rejected with `401`.
+CORS restrictions do not provide authentication. CORS only controls which browser origins may access the API; it does not prevent direct HTTP clients from calling the endpoints.
 
 The token must be treated as a secret and should not be committed to source control.
 
 ## Service Restart (`POST /restart-service`)
 
-An optional endpoint that restarts the service's own container. There is no enable flag: the presence of a validated `RESTART_SERVICE_TOKEN` environment variable **is** the switch (it is never a key in `config.yml`, which `/read-config` would expose — see `code/.env.example` for the local `.env` template). Unset or empty, the endpoint is disabled (`503`). Set but weak (whitespace-only or under 32 bytes), the service **refuses to start** — a dummy value can never disable the endpoint, only unsetting it does. A valid token (≥32 bytes, not whitespace-only) enables the endpoint, protected by `Authorization: Bearer <token>`.
+An optional endpoint that restarts the service's own container. There is no enable flag: a **valid** `RESTART_SERVICE_TOKEN` environment variable **is** the switch (at least 32 alphanumeric characters — the same rule as `SENSOR_TELEMETRY_CONFIG_TOKEN`; it is never a key in `config.yml`, which `/read-config` would expose — see `code/.env.example` for the local `.env` template). When the token is unset, empty, or invalid, the endpoint is disabled (`503`) and the service logs a startup warning and **boots normally** — a set-but-invalid value disables the endpoint, it never fails startup. A valid token enables the endpoint, protected by `Authorization: Bearer <token>`.
 
 An authenticated request schedules — it does not complete — a restart:
 
@@ -552,7 +539,7 @@ The service handles SIGTERM and SIGINT signals gracefully. The optional `POST /r
 | `/read-config` | GET | Read current configuration |
 | `/write-config` | POST | Update configuration |
 | `/reload-config` | GET | Reload configuration from disk |
-| `/restart-service` | POST | Schedule a graceful restart of this container (202; disabled unless `RESTART_SERVICE_TOKEN` is set — at least 32 bytes, not whitespace-only — then requires the `Authorization: Bearer` header) |
+| `/restart-service` | POST | Schedule a graceful restart of this container (202; disabled — 503 — unless `RESTART_SERVICE_TOKEN` is a valid token: at least 32 alphanumeric characters; then requires the `Authorization: Bearer` header) |
 
 Both persist the complete configuration but hot-apply only the runtime-effective keys — `logLevel`, `forwardSensorLogs`, `forwardSensorLogsLevel`, and `staleSourceRemovalSecs`. The remaining keys take effect on the next restart; see [Runtime vs Restart-Required Configuration](#runtime-vs-restart-required-configuration).
 

@@ -48,7 +48,7 @@ Accepted sensor traffic updates readings/health and last-seen communication time
 
 `/health` means the HTTP process responds; `/ready` requires both MQTT connectivity and acknowledged subscriptions. `code/src/index.ts` registers signal and fatal handlers before constructing networking, performs a bounded graceful shutdown, closes networking/HTTP before flushing the logger's Loki transport, and preserves fatal exit status.
 
-`/restart-service` inverts that direction deliberately: the HTTP layer *requests* a restart through a one-shot callback injected from `index.ts` (via `MqttNetworking`), and `index.ts` — the process owner — self-signals SIGTERM so the restart reuses the identical graceful path as an operator `docker stop`. The writer answers `202` only after the response is flushed (with a bounded fallback when the client disconnects first), fires the callback at most once per process, and fails startup when the token is set but weak (unset/empty disables the endpoint).
+`/restart-service` inverts that direction deliberately: the HTTP layer *requests* a restart through a one-shot callback injected from `index.ts` (via `MqttNetworking`), and `index.ts` — the process owner — self-signals SIGTERM so the restart reuses the identical graceful path as an operator `docker stop`. The writer answers `202` only after the response is flushed (with a bounded fallback when the client disconnects first), fires the callback at most once per process, and disables the endpoint — with a startup warning — when the token is unset, empty, or set-but-invalid; the constructor never fails on token state (DECISIONS.md D-11).
 
 ## Deployment boundaries
 

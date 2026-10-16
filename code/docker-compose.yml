@@ -27,10 +27,13 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      # Shared secret protecting /write-config and /reload-config. Sourced
-      # from the local .env file (git-ignored — never commit it). When unset
-      # the config endpoints stay open and the service logs a warning at
-      # startup; set it in .env to enable the x-config-token check.
+      # Shared secret enabling the config API (/read-config, /write-config,
+      # /reload-config) — the token is the switch, no separate enable flag.
+      # Sourced from the local .env file (git-ignored — never commit it).
+      # No valid token (unset, empty, or not at least 32 alphanumeric
+      # characters) -> the endpoints are DISABLED (503) and the service
+      # warns at startup; a valid token enables them (matching x-config-token
+      # header required, 401 otherwise).
       - SENSOR_TELEMETRY_CONFIG_TOKEN=${SENSOR_TELEMETRY_CONFIG_TOKEN}
       # Browser origins allowed to call the HTTP API cross-origin
       # (comma-separated, exact scheme://host:port matches). Omit or set to
@@ -38,13 +41,11 @@ services:
       # SENSOR_TELEMETRY_CONFIG_TOKEN authentication.
       - SENSOR_TELEMETRY_CORS_ORIGINS=http://10.10.10.50:3000
       # /restart-service (POST /restart-service with an Authorization:
-      # Bearer header) — enabled by the PRESENCE of a validated token;
-      # there is no separate enable flag. Three states: unset or empty ->
-      # endpoint disabled (503), the service runs normally; set, not
-      # whitespace-only, at least 32 bytes -> endpoint enabled; set but
-      # weak (whitespace-only or under 32 bytes) -> the service REFUSES TO
-      # START (crash-loops under the restart: unless-stopped policy above
-      # until fixed — a dummy value cannot disable the endpoint, unsetting
-      # it does). `:-` keeps an unset host .env value empty inside the
+      # Bearer header) — enabled by a VALID token (at least 32 alphanumeric
+      # characters, the same rule as the config token); there is no
+      # separate enable flag. Unset, empty, or invalid -> endpoint disabled
+      # (503), the service warns at startup and runs normally — a
+      # set-but-invalid value disables the endpoint, it never refuses to
+      # start. `:-` keeps an unset host .env value empty inside the
       # container. See code/.env.example and docs/CONFIGURATION.md.
       - RESTART_SERVICE_TOKEN=${RESTART_SERVICE_TOKEN:-}

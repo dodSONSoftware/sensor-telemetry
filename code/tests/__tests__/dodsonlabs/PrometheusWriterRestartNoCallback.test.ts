@@ -73,7 +73,10 @@ async function until(condition: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-const RESTART_TOKEN = "restart-nocb-token-1-0123456789abcdef";
+// Must satisfy the shared token validity rule (at least 32 alphanumeric
+// characters): the whole point of this file is a VALID token with the
+// shutdown hook missing, not an invalid token.
+const RESTART_TOKEN = "restartnocb0123456789abcdef0123456789abcdef";
 // The EXACT wire bytes of the disabled response — the same literal the
 // PrometheusWriterRestartDisabled suite asserts (see the file header).
 const DISABLED_503_BODY = '{"success":false,"message":"Restart endpoint is disabled."}';
