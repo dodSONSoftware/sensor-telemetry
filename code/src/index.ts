@@ -215,8 +215,24 @@ function validate_config(raw: unknown): z.infer<typeof configSchema> {
     networking?.updateConfig(newConfig);
   };
 
-  // create networking with callback passed during construction
-  networking = new MqttNetworking(config, appLogger, configSource, configChangeCallback);
+  // Restart callback for the /restart-service endpoint (injected into the
+  // PrometheusWriter through MqttNetworking; the HTTP layer only requests,
+  // it never owns lifecycle). index.ts owns the process, so the callback
+  // self-signals SIGTERM — the SAME graceful path an operator `docker
+  // stop` takes: cleanup, exit-code ownership, audit markers — and the
+  // Docker restart policy (restart: unless-stopped) then starts the same
+  // container with its persisted configuration. It is deliberately NOT a
+  // direct process.exit (would bypass MQTT disconnect and the Loki flush)
+  // and NOT a Docker call (the container has no Docker socket/CLI by
+  // design). A SIGTERM that lands while a shutdown is already in flight is
+  // absorbed by the shuttingDown guard above, so a restart request racing
+  // an operator stop cannot double-exit or mask a fatal exit code.
+  const requestRestart = (): void => {
+    process.kill(process.pid, "SIGTERM");
+  };
+
+  // create networking with callbacks passed during construction
+  networking = new MqttNetworking(config, appLogger, configSource, configChangeCallback, requestRestart);
 
   // get api port (for logging)
   const apiPort = config.apiPort;

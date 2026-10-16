@@ -103,7 +103,12 @@ export class MqttNetworking implements IMqttNetworking {
         config: z.infer<typeof configSchema>,
         logger: ILogger,
         configSource: string = "/app/configs/config.yml",
-        configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void
+        configChangeCallback?: (newConfig: z.infer<typeof configSchema>) => void,
+        // One-shot lifecycle callback for the PrometheusWriter's
+        // /restart-service endpoint (injected by index.ts, which owns
+        // process lifecycle). Threaded straight through to the writer:
+        // the HTTP layer may REQUEST a restart, never own the shutdown.
+        requestRestartCallback?: () => void
     ) {
         // Snapshot the raw restart-only config values once at startup (captured
         // before any /write-config or /reload-config can persist a different
@@ -139,8 +144,11 @@ export class MqttNetworking implements IMqttNetworking {
         // create mqtt client and connect to mqtt broker first
         this.mqtt_client = this.connect_to_mqtt_broker();
 
-        // Create PrometheusWriter with callback (registered before server starts)
-        this.promWriter = new PrometheusWriter(config, this.logger, configSource, configChangeCallback);
+        // Create PrometheusWriter with callbacks (registered before server
+        // starts). The restart callback may be undefined when the writer is
+        // constructed without one (tests): the endpoint then answers 500
+        // instead of pretending a restart was scheduled.
+        this.promWriter = new PrometheusWriter(config, this.logger, configSource, configChangeCallback, requestRestartCallback);
         this.promWriter.setMqttNetworking(this);
 
         // log-it

@@ -26,7 +26,7 @@ npm run test:coverage -- --runInBand
 | --- | --- |
 | Startup and shutdown | `StartupEvents`, `StartupFatalHandlers`, `dodsonlabs/StartupWait` — readiness, handler timing and fatal paths. |
 | MQTT | `MqttNetworking`, `MqttNetworkingRouting`, `MqttNetworkingRejectionThrottle` — subscription and routing, invalid payload handling, throttling, counters. |
-| Metrics / HTTP | `PrometheusWriter` and specialized `PrometheusWriter*` suites — source/firmware identity, collision handling, cardinality, stale eviction, default/service metrics, token/auth audit, rejected messages, listen failures. |
+| Metrics / HTTP | `PrometheusWriter` and specialized `PrometheusWriter*` suites — source/firmware identity, collision handling, cardinality, stale eviction, default/service metrics, token/auth audit, rejected messages, listen failures. `PrometheusWriterRestart` (+ `RestartDisabled` / `RestartCallbackFailure` / `RestartNoCallback`) cover `/restart-service`: auth, method/body/CORS rejections, single-flight, response-before-shutdown ordering, client disconnect, disabled state, fail-fast startup, and callback failure recovery. Each writer suite constructs exactly one real writer (prom-client global registry is per-Jest-file). |
 | Logging | `Logger`, `LokiTransport` — redaction, buffering, delivery failures and shutdown. |
 | Shared/config | `common/global`, `SystemFunctions`, `schemas/config` — helpers, startup schema and validation. |
 
@@ -39,8 +39,8 @@ npm run test:coverage -- --runInBand
 - **Config/schema:** unknown key rejection, port and broker validation, invalid topics, min source-label length, optional defaults, live versus restart-only diff, atomic write and reload.
 - **MQTT/device:** malformed JSON, oversized payload, non-object JSON, unsupported device, non-finite numbers, missing optional fields, range conversion, rejected reason counters, subscription failures.
 - **Metrics:** no family-name collision, source/firmware sanitization collision, capped identity and overflow counters, stale-series cleanup, bounded `path` labels, readiness transition.
-- **Security/logging:** token presence/absence, constant-time check behavior, CORS exact-origin filtering, audit secrecy, recursive secret redaction and input-log bounding.
-- **Lifecycle:** synchronous construction failure, repeated shutdown signals, shutdown deadline, MQTT cleanup, Loki failures and final flush ordering.
+- **Security/logging:** token presence/absence, constant-time check behavior, CORS exact-origin filtering, audit secrecy, recursive secret redaction and input-log bounding. Restart endpoint: enabled/disabled/flag-typo states, restart-token rejection (never the config token), audit secrecy, fail-fast construction.
+- **Lifecycle:** synchronous construction failure, repeated shutdown signals, shutdown deadline, MQTT cleanup, Loki failures and final flush ordering. Restart dispatch reuses the SIGTERM path (source-pinned in `StartupFatalHandlers`); a throwing callback must release the single-flight guard rather than escalate to the fatal handlers.
 
 ## Acceptance
 

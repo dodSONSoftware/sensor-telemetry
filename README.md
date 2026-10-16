@@ -2,7 +2,7 @@
 
 Series 4 — Sensor Telemetry Services
 
-**Release:** Copper Falcon — firmware 4.6.8.
+**Release:** Nickel Falcon — firmware 4.7.0.
 
 
 [![Dodson Labs](https://img.shields.io/badge/dodson%20labs-2026-purple?labelColor=gray)](https://github.com/dodSONSoftware)
@@ -197,6 +197,8 @@ The configuration schema is strict: unknown keys fail validation with an `Unreco
 |----------|-------------|---------|
 | `SENSOR_TELEMETRY_CORS_ORIGINS` | Comma-separated list of browser origins permitted to call the HTTP API cross-origin. Origins must match exactly, including scheme and port. When unset or set to `*`, all browser origins are allowed for backward compatibility. Example: `http://10.10.10.50:3000,https://sensors.home.lab` | unset (all origins allowed) |
 | `SENSOR_TELEMETRY_CONFIG_TOKEN` | Optional shared secret protecting `/read-config`, `/write-config`, and `/reload-config`. When set, those requests must carry a matching `x-config-token` header; when unset the endpoints remain open | unset (endpoints open) |
+| `SENSOR_TELEMETRY_RESTART_ENABLED` | Strict opt-in for `POST /restart-service`. Only the exact value `true` enables the endpoint (anything else — `yes`, `1`, `TRUE`, unset — disables it, so a typo can only ever turn the feature off) | unset (endpoint disabled) |
+| `SENSOR_TELEMETRY_RESTART_TOKEN` | Strong, distinct secret required by `POST /restart-service` (sent as the `x-restart-token` header). Never accepted as a fallback is `SENSOR_TELEMETRY_CONFIG_TOKEN`. **The service refuses to start when `SENSOR_TELEMETRY_RESTART_ENABLED=true` and this is absent/empty** | unset (feature disabled; required when the flag is `true`) |
 
 CORS is a browser-side policy, not authentication: it controls which cross-origin responses browser JavaScript may read. It does **not** replace `SENSOR_TELEMETRY_CONFIG_TOKEN` — the token is still required on the actual (non-preflight) request, and `OPTIONS` preflights are never authenticated because a browser preflight names `x-config-token` without sending its value. Requests with no `Origin` header (Prometheus, `curl`, Docker containers, other backend services) are unaffected by the allowlist.
 
@@ -229,6 +231,32 @@ x-config-token: <token>
 on `/read-config`, `/write-config`, and `/reload-config` requests. Mismatched or missing headers are rejected with `401`.
 
 The token must be treated as a secret and should not be committed to source control.
+
+## Service Restart (`POST /restart-service`)
+
+An optional, strictly opt-in endpoint that restarts the service's own container: it is active only when `SENSOR_TELEMETRY_RESTART_ENABLED=true` **and** `SENSOR_TELEMETRY_RESTART_TOKEN` is set (both are environment variables, never keys in `config.yml`, which `/read-config` would expose — see `code/.env.example` for the local `.env` template). Unlike the config token, there is no unauthenticated mode: with the flag set and no token, the service **refuses to start** rather than expose a one-request denial-of-service.
+
+An authenticated request schedules — it does not complete — a restart:
+
+```bash
+curl --fail-with-body -i -X POST \
+  -H "x-restart-token: ${SENSOR_TELEMETRY_RESTART_TOKEN}" \
+  -H 'Content-Length: 0' \
+  http://HOST:32002/restart-service
+```
+
+```
+HTTP/1.1 202 Accepted
+{ "success": true, "status": "restart_scheduled", "message": "Service restart requested" }
+```
+
+After the `202` response is delivered, the service runs its existing graceful SIGTERM shutdown (MQTT disconnect, HTTP drain, Loki flush, clean exit) and the Compose `restart: unless-stopped` policy starts the **same** container again with its persisted configuration. What this means in practice:
+
+- `202` means **scheduled**, not completed — and the response is best-effort (the process may exit before you finish reading it). Verify the new process with `GET /health` and `GET /ready`, and check the container's `RestartCount`/`StartedAt` with `docker inspect sensor-telemetry`.
+- It re-reads the persisted `config.yml`, so restart-only settings written earlier via `/write-config` apply on the next startup. It does **not** rebuild the image, update deployment files, or reconcile a changed `apiPort` (the Compose mapping and image healthcheck still pin 32002 — change those together).
+- It is not a replacement for operator control: a container you `docker stop`ped stays stopped, and a deployment without a restart policy will not come back after the endpoint stops the process.
+- Other outcomes: `401` missing/invalid `x-restart-token`, `405` wrong method, `409` a restart is already pending, `500` no restart mechanism available, `503` feature disabled, `400` non-empty body.
+- Treat the token as a high-privilege secret: anyone holding it can restart the service at will (a repeated-restart denial-of-service). Keep exposure LAN-only and never put the token in docs, shared command history, or logs.
 
 ## Sensor Log Messages
 
@@ -509,7 +537,7 @@ The cap limits **concurrently admitted** concrete sensor sources: the shared fal
 
 ## Graceful Shutdown
 
-The service handles SIGTERM and SIGINT signals gracefully. The signal handlers are registered **before** the startup wait for the Prometheus server to become ready, so a stop signal arriving during that startup window (rather than mid-serve) is also routed through the graceful close path instead of the platform's default immediate termination. The close timeout is a single deadline for the **entire** shutdown path: the Prometheus HTTP connection drain and the MQTT disconnect share one budget, so the process settles within roughly that window even when an in-flight HTTP request (e.g. a stuck `/write-config` body) would otherwise hold the server's drain open indefinitely. If the drain outlives the deadline the wait is abandoned (the process is exiting anyway), and if the deadline is already exhausted the MQTT client is force-disconnected without waiting.
+The service handles SIGTERM and SIGINT signals gracefully. The optional `POST /restart-service` endpoint [reuses this exact path](#service-restart-restart-service) — it self-signals SIGTERM through a callback owned by `index.ts` after the `202` response is delivered, never calling Docker or `process.exit` from the HTTP layer. The signal handlers are registered **before** the startup wait for the Prometheus server to become ready, so a stop signal arriving during that startup window (rather than mid-serve) is also routed through the graceful close path instead of the platform's default immediate termination. The close timeout is a single deadline for the **entire** shutdown path: the Prometheus HTTP connection drain and the MQTT disconnect share one budget, so the process settles within roughly that window even when an in-flight HTTP request (e.g. a stuck `/write-config` body) would otherwise hold the server's drain open indefinitely. If the drain outlives the deadline the wait is abandoned (the process is exiting anyway), and if the deadline is already exhausted the MQTT client is force-disconnected without waiting.
 1. Shuts down Prometheus server (drain bounded by the shared deadline)
 2. Closes MQTT connection with whatever time the drain left on the deadline
 3. Logs uptime statistics
@@ -526,6 +554,7 @@ The service handles SIGTERM and SIGINT signals gracefully. The signal handlers a
 | `/read-config` | GET | Read current configuration |
 | `/write-config` | POST | Update configuration |
 | `/reload-config` | GET | Reload configuration from disk |
+| `/restart-service` | POST | Schedule a graceful restart of this container (202; disabled unless `SENSOR_TELEMETRY_RESTART_ENABLED=true` with `SENSOR_TELEMETRY_RESTART_TOKEN` set, then requires the `x-restart-token` header) |
 
 Both persist the complete configuration but hot-apply only the runtime-effective keys — `logLevel`, `forwardSensorLogs`, `forwardSensorLogsLevel`, and `staleSourceRemovalSecs`. The remaining keys take effect on the next restart; see [Runtime vs Restart-Required Configuration](#runtime-vs-restart-required-configuration).
 

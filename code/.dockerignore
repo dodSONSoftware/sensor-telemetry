@@ -1,4 +1,8 @@
 node_modules
+# Local secrets (SENSOR_TELEMETRY_CONFIG_TOKEN,
+# SENSOR_TELEMETRY_RESTART_TOKEN): compose reads .env from the host, but
+# the build must never bake it into an image layer.
+.env
 tests
 *.test.ts
 *.md

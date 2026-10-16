@@ -45,3 +45,39 @@ describe("index.ts fatal handler registration order (regression)", () => {
     expect(src).toContain("networking?.close(");
   });
 });
+
+// Regression coverage for the /restart-service dispatch in src/index.ts.
+// The HTTP layer (PrometheusWriter) may REQUEST a restart but must never
+// own process lifecycle: index.ts owns the callback, and the callback must
+// self-signal SIGTERM so the existing graceful-shutdown path (cleanup,
+// exit-code ownership, audit markers) runs exactly as for an operator
+// `docker stop` — never a direct process.exit (would skip the MQTT
+// disconnect and the Loki flush) and never a Docker call (the container
+// has no Docker socket/CLI by design). The callback is registered through
+// the SIGTERM handler, which the ordering test above already pins to be
+// in place before the MqttNetworking construction that receives it.
+describe("index.ts /restart-service dispatch (regression)", () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, "..", "..", "src", "index.ts"),
+    "utf8"
+  );
+
+  it("reuses the SIGTERM graceful path via a self-signal, not process.exit", () => {
+    expect(src).toContain('process.on("SIGTERM"');
+    expect(src).toContain('process.kill(process.pid, "SIGTERM")');
+    // The callback body (const declaration through its closing brace —
+    // comments above it are excluded on purpose) must be a thin
+    // self-signal: no direct exit in the restart path; the exit is owned
+    // by shutdown()'s finally block.
+    const cbStart = src.indexOf("const requestRestart");
+    expect(cbStart).toBeGreaterThanOrEqual(0);
+    const callback = src.slice(cbStart, src.indexOf("};", cbStart));
+    expect(callback).toContain('process.kill(process.pid, "SIGTERM")');
+    expect(callback).not.toContain("process.exit");
+  });
+
+  it("passes the restart callback into the MqttNetworking construction", () => {
+    const construction = src.slice(src.indexOf("new MqttNetworking("), src.indexOf("new MqttNetworking(") + 200);
+    expect(construction).toContain("requestRestart");
+  });
+});
